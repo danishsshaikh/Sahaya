@@ -3,7 +3,6 @@ import { callLLM } from '@/lib/ai/llm';
 import { createStageAPI } from '@/lib/api/stage-api';
 import type { StageStore } from '@/lib/api/stage-api-types';
 import {
-  applyOutlineFallbacks,
   generateSceneOutlinesFromRequirements,
   generateSceneActions,
   generateSceneContent,
@@ -12,6 +11,7 @@ import {
   type AICallFn,
   type AgentInfo,
 } from '@openmaic/generation';
+import { applySahayaOutlineFeatureFallbacks } from '@/lib/generation/outline-generator';
 import { createSceneWithActions } from '@/lib/server/scene-generation';
 import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
 import { getDefaultAgents } from '@/lib/orchestration/registry/store';
@@ -559,8 +559,10 @@ export async function generateClassroom(
   let generatedScenes = 0;
 
   for (const [index, outline] of outlines.entries()) {
-    const safeOutline = applyOutlineFallbacks(outline, true, {
-      allowProceduralSkill: vocationalActive,
+    const safeOutline = applySahayaOutlineFeatureFallbacks(outline, {
+      taskEngineMode: vocationalActive,
+      hasLanguageModel: true,
+      logger: log,
     });
     const progressStart = 30 + Math.floor((index / Math.max(outlines.length, 1)) * 60);
 

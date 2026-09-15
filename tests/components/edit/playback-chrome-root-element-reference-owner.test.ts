@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   canvasProps: undefined as Record<string, unknown> | undefined,
   piEnabled: true,
   coursewareReferenceEnabled: true,
+  classroomChatEnabled: true,
+  disabledSceneIds: new Set<string>(),
+  chatAreaRender: vi.fn(),
   topicActive: false,
   engineMode: 'idle' as 'idle' | 'playing' | 'paused',
   engineOptions: undefined as
@@ -63,6 +66,12 @@ const secondScene = {
   ...scene,
   id: 'scene-2',
   title: 'Second slide',
+  order: 1,
+};
+const disabledScene = {
+  ...scene,
+  id: 'scene-disabled',
+  title: 'Disabled scene',
   order: 1,
 };
 const interactiveScene = {
@@ -233,6 +242,7 @@ vi.mock('@/components/chat/chat-area', async () => {
   const React = await import('react');
   return {
     ChatArea: React.forwardRef(function MockChatArea(_props, ref) {
+      mocks.chatAreaRender();
       React.useImperativeHandle(ref, () => ({
         sendMessage: mocks.sendMessage,
         endActiveSession: vi.fn().mockResolvedValue(undefined),
@@ -251,7 +261,7 @@ vi.mock('@/components/chat/chat-area', async () => {
         resumeBuffer: vi.fn(),
         resumeActiveSession: vi.fn(),
       }));
-      return null;
+      return React.createElement('aside', { 'data-testid': 'chat-area' });
     }),
   };
 });
@@ -344,6 +354,10 @@ vi.mock('@/lib/orchestration/registry/store', () => ({
 vi.mock('@/lib/config/feature-flags', () => ({
   isPiChatEnabled: () => mocks.piEnabled,
   isCoursewareReferenceEnabled: () => mocks.coursewareReferenceEnabled,
+  isClassroomChatEnabled: () => mocks.classroomChatEnabled,
+  isSceneEnabled: (candidate: { id?: string }) => !mocks.disabledSceneIds.has(candidate.id ?? ''),
+  filterEnabledScenes: <T extends { id?: string }>(scenes: T[]) =>
+    scenes.filter((candidate) => !mocks.disabledSceneIds.has(candidate.id ?? '')),
 }));
 
 import {
@@ -363,6 +377,9 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
     mocks.canvasProps = undefined;
     mocks.piEnabled = true;
     mocks.coursewareReferenceEnabled = true;
+    mocks.classroomChatEnabled = true;
+    mocks.disabledSceneIds = new Set<string>();
+    mocks.chatAreaRender.mockClear();
     mocks.topicActive = false;
     mocks.engineMode = 'idle';
     mocks.engineOptions = undefined;
@@ -433,6 +450,51 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
       ),
     );
     expect(container.querySelector('[data-testid="owner-pill"]')).toBeNull();
+  });
+
+  it('hides classroom chat when the Sahaya classroom chat flag is disabled', async () => {
+    mocks.classroomChatEnabled = false;
+
+    await renderOwner();
+
+    expect(container.querySelector('[data-testid="chat-area"]')).toBeNull();
+    expect(mocks.chatAreaRender).not.toHaveBeenCalled();
+    expect(mocks.canvasProps).toMatchObject({
+      chatCollapsed: true,
+      onToggleChat: undefined,
+    });
+    expect(mocks.roundtableProps).toMatchObject({
+      chatEnabled: false,
+      chatCollapsed: true,
+      onToggleChat: undefined,
+    });
+  });
+
+  it('skips disabled scenes in Sahaya playback navigation', async () => {
+    stageState.scenes = [scene, disabledScene, secondScene];
+    mocks.disabledSceneIds = new Set([disabledScene.id]);
+
+    await renderOwner();
+
+    act(() => {
+      (mocks.roundtableProps?.onNextSlide as (() => void) | undefined)?.();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(stageState.setCurrentSceneId).toHaveBeenCalledWith(secondScene.id);
+  });
+
+  it('moves off a disabled saved scene when an enabled fallback scene exists', async () => {
+    stageState.scenes = [disabledScene, secondScene];
+    stageState.currentSceneId = disabledScene.id;
+    mocks.disabledSceneIds = new Set([disabledScene.id]);
+
+    await renderOwner();
+
+    expect(stageState.setCurrentSceneId).toHaveBeenCalledWith(secondScene.id);
   });
 
   it('consumes one PPT picker arm synchronously and rejects a stale second pick', async () => {

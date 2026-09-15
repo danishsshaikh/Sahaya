@@ -22,6 +22,7 @@ import { useNearViewport } from '@/lib/hooks/use-near-viewport';
 import type { SceneType, SlideContent, InteractiveContent } from '@/lib/types/stage';
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { BrandWordmark } from '@/components/branding/brand-wordmark';
+import { filterEnabledScenes } from '@/lib/config/feature-flags';
 
 interface SceneSidebarProps {
   readonly collapsed: boolean;
@@ -49,6 +50,7 @@ export function SceneSidebar({
   const failedOutlines = useStageStore.use.failedOutlines();
   const viewportSize = useCanvasStore.use.viewportSize();
   const viewportRatio = useCanvasStore.use.viewportRatio();
+  const visibleScenes = filterEnabledScenes(scenes);
 
   const [retryingOutlineId, setRetryingOutlineId] = useState<string | null>(null);
 
@@ -147,7 +149,7 @@ export function SceneSidebar({
           data-testid="scene-list"
           className="flex-1 overflow-y-auto overflow-x-hidden p-2 space-y-2 scrollbar-hide pt-1"
         >
-          {scenes.map((scene, index) => {
+          {visibleScenes.map((scene, index) => {
             const isActive = currentSceneId === scene.id;
             const Icon = getSceneTypeIcon(scene.type);
             const isSlide = scene.type === 'slide';

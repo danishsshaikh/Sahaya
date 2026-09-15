@@ -40,6 +40,7 @@ import { resolveModelFromRequest } from '@/lib/server/resolve-model';
 import { sortDocumentImagesForVision } from '@/lib/document/bundle';
 import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
+import { applySahayaOutlineFeatureFallbacks } from '@/lib/generation/outline-generator';
 const log = createLogger('Outlines Stream');
 
 export const maxDuration = 300;
@@ -584,9 +585,14 @@ export async function POST(req: NextRequest) {
                     ...outline,
                     order: parsedOutlines.length + 1,
                   };
-                  const normalized = taskEngineMode
+                  const modeNormalized = taskEngineMode
                     ? normalizeTaskEngineOutline(enrichedBase, requirements.requirement)
                     : sanitizeNonTaskEngineOutline(enrichedBase);
+                  const normalized = applySahayaOutlineFeatureFallbacks(modeNormalized, {
+                    taskEngineMode,
+                    hasLanguageModel: Boolean(languageModel),
+                    logger: log,
+                  });
                   const enriched = ensureUniqueOutlineId(normalized, usedOutlineIds);
                   parsedOutlines.push(enriched);
 

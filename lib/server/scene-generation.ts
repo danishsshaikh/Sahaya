@@ -4,7 +4,6 @@
 
 import type { LanguageModel } from 'ai';
 import {
-  applyOutlineFallbacks,
   buildCompleteScene,
   buildLanguageText,
   generateSceneActions,
@@ -17,6 +16,7 @@ import {
   type SceneGenerationContext,
   type SceneOutline,
 } from '@openmaic/generation';
+import { applySahayaOutlineFeatureFallbacks } from '@/lib/generation/outline-generator';
 import { callLLM } from '@/lib/ai/llm';
 import type { StageAPI } from '@/lib/api/stage-api';
 import { createLogger } from '@/lib/logger';
@@ -64,7 +64,11 @@ export async function buildSceneFromOutline(
   userProfile?: string,
   languageDirective?: string,
 ): Promise<Scene | null> {
-  const safeOutline = applyOutlineFallbacks(outline, !!languageModel, { logger: log });
+  const safeOutline = applySahayaOutlineFeatureFallbacks(outline, {
+    taskEngineMode: false,
+    hasLanguageModel: !!languageModel,
+    logger: log,
+  });
   const langText = buildLanguageText(languageDirective, safeOutline.languageNote);
 
   onPhaseChange?.('content');
