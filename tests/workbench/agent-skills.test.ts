@@ -6,10 +6,11 @@
  * locale copy map (`workbench.skill.title.<handle>`); a user Skill's comes from
  * the registry, because its author named it.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   invalidateAgentSkills,
   refreshAgentSkillsForOwnerChange,
+  resetAgentSkillsRegistryForTests,
   skillDisplayLabel,
   skillLabelForId,
 } from '@/lib/workbench/agent-skills';
@@ -22,6 +23,11 @@ const skill = (id: string, title?: string) => ({
   description: `${id} description`,
   hasConstraints: false,
   source: 'builtin' as const,
+});
+
+afterEach(() => {
+  resetAgentSkillsRegistryForTests();
+  vi.unstubAllGlobals();
 });
 
 describe('skill display labels', () => {
@@ -63,36 +69,57 @@ describe('skill display labels', () => {
 
 describe('skill registry invalidation', () => {
   it('coalesces simultaneous consumers into one refresh request', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify([
-            {
-              id: 'usk_1',
-              name: 'my-demo',
-              title: '我的 Skill',
-              description: 'demo',
-              hasConstraints: false,
-              source: 'user',
-            },
-          ]),
-          { status: 200 },
+    let skillsRequests = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/agent/runtime') {
+        return new Response(JSON.stringify({ enabled: true, runtimeEnabled: true }), {
+          status: 200,
+        });
+      }
+      if (url !== '/api/agent/skills') throw new Error(`unexpected request: ${url}`);
+      skillsRequests += 1;
+      return new Response(
+        JSON.stringify(
+          skillsRequests === 1
+            ? []
+            : [
+                {
+                  id: 'usk_1',
+                  name: 'my-demo',
+                  title: '我的 Skill',
+                  description: 'demo',
+                  hasConstraints: false,
+                  source: 'user',
+                },
+              ],
         ),
+        { status: 200 },
       );
+    });
     vi.stubGlobal('fetch', fetchMock);
     await invalidateAgentSkills();
     const [a, b] = await Promise.all([invalidateAgentSkills(), invalidateAgentSkills()]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === '/api/agent/runtime'),
+    ).toHaveLength(2);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === '/api/agent/skills'),
+    ).toHaveLength(2);
     expect(a).toEqual(b);
     expect(a[0]).toMatchObject({ id: 'usk_1', name: 'my-demo', source: 'user' });
-    vi.unstubAllGlobals();
   });
 
   it('drops owner-scoped metadata before refreshing after an auth change', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/agent/runtime') {
+        return new Response(JSON.stringify({ enabled: true, runtimeEnabled: true }), {
+          status: 200,
+        });
+      }
+      if (url !== '/api/agent/skills') throw new Error(`unexpected request: ${url}`);
+      return new Response(
         JSON.stringify([
           {
             id: 'usk_new',
@@ -104,13 +131,34 @@ describe('skill registry invalidation', () => {
           },
         ]),
         { status: 200 },
-      ),
-    );
+      );
+    });
     vi.stubGlobal('fetch', fetchMock);
     await expect(refreshAgentSkillsForOwnerChange()).resolves.toMatchObject([
       { id: 'usk_new', name: 'my-new-owner' },
     ]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === '/api/agent/runtime'),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === '/api/agent/skills'),
+    ).toHaveLength(1);
+  });
+
+  it('does not call the skills route when the runtime probe says it is unavailable', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/agent/runtime') {
+        return new Response(JSON.stringify({ enabled: false, runtimeEnabled: false }), {
+          status: 200,
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(invalidateAgentSkills()).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    vi.unstubAllGlobals();
+    expect(fetchMock).toHaveBeenCalledWith('/api/agent/runtime');
   });
 });

@@ -1978,6 +1978,8 @@
       "emptyMySkills": "まだ自分のスキルがありません——チャットでエージェントに履歴から作成させましょう。",
       "emptyBuiltinSkills": "利用可能な内蔵スキルはありません。",
       "listFailed": "スキル一覧を読み込めませんでした",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "再試行",
       "badgeBuiltin": "内蔵",
       "badgeOwner": "マイスキル",

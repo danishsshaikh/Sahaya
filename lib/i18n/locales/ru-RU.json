@@ -1978,6 +1978,8 @@
       "emptyMySkills": "Своих навыков пока нет — попросите агента в чате создать один из истории.",
       "emptyBuiltinSkills": "Встроенные навыки недоступны.",
       "listFailed": "Не удалось загрузить список навыков",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "Повторить",
       "badgeBuiltin": "Встроенный",
       "badgeOwner": "Мой навык",

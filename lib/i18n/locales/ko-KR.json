@@ -1978,6 +1978,8 @@
       "emptyMySkills": "아직 자신의 스킬이 없습니다——채팅에서 에이전트에게 기록에서 만들어달라고 하세요.",
       "emptyBuiltinSkills": "사용 가능한 내장 스킬이 없습니다.",
       "listFailed": "스킬 목록을 불러오지 못했습니다",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "다시 시도",
       "badgeBuiltin": "내장",
       "badgeOwner": "내 스킬",

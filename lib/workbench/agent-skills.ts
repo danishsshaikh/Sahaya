@@ -19,9 +19,11 @@ export interface AgentSkillInfo {
   source: 'builtin' | 'user';
 }
 
-interface RegistrySnapshot {
+export interface RegistrySnapshot {
   skills: AgentSkillInfo[];
   loading: boolean;
+  /** null while probing, true when the runtime can serve skills, false when it cannot. */
+  runtimeAvailable: boolean | null;
   /**
    * Why the list is missing, as a COPY KEY rather than a sentence. This module is
    * the shared registry and has no locale of its own; the surface that renders
@@ -52,10 +54,12 @@ class AgentSkillsError extends Error {
   }
 }
 
-let snapshot: RegistrySnapshot = { skills: [], loading: true, error: null };
+let snapshot: RegistrySnapshot = { skills: [], loading: true, error: null, runtimeAvailable: null };
 let skillsCache: AgentSkillInfo[] | null = null;
 let skillsRequest: Promise<AgentSkillInfo[]> | null = null;
 let invalidationRequest: Promise<AgentSkillInfo[]> | null = null;
+let runtimeAvailabilityCache: boolean | null = null;
+let runtimeAvailabilityRequest: Promise<boolean> | null = null;
 let ownerEpoch = 0;
 const listeners = new Set<() => void>();
 
@@ -64,14 +68,47 @@ function publish(next: RegistrySnapshot) {
   for (const listener of listeners) listener();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function probeAgentRuntime(force = false): Promise<boolean> {
+  if (force) runtimeAvailabilityCache = null;
+  if (runtimeAvailabilityCache !== null) return Promise.resolve(runtimeAvailabilityCache);
+  if (runtimeAvailabilityRequest) return runtimeAvailabilityRequest;
+  runtimeAvailabilityRequest = fetch('/api/agent/runtime')
+    .then(async (res) => {
+      if (!res.ok) return false;
+      const body: unknown = await res.json().catch(() => null);
+      return isRecord(body) && body.enabled === true;
+    })
+    .catch(() => false)
+    .then((available) => {
+      runtimeAvailabilityCache = available;
+      return available;
+    })
+    .finally(() => {
+      runtimeAvailabilityRequest = null;
+    });
+  return runtimeAvailabilityRequest;
+}
+
 function loadAgentSkills(force = false): Promise<AgentSkillInfo[]> {
   if (force) skillsCache = null;
-  if (skillsCache) return Promise.resolve(skillsCache);
+  if (skillsCache !== null) return Promise.resolve(skillsCache);
   if (skillsRequest) return skillsRequest;
   const requestEpoch = ownerEpoch;
   publish({ ...snapshot, loading: true, error: null });
-  skillsRequest = fetch('/api/agent/skills')
-    .then(async (res) => {
+  skillsRequest = probeAgentRuntime(force)
+    .then(async (available) => {
+      if (requestEpoch !== ownerEpoch) return [];
+      if (!available) {
+        skillsCache = [];
+        publish({ skills: [], loading: false, error: null, runtimeAvailable: false });
+        return null;
+      }
+      publish({ ...snapshot, runtimeAvailable: true });
+      const res = await fetch('/api/agent/skills');
       if (!res.ok) throw new AgentSkillsError('workbench.skill.listFailed', String(res.status));
       return (await res.json()) as AgentSkillInfo[];
     })
@@ -79,16 +116,17 @@ function loadAgentSkills(force = false): Promise<AgentSkillInfo[]> {
       // An auth transition can happen while the old owner's request is in
       // flight. Its result still resolves for invalidation sequencing, but it
       // must never repopulate the shared owner-scoped registry.
+      if (list === null) return [];
       if (requestEpoch !== ownerEpoch) return list;
       skillsCache = list;
-      publish({ skills: list, loading: false, error: null });
+      publish({ skills: list, loading: false, error: null, runtimeAvailable: true });
       return list;
     })
     .catch((error: unknown) => {
       if (requestEpoch !== ownerEpoch) throw error;
       const copyKey =
         error instanceof AgentSkillsError ? error.copyKey : 'workbench.skill.listFailed';
-      publish({ skills: snapshot.skills, loading: false, error: copyKey });
+      publish({ skills: snapshot.skills, loading: false, error: copyKey, runtimeAvailable: true });
       throw error;
     })
     .finally(() => {
@@ -113,11 +151,22 @@ export function invalidateAgentSkills(): Promise<AgentSkillInfo[]> {
 export function refreshAgentSkillsForOwnerChange(): Promise<AgentSkillInfo[]> {
   ownerEpoch += 1;
   skillsCache = null;
-  publish({ skills: [], loading: true, error: null });
+  publish({ skills: [], loading: true, error: null, runtimeAvailable: null });
   const pending = [skillsRequest, invalidationRequest].filter(
     (request): request is Promise<AgentSkillInfo[]> => request !== null,
   );
   return Promise.allSettled(pending).then(() => loadAgentSkills(true));
+}
+
+export function resetAgentSkillsRegistryForTests() {
+  snapshot = { skills: [], loading: true, error: null, runtimeAvailable: null };
+  skillsCache = null;
+  skillsRequest = null;
+  invalidationRequest = null;
+  runtimeAvailabilityCache = null;
+  runtimeAvailabilityRequest = null;
+  ownerEpoch = 0;
+  listeners.clear();
 }
 
 export function useAgentSkills(): RegistrySnapshot & { reload: () => Promise<void> } {

@@ -1858,6 +1858,8 @@
       "emptyMySkills": "Bạn chưa có skill riêng — hãy nhờ agent trong hội thoại tạo một cái từ lịch sử.",
       "emptyBuiltinSkills": "Không có skill tích hợp nào.",
       "listFailed": "Không thể tải danh sách skill",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "Thử lại",
       "badgeBuiltin": "Tích hợp",
       "badgeOwner": "Skill của tôi",

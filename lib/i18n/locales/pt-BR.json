@@ -1978,6 +1978,8 @@
       "emptyMySkills": "Você ainda não tem skills próprios — peça ao agente, num chat, para criar um a partir do histórico.",
       "emptyBuiltinSkills": "Nenhum skill integrado disponível.",
       "listFailed": "Não foi possível carregar a lista de skills",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "Tentar novamente",
       "badgeBuiltin": "Integrado",
       "badgeOwner": "Meu skill",

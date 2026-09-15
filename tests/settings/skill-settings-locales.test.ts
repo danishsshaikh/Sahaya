@@ -37,6 +37,8 @@ const KEYS = [
   'settings.skills.emptyMySkills',
   'settings.skills.emptyBuiltinSkills',
   'settings.skills.listFailed',
+  'settings.skills.unavailableTitle',
+  'settings.skills.unavailableDescription',
   'settings.skills.retry',
   'settings.skills.badgeBuiltin',
   'settings.skills.badgeOwner',

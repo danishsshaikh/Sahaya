@@ -24,11 +24,105 @@ interface Bucket {
   quantity: number;
 }
 
-interface UsageResponse {
+export interface UsageResponse {
   totals: { requests: number; llmTokens: number };
   byModel: Bucket[];
   byDay: Bucket[];
   byKind: Bucket[];
+}
+
+const USAGE_KINDS = new Set<UsageKind>(['llm', 'image', 'video', 'tts', 'asr']);
+const USAGE_UNITS = new Set<UsageUnit>(['token', 'image', 'second', 'character']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function safeUsageKind(value: unknown, key: string): UsageKind {
+  if (typeof value === 'string' && USAGE_KINDS.has(value as UsageKind)) return value as UsageKind;
+  return USAGE_KINDS.has(key as UsageKind) ? (key as UsageKind) : 'llm';
+}
+
+function safeUsageUnit(value: unknown, kind: UsageKind): UsageUnit {
+  if (typeof value === 'string' && USAGE_UNITS.has(value as UsageUnit)) return value as UsageUnit;
+  if (kind === 'llm') return 'token';
+  if (kind === 'image') return 'image';
+  if (kind === 'video') return 'second';
+  return 'character';
+}
+
+function normalizeUsageBucket(value: unknown): Bucket | null {
+  if (!isRecord(value)) return null;
+  const rawKey = typeof value.key === 'string' && value.key.trim() ? value.key.trim() : 'unknown';
+  const kind = safeUsageKind(value.kind, rawKey);
+  return {
+    key: rawKey,
+    kind,
+    unit: safeUsageUnit(value.unit, kind),
+    requests: safeNumber(value.requests),
+    totalTokens: safeNumber(value.totalTokens),
+    quantity: safeNumber(value.quantity),
+  };
+}
+
+function normalizeBucketList(value: unknown): Bucket[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const bucket = normalizeUsageBucket(entry);
+        return bucket ? [bucket] : [];
+      })
+    : [];
+}
+
+export function normalizeUsageResponse(value: unknown): UsageResponse {
+  const body = isRecord(value) ? value : {};
+  const totals = isRecord(body.totals) ? body.totals : {};
+  const byDay = normalizeBucketList(body.byDay);
+  return {
+    totals: {
+      requests:
+        safeNumber(totals.requests) || byDay.reduce((sum, bucket) => sum + bucket.requests, 0),
+      llmTokens: safeNumber(totals.llmTokens),
+    },
+    byModel: normalizeBucketList(body.byModel),
+    byDay,
+    byKind: normalizeBucketList(body.byKind),
+  };
+}
+
+function clampChannel(value: number): number {
+  return Math.min(255, Math.max(0, Math.round(value)));
+}
+
+function parseRgbChannels(value: string, fallback: readonly [number, number, number]) {
+  const hex = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(value.trim());
+  if (hex) {
+    return [parseInt(hex[1]!, 16), parseInt(hex[2]!, 16), parseInt(hex[3]!, 16)] as const;
+  }
+  const channels = value
+    .trim()
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((part) => Number(part));
+  if (channels.length !== 3 || channels.some((channel) => !Number.isFinite(channel))) {
+    return fallback;
+  }
+  return channels.map(clampChannel) as [number, number, number];
+}
+
+export function chartSafeRgba(
+  cssRgbChannels: string,
+  alpha: number,
+  fallback: readonly [number, number, number] = [76, 35, 128],
+): string {
+  const [r, g, b] = parseRgbChannels(cssRgbChannels, fallback);
+  const safeAlpha = Math.min(1, Math.max(0, Number.isFinite(alpha) ? alpha : 1));
+  return `rgba(${r}, ${g}, ${b}, ${safeAlpha})`;
 }
 
 function fmtNum(n: number): string {
@@ -69,7 +163,7 @@ export function UsageDashboard() {
     try {
       const res = await fetch('/api/usage');
       const json = await res.json();
-      if (json.success !== false) setData(json as UsageResponse);
+      if (json.success !== false) setData(normalizeUsageResponse(json));
     } catch {
       // best-effort
     } finally {
@@ -157,8 +251,8 @@ export function UsageDashboard() {
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: `rgb(${brandShadow} / ${isDark ? 0.16 : 0.22})` },
-                { offset: 1, color: `rgb(${brandShadow} / 0.02)` },
+                { offset: 0, color: chartSafeRgba(brandShadow, isDark ? 0.16 : 0.22) },
+                { offset: 1, color: chartSafeRgba(brandShadow, 0.02) },
               ],
             },
           },

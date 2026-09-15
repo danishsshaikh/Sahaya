@@ -98,6 +98,17 @@ export default function ClassroomDetailPage() {
         log,
       });
 
+      if (!isCurrent()) return;
+      if (!isServerBackedMediaPersistence()) {
+        const localLoaded = useStageStore.getState().stage?.id === classroomId;
+        noteStageGenerationOwnership(classroomId, localLoaded ? 'owner' : 'unresolved');
+        noteStageOwnership(classroomId, localLoaded, localLoaded ? { isOwner: true } : null);
+        if (localLoaded) {
+          useStageStore.getState().setViewerAccess({ isOwner: true });
+        }
+        return;
+      }
+
       // The stage-meta sidecar resolves the viewer-facing ownership facts the
       // document seam does not carry — `isOwner` decides read-only vs editable
       // (see `stage-meta-client.ts`). Run it strictly AFTER the load applied
@@ -146,9 +157,7 @@ export default function ClassroomDetailPage() {
           return 'unresolved';
         }
       };
-      if (isEffectCurrent()) {
-        void retryWhileOwnershipUnresolved(askOwnership, { isCurrent: isEffectCurrent });
-      }
+      void retryWhileOwnershipUnresolved(askOwnership, { isCurrent: isEffectCurrent });
     },
     [classroomId, loadFromStorage],
   );

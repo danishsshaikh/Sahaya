@@ -1858,6 +1858,8 @@
       "emptyMySkills": "Noch keine eigenen Skills — lass den Agenten in einem Chat einen aus dem Verlauf erstellen.",
       "emptyBuiltinSkills": "Keine eingebauten Skills verfügbar.",
       "listFailed": "Die Skill-Liste konnte nicht geladen werden",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "Erneut versuchen",
       "badgeBuiltin": "Eingebaut",
       "badgeOwner": "Mein Skill",

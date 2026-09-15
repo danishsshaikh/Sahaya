@@ -1963,6 +1963,8 @@
       "emptyMySkills": "還沒有自己的技能——在對話裡讓 agent 從歷史建立一個。",
       "emptyBuiltinSkills": "暫無內建技能。",
       "listFailed": "技能列表載入失敗",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "重試",
       "badgeBuiltin": "內建",
       "badgeOwner": "我的技能",

@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     skills: [] as AgentSkillInfo[],
     loading: false,
     error: null as string | null,
+    runtimeAvailable: true as boolean | null,
   },
   reload: vi.fn(async () => {}),
 }));
@@ -44,6 +45,7 @@ vi.mock('@/lib/workbench/agent-skills', () => ({
     skills: mocks.registry.skills,
     loading: mocks.registry.loading,
     error: mocks.registry.error,
+    runtimeAvailable: mocks.registry.runtimeAvailable,
     reload: mocks.reload,
   }),
   skillTitle: (skill: { name: string; title?: string | null }) => skill.title ?? undefined,
@@ -83,6 +85,7 @@ afterEach(() => {
   mocks.registry.skills = [];
   mocks.registry.loading = false;
   mocks.registry.error = null;
+  mocks.registry.runtimeAvailable = true;
   mocks.reload.mockClear();
   for (const root of roots.splice(0)) act(() => root.unmount());
   document.body.replaceChildren();
@@ -149,6 +152,18 @@ describe('the skills list renders from the API shape', () => {
     expect(host.querySelector('[data-testid="skill-settings-list-retry"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="skill-settings-my-group"]')).toBeNull();
     expect(host.querySelector('[data-testid="skill-settings-builtin-group"]')).toBeNull();
+  });
+
+  it('renders runtime-unavailable state without upload or list controls', () => {
+    mocks.registry.runtimeAvailable = false;
+    const host = mount();
+
+    expect(host.querySelector('[data-testid="skill-settings-unavailable"]')).not.toBeNull();
+    expect(host.querySelector('[data-testid="skill-settings-upload"]')).toBeNull();
+    expect(host.querySelector('[data-testid="skill-settings-upload-input"]')).toBeNull();
+    expect(host.querySelector('[data-testid="skill-settings-my-group"]')).toBeNull();
+    expect(host.querySelector('[data-testid="skill-settings-builtin-group"]')).toBeNull();
+    expect(host.textContent).toContain('settings.skills.unavailableTitle');
   });
 });
 

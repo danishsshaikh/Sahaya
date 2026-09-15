@@ -1978,6 +1978,8 @@
       "emptyMySkills": "لا مهارات خاصة بك بعد — اطلب من الوكيل في محادثة إنشاء واحدة من السجل.",
       "emptyBuiltinSkills": "لا تتوفر مهارات مدمجة.",
       "listFailed": "تعذّر تحميل قائمة المهارات",
+      "unavailableTitle": "Skills are unavailable in this deployment",
+      "unavailableDescription": "The agent runtime is not configured, so skill upload and management are disabled.",
       "retry": "إعادة المحاولة",
       "badgeBuiltin": "مدمجة",
       "badgeOwner": "مهارتي",

@@ -185,15 +185,23 @@ describe('classroom surfaces feed the sidecar into the gate', () => {
     },
   );
 
-  it('does not ask the sidecar from the pane in browser-only mode', () => {
-    const source = readFileSync(
-      join(process.cwd(), 'components/classroom/ClassroomSurface.tsx'),
-      'utf8',
-    );
-    const fetchIndex = source.indexOf('void fetchStageMeta(');
+  it.each([
+    ['standalone classroom route', 'app/classroom/[id]/page.tsx', 'fetchStageMeta(classroomId)'],
+    ['classroom pane', 'components/classroom/ClassroomSurface.tsx', 'fetchStageMeta('],
+  ])('does not ask the sidecar from the %s in browser-only mode', (_label, path, needle) => {
+    const source = readFileSync(join(process.cwd(), path), 'utf8');
+    const fetchIndex = source.indexOf(needle);
     expect(fetchIndex).toBeGreaterThan(0);
-    const guardIndex = source.lastIndexOf('!isServerBackedMediaPersistence()) return;', fetchIndex);
+    const guardIndex = source.lastIndexOf('!isServerBackedMediaPersistence()', fetchIndex);
     expect(guardIndex).toBeGreaterThan(0);
+  });
+
+  it('only grants local legacy ownership to the classroom route after its stage is loaded', () => {
+    const source = readFileSync(join(process.cwd(), 'app/classroom/[id]/page.tsx'), 'utf8');
+    expect(source).toContain('useStageStore.getState().stage?.id === classroomId');
+    expect(source).toContain("localLoaded ? 'owner' : 'unresolved'");
+    expect(source).toContain('noteStageOwnership(classroomId, localLoaded');
+    expect(source).toContain('setViewerAccess({ isOwner: true })');
   });
 
   // The load is what brings a course into the server store the first time it is

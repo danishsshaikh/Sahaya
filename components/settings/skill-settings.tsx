@@ -337,7 +337,7 @@ function SkillDetailDialog({
  */
 export function SkillSettings() {
   const { t } = useI18n();
-  const { skills, loading, error, reload } = useAgentSkills();
+  const { skills, loading, error, runtimeAvailable, reload } = useAgentSkills();
   const [detailSkill, setDetailSkill] = useState<AgentSkillInfo | null>(null);
   const [deleteSkill, setDeleteSkill] = useState<AgentSkillInfo | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -400,6 +400,28 @@ export function SkillSettings() {
     },
     [reload],
   );
+
+  if (runtimeAvailable === false) {
+    return (
+      <div className="flex flex-col gap-4" data-testid="skill-settings-section">
+        <p className="text-xs text-muted-foreground">{t('settings.skills.description')}</p>
+        <section
+          data-testid="skill-settings-unavailable"
+          className="flex gap-3 rounded-lg border border-border bg-muted/35 px-3 py-3"
+        >
+          <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-foreground">
+              {t('settings.skills.unavailableTitle')}
+            </p>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {t('settings.skills.unavailableDescription')}
+            </p>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4" data-testid="skill-settings-section">
