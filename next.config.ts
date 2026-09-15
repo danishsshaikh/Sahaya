@@ -1,6 +1,10 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  // Next.js 16 blocks cross-origin dev assets/HMR by default. Sahaya testing uses
+  // rotating Cloudflare Quick Tunnel hostnames, so allow only that dev hostname
+  // family instead of hardcoding an individual temporary tunnel.
+  allowedDevOrigins: ['*.trycloudflare.com'],
   output: process.env.VERCEL ? undefined : 'standalone',
   outputFileTracingIncludes: {
     '/*': [

@@ -347,7 +347,7 @@ describe('the detail view', () => {
   });
 });
 
-describe('the settings surface mounts the section', () => {
+describe('the settings surface preserves the implementation but follows Sahaya visibility', () => {
   const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
 
   it('adds skills to the SettingsSection union', () => {
@@ -355,12 +355,31 @@ describe('the settings surface mounts the section', () => {
     expect(types).toContain("| 'skills'");
   });
 
-  it('renders SkillSettings when the skills section is active', () => {
+  it('keeps SkillSettings wired underneath the hidden nav entry', () => {
     const dialog = read('components/settings/index.tsx');
     expect(dialog).toContain("import { SkillSettings } from './skill-settings'");
     expect(dialog).toContain("{activeSection === 'skills' && <SkillSettings />}");
-    expect(dialog).toContain("setActiveSection('skills')");
-    expect(dialog).toContain("t('settings.skills.nav')");
     expect(dialog).toContain("t('settings.skills.title')");
+  });
+
+  it('matches local-build by keeping Skills out of the visible Sahaya Settings nav', () => {
+    const dialog = read('components/settings/index.tsx');
+    const navStart = dialog.indexOf('{/* Left Sidebar - Navigation */}');
+    const navEnd = dialog.indexOf('{/* Sidebar resize handle */}');
+    expect(navStart).toBeGreaterThan(0);
+    expect(navEnd).toBeGreaterThan(navStart);
+
+    const nav = dialog.slice(navStart, navEnd);
+    expect(nav).toContain("setActiveSection('token-plan')");
+    expect(nav).toContain("setActiveSection('providers')");
+    expect(nav).toContain("setActiveSection('image')");
+    expect(nav).toContain("setActiveSection('video')");
+    expect(nav).toContain("setActiveSection('tts')");
+    expect(nav).toContain("setActiveSection('asr')");
+    expect(nav).toContain("setActiveSection('pdf')");
+    expect(nav).toContain("setActiveSection('web-search')");
+    expect(nav).toContain("setActiveSection('general')");
+    expect(nav).not.toContain("setActiveSection('skills')");
+    expect(nav).not.toContain("t('settings.skills.nav')");
   });
 });

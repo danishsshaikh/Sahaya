@@ -80,3 +80,17 @@ describe('Security response headers', () => {
     });
   });
 });
+
+describe('Next.js development origin access', () => {
+  it('allows rotating Cloudflare Quick Tunnel origins without broad wildcards', async () => {
+    const config = await loadConfig();
+
+    expect(config.allowedDevOrigins).toContain('*.trycloudflare.com');
+    expect(config.allowedDevOrigins).not.toContain('*');
+    expect(config.allowedDevOrigins).not.toContain('http://*');
+    expect(config.allowedDevOrigins).not.toContain('https://*');
+    expect(config.allowedDevOrigins).not.toContain(
+      'venues-desktop-notified-showed.trycloudflare.com',
+    );
+  });
+});

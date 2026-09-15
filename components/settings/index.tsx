@@ -201,6 +201,24 @@ interface SettingsDialogProps {
   initialSection?: SettingsSection;
 }
 
+export const SAHAYA_VISIBLE_SETTINGS_SECTIONS = [
+  'token-plan',
+  'providers',
+  'image',
+  'video',
+  'tts',
+  'asr',
+  'pdf',
+  'web-search',
+  'general',
+] as const satisfies readonly SettingsSection[];
+
+function isSahayaVisibleSettingsSection(section: SettingsSection): boolean {
+  return SAHAYA_VISIBLE_SETTINGS_SECTIONS.includes(
+    section as (typeof SAHAYA_VISIBLE_SETTINGS_SECTIONS)[number],
+  );
+}
+
 export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
   const { t } = useI18n();
 
@@ -239,7 +257,7 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
     useState<VideoProviderId>(videoProviderId);
   // Navigate to initialSection when dialog opens
   useEffect(() => {
-    if (open && initialSection) {
+    if (open && initialSection && isSahayaVisibleSettingsSection(initialSection)) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync section from prop when dialog opens
       setActiveSection(initialSection);
     }
@@ -841,19 +859,6 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
             >
               <Search className="h-4 w-4 shrink-0" />
               <span className="truncate">{t('settings.webSearchSettings')}</span>
-            </button>
-
-            <button
-              onClick={() => setActiveSection('skills')}
-              className={cn(
-                'w-full flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors text-left min-w-0',
-                activeSection === 'skills'
-                  ? 'bg-primary/10 text-primary font-medium'
-                  : 'hover:bg-muted',
-              )}
-            >
-              <Sparkles className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t('settings.skills.nav')}</span>
             </button>
 
             <button
