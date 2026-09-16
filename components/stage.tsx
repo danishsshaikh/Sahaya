@@ -21,7 +21,6 @@ import {
   type PlaybackInteractivePickerState,
 } from '@/components/scene-renderers/InteractiveIframeHost';
 import { CHROME_EASE } from '@/lib/edit/transitions';
-import { enterEditMode } from '@/lib/edit/enter-edit-mode';
 import { isEditorPreloaded, preloadEditor } from '@/lib/edit/preload-editor';
 import { WorkbenchReturnControl } from '@/components/workbench/WorkbenchReturnControl';
 import { resolveClassroomBackControl } from '@/lib/workbench/classroom-back-control';
@@ -30,6 +29,7 @@ import { useWorkbenchStore } from '@/lib/workbench/session-store';
 import { useWorkbenchPanelState } from '@/lib/workbench/panel-context';
 import { workspaceHref } from '@/lib/workbench/workspace-panes';
 import { exitProPlaybackToStandalone } from '@/lib/workbench/pro-playback-exit';
+import { enterEditMode } from '@/lib/edit/enter-edit-mode';
 
 /**
  * Stage — top-level classroom container. Standalone classrooms dispatch
@@ -216,30 +216,6 @@ export function Stage({
     playbackRef.current?.cancelElementPick();
   }, []);
 
-  // Pro Switch handler. Edit→playback is a plain flip (PlaybackChromeRoot
-  // will mount fresh; its engine effect re-inits). Playback→edit must
-  // await SSE / engine / TTS teardown so PlaybackChromeRoot is quiescent
-  // before it unmounts.
-  const handleToggleEditMode = useCallback(async () => {
-    if (mode === 'edit') {
-      setMode('playback');
-      return;
-    }
-    // Load the editor chunk (fonts + slide surface) BEFORE flipping mode,
-    // so the edit chrome animates in with its content already present and
-    // the slide surface registered — no mid-animation pop-in / NOOP flash.
-    // Runs concurrently with teardown; the import is promise-cached so it's
-    // a no-op on subsequent toggles.
-    await enterEditMode({
-      teardown: () => playbackRef.current?.teardown(),
-      preload: preloadEditor,
-      activate: () => setMode('edit'),
-      // Stay in playback so the failure surfaces rather than half-entering
-      // edit mode.
-      onError: (error) => console.error('[Stage] Pro mode entry failed during teardown', error),
-    });
-  }, [mode, setMode]);
-
   // Auto-exit edit mode when the current scene becomes uneditable
   // (pending generation, no scenes, currently generating).
   useEffect(() => {
@@ -248,10 +224,6 @@ export function Stage({
     }
   }, [mode, isEditable, setMode]);
 
-  // Non-owners and transport-fenced owners get no Pro toggle at all: without a
-  // handler the Header/CommandBar omit the whole switch. Editable owners keep
-  // it while a scene is still generating (rendered disabled), matching upstream.
-  const toggleHandler = editorEnabled && canEditOwnedStage ? handleToggleEditMode : undefined;
   const setPanelOpen = useWorkbenchStore((s) => s.setPanelOpen);
 
   /**
@@ -291,9 +263,27 @@ export function Stage({
     });
   }, [router, setMode, stage?.id]);
 
+  const handleToggleEditMode = useCallback(async () => {
+    if (mode === 'edit') {
+      setMode('playback');
+      return;
+    }
+
+    await enterEditMode({
+      teardown: () => playbackRef.current?.teardown(),
+      preload: preloadEditor,
+      activate: () => setMode('edit'),
+      onError: (error) => console.error('[Stage] edit mode entry failed', error),
+    });
+  }, [mode, setMode]);
+
+  const normalEditToggleHandler =
+    editorEnabled && canEditOwnedStage ? handleToggleEditMode : undefined;
+
   // The embedded pane is already Pro-locked, so it has no switch. Full-screen
   // learning exposes an active switch whose off transition exits the workspace
-  // and returns to the ordinary classroom route.
+  // and returns to the ordinary classroom route. Standalone classrooms keep the
+  // normal Sahaya editor fallback independent of the Workbench entry gate.
   const chromeToggleHandler = hosted
     ? workbenchPlayback
       ? handleExitWorkbench
@@ -302,7 +292,7 @@ export function Stage({
       ? undefined
       : proWorkbenchEntry
         ? handleEnterWorkbench
-        : toggleHandler;
+        : normalEditToggleHandler;
 
   // Mode swap choreography — a clean opacity cross-fade. Both roots layer
   // via `absolute inset-0` so they coexist for the ~280ms window without
@@ -356,7 +346,7 @@ export function Stage({
             ref={playbackRef}
             onInteractivePickerChange={setPlaybackInteractivePicker}
             onRetryOutline={onRetryOutline}
-            canEnterProMode={workbenchPlayback || isEditable}
+            canEnterProMode={Boolean(chromeToggleHandler) && (workbenchPlayback || isEditable)}
             onEnterProMode={chromeToggleHandler}
             proModeActive={hosted && workbenchPlayback}
             headerBackControl={

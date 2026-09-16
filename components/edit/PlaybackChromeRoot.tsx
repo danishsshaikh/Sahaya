@@ -61,7 +61,13 @@ import type {
   PlaybackInteractiveComponentPick,
   PlaybackInteractivePickerState,
 } from '@/components/scene-renderers/InteractiveIframeHost';
-import { isCoursewareReferenceEnabled, isPiChatEnabled } from '@/lib/config/feature-flags';
+import {
+  filterEnabledScenes,
+  isClassroomChatEnabled,
+  isCoursewareReferenceEnabled,
+  isPiChatEnabled,
+  isSceneEnabled,
+} from '@/lib/config/feature-flags';
 import {
   getSlideElementPresentation,
   getSlideElementTypeLabel,
@@ -147,8 +153,11 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const generationComplete = useStageStore.use.generationComplete();
 
     const currentScene = getCurrentScene();
+    const classroomChatEnabled = isClassroomChatEnabled();
     const piChatEnabled = isPiChatEnabled();
     const coursewareReferenceEnabled = isCoursewareReferenceEnabled();
+    const currentSceneEnabled = currentScene ? isSceneEnabled(currentScene) : false;
+    const enabledScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
     const [elementPickActive, setElementPickActiveState] = useState(false);
     const elementPickActiveRef = useRef(false);
     const setElementPickActive = useCallback((next: boolean | ((active: boolean) => boolean)) => {
@@ -301,6 +310,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     const sendMessageWithElementReference = useCallback(
       (text: string, snapshot?: ElementReferenceSendSnapshot) => {
+        if (!classroomChatEnabled) return undefined;
         return chatAreaRef.current?.sendMessage(
           text,
           snapshot
@@ -323,7 +333,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             : undefined,
         );
       },
-      [setDraftElementReference],
+      [classroomChatEnabled, setDraftElementReference],
     );
 
     const updateCurrentPlaybackActionIndex = useCallback((actionIndex: number | null) => {
@@ -709,12 +719,14 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         if (currentScene && playbackStageId && !sessionResumeCursor.position) {
           try {
             const cursor = await loadCursor(playbackStageId);
+            const cursorActionIndex = cursor?.actionIndex;
             if (
               cursor?.sceneId === currentScene.id &&
-              currentScene.actions?.[cursor.actionIndex] &&
-              canJumpWithinReconstructablePrefix(currentScene.actions, 0, cursor.actionIndex)
+              cursorActionIndex !== undefined &&
+              currentScene.actions?.[cursorActionIndex] &&
+              canJumpWithinReconstructablePrefix(currentScene.actions, 0, cursorActionIndex)
             ) {
-              savedResumeActionIndex = cursor.actionIndex;
+              savedResumeActionIndex = cursorActionIndex;
             }
           } catch (error) {
             console.warn(`Failed to load playback cursor for stage ${playbackStageId}:`, error);
@@ -733,6 +745,13 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           lectureSpeech:
             savedResumeAction?.type === 'speech' ? (savedResumeAction as SpeechAction).text : null,
         });
+
+        if (!currentSceneEnabled) {
+          engineRef.current = null;
+          setEngineMode('idle');
+          activeSceneIdRef.current = currentSceneId;
+          return;
+        }
 
         // A slide scene with no actions is still playable: the engine dwells on it
         // (see resolvePlaybackCursor) so a freshly inserted / emptied blank slide
@@ -906,7 +925,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               setTimeout(() => {
                 const stageState = useStageStore.getState();
                 if (!useSettingsStore.getState().autoPlayLecture) return;
-                const allScenes = stageState.scenes;
+                const allScenes = filterEnabledScenes(stageState.scenes);
                 const curId = stageState.currentSceneId;
                 const idx = allScenes.findIndex((s) => s.id === curId);
                 if (idx >= 0 && idx < allScenes.length - 1) {
@@ -977,7 +996,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         cancelled = true;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps -- Only re-run when scene changes, functions are stable refs
-    }, [currentScene]);
+    }, [currentScene, currentSceneEnabled]);
 
     // Cleanup on unmount
     useEffect(() => {
@@ -1028,6 +1047,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
      */
     const handleDiscussionSSE = useCallback(
       async (topic: string, prompt?: string, agentId?: string) => {
+        if (!classroomChatEnabled) return;
         // Start discussion display in ChatArea (lecture speech is preserved independently)
         chatAreaRef.current?.startDiscussion({
           topic,
@@ -1042,15 +1062,16 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         // Optimistic thinking: show thinking dots immediately (same as onMessageSend)
         setThinkingState({ stage: 'director' });
       },
-      [],
+      [classroomChatEnabled],
     );
 
     // First speech text for idle display (extracted here for playbackView)
-    const firstSpeechText = useMemo(
-      () =>
-        currentScene?.actions?.find((a): a is SpeechAction => a.type === 'speech')?.text ?? null,
-      [currentScene],
-    );
+    const firstSpeechText = useMemo(() => {
+      const actions = (currentScene?.actions ?? []) as Action[];
+      return (
+        actions.find((action): action is SpeechAction => action.type === 'speech')?.text ?? null
+      );
+    }, [currentScene]);
 
     // Whether the speaking agent is a student (for bubble role derivation)
     const speakingStudentFlag = useMemo(() => {
@@ -1196,37 +1217,47 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       (outlines.length > 0 && scenes.length === outlines.length && generatingOutlines.length === 0);
     const canAdvanceToPendingSlot = hasNextPending || isCourseComplete;
 
+    useEffect(() => {
+      if (!currentScene || currentSceneEnabled || enabledScenes.length === 0) return;
+      const currentIndex = scenes.findIndex((scene) => scene.id === currentScene.id);
+      const nextEnabled =
+        enabledScenes.find(
+          (scene) => scenes.findIndex((candidate) => candidate.id === scene.id) > currentIndex,
+        ) ?? enabledScenes[0];
+      setCurrentSceneId(nextEnabled.id);
+    }, [currentScene, currentSceneEnabled, enabledScenes, scenes, setCurrentSceneId]);
+
     // previous scene (gated)
     const handlePreviousScene = useCallback(() => {
       if (isPendingScene) {
         // From pending page → go to last real scene
-        if (scenes.length > 0) {
-          void gatedSceneSwitch(scenes[scenes.length - 1].id);
+        if (enabledScenes.length > 0) {
+          void gatedSceneSwitch(enabledScenes[enabledScenes.length - 1].id);
         }
         return;
       }
-      const currentIndex = scenes.findIndex((s) => s.id === currentSceneId);
+      const currentIndex = enabledScenes.findIndex((s) => s.id === currentSceneId);
       if (currentIndex > 0) {
-        void gatedSceneSwitch(scenes[currentIndex - 1].id);
+        void gatedSceneSwitch(enabledScenes[currentIndex - 1].id);
       }
-    }, [currentSceneId, gatedSceneSwitch, isPendingScene, scenes]);
+    }, [currentSceneId, enabledScenes, gatedSceneSwitch, isPendingScene]);
 
     // next scene (gated)
     const handleNextScene = useCallback(() => {
       if (isPendingScene) return; // Already on pending, nowhere to go
-      const currentIndex = scenes.findIndex((s) => s.id === currentSceneId);
-      if (currentIndex < scenes.length - 1) {
-        void gatedSceneSwitch(scenes[currentIndex + 1].id);
+      const currentIndex = enabledScenes.findIndex((s) => s.id === currentSceneId);
+      if (currentIndex < enabledScenes.length - 1) {
+        void gatedSceneSwitch(enabledScenes[currentIndex + 1].id);
       } else if (canAdvanceToPendingSlot) {
         // On last real scene → advance to pending slot (generating or completion page)
         void gatedSceneSwitch(PENDING_SCENE_ID);
       }
-    }, [currentSceneId, gatedSceneSwitch, canAdvanceToPendingSlot, isPendingScene, scenes]);
+    }, [currentSceneId, enabledScenes, gatedSceneSwitch, canAdvanceToPendingSlot, isPendingScene]);
 
     const currentSceneIndex = isPendingScene
-      ? scenes.length
-      : scenes.findIndex((s) => s.id === currentSceneId);
-    const totalScenesCount = scenes.length + (canAdvanceToPendingSlot ? 1 : 0);
+      ? enabledScenes.length
+      : enabledScenes.findIndex((s) => s.id === currentSceneId);
+    const totalScenesCount = enabledScenes.length + (canAdvanceToPendingSlot ? 1 : 0);
     const showElementReference = piChatEnabled && coursewareReferenceEnabled && mode === 'playback';
     const canPickSlideElement = Boolean(
       showElementReference &&
@@ -1585,6 +1616,14 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       const roundtableHeight = mode === 'playback' && !isPresenting ? 192 : 0;
       return `calc(100% - ${headerHeight + roundtableHeight}px)`;
     })();
+    const rightPanelCollapsed = isPresenting
+      ? chatAreaCollapsed
+      : classroomChatEnabled
+        ? chatAreaCollapsed
+        : false;
+    const toggleRightPanel = classroomChatEnabled
+      ? () => setChatAreaCollapsed(!chatAreaCollapsed)
+      : undefined;
 
     return (
       <div
@@ -1651,9 +1690,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               softCloseDeadline={softCloseDeadline}
               whiteboardOpen={whiteboardOpen}
               sidebarCollapsed={sidebarCollapsed}
-              chatCollapsed={chatAreaCollapsed}
+              chatCollapsed={rightPanelCollapsed}
               onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-              onToggleChat={() => setChatAreaCollapsed(!chatAreaCollapsed)}
+              onToggleChat={toggleRightPanel}
               onPrevSlide={handlePreviousScene}
               onNextSlide={handleNextScene}
               onPlayPause={handlePlayPause}
@@ -1698,6 +1737,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             >
               <Roundtable
                 mode={mode}
+                chatEnabled={classroomChatEnabled}
                 initialParticipants={participants}
                 playbackView={playbackView}
                 currentSpeech={liveSpeech}
@@ -1726,6 +1766,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                 softCloseDeadline={softCloseDeadline}
                 isTopicPending={isTopicPending}
                 onMessageSend={async (msg) => {
+                  if (!classroomChatEnabled) return;
                   const draft = showElementReference ? draftElementReferenceRef.current : null;
                   const elementReferenceSnapshot: ElementReferenceSendSnapshot | undefined = draft
                     ? {
@@ -1832,9 +1873,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                 scenesCount={totalScenesCount}
                 whiteboardOpen={whiteboardOpen}
                 sidebarCollapsed={sidebarCollapsed}
-                chatCollapsed={chatAreaCollapsed}
+                chatCollapsed={rightPanelCollapsed}
                 onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-                onToggleChat={() => setChatAreaCollapsed(!chatAreaCollapsed)}
+                onToggleChat={toggleRightPanel}
                 onPrevSlide={handlePreviousScene}
                 onNextSlide={handleNextScene}
                 onWhiteboardClose={handleWhiteboardToggle}
@@ -1867,16 +1908,15 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           )}
         </div>
 
-        {/* Chat Area — playback / autonomous always renders it here; Pro
-          (edit) mode unmounts this whole PlaybackChromeRoot, so the
-          edit branch has no chat. */}
+        {/* Notes/current narration live here even when learner Chat is disabled. */}
         <div className="flex shrink-0">
           <ChatArea
             ref={chatAreaRef}
+            chatEnabled={classroomChatEnabled}
             width={chatAreaWidth}
             onWidthChange={setChatAreaWidth}
-            collapsed={chatAreaCollapsed}
-            onCollapseChange={setChatAreaCollapsed}
+            collapsed={rightPanelCollapsed}
+            onCollapseChange={classroomChatEnabled ? setChatAreaCollapsed : undefined}
             activeBubbleId={activeBubbleId}
             onActiveBubble={(id) => setActiveBubbleId(id)}
             currentSceneId={currentSceneId}

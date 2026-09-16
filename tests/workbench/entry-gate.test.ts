@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isWorkbenchEntryEnabled } from '@/lib/workbench/entry-gate';
 
@@ -46,5 +48,24 @@ describe('workbench entry gate', () => {
     process.env.DATABASE_URL = 'postgres://runtime';
 
     expect(isWorkbenchEntryEnabled()).toBe(true);
+  });
+
+  it('keeps Workbench launch behind the entry gate while preserving normal editor fallback', () => {
+    const stageSource = readFileSync(join(process.cwd(), 'components/stage.tsx'), 'utf8');
+
+    expect(stageSource).toContain("from '@/lib/edit/enter-edit-mode'");
+    expect(stageSource).toContain(
+      'const normalEditToggleHandler =\n    editorEnabled && canEditOwnedStage ? handleToggleEditMode : undefined;',
+    );
+    expect(stageSource).toContain('const chromeToggleHandler = hosted');
+    expect(stageSource).not.toContain(
+      'proWorkbenchEntry\n        ? handleEnterWorkbench\n        : undefined',
+    );
+    expect(stageSource).toContain(
+      'proWorkbenchEntry\n        ? handleEnterWorkbench\n        : normalEditToggleHandler',
+    );
+    expect(stageSource).toContain(
+      'canEnterProMode={Boolean(chromeToggleHandler) && (workbenchPlayback || isEditable)}',
+    );
   });
 });

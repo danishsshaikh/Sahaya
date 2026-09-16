@@ -7,10 +7,16 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LoadedPrompt, PromptId, PromptVariableDefaults, SnippetId } from './types.js';
 
+function modulePathFromImportMetaUrl(url: string): string {
+  if (url.startsWith('file:')) return fileURLToPath(url);
+  if (url.startsWith('/@fs/')) return url.slice('/@fs'.length);
+  return url;
+}
+
 // `src/prompts` and `dist/prompts` have the same depth below the package root.
 // Resolve from this module's URL via path operations so app bundlers do not
 // mistake the Markdown directory for a statically imported module asset.
-const DEFAULT_PROMPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const DEFAULT_PROMPTS_DIR = resolve(dirname(modulePathFromImportMetaUrl(import.meta.url)), '../..');
 
 const PROMPT_VARIABLE_DEFAULTS = {
   'pbl-actions': {
