@@ -241,8 +241,8 @@ vi.mock('@/components/roundtable', async () => {
 vi.mock('@/components/chat/chat-area', async () => {
   const React = await import('react');
   return {
-    ChatArea: React.forwardRef(function MockChatArea(_props, ref) {
-      mocks.chatAreaRender();
+    ChatArea: React.forwardRef(function MockChatArea(props: Record<string, unknown>, ref) {
+      mocks.chatAreaRender(props);
       React.useImperativeHandle(ref, () => ({
         sendMessage: mocks.sendMessage,
         endActiveSession: vi.fn().mockResolvedValue(undefined),
@@ -261,7 +261,19 @@ vi.mock('@/components/chat/chat-area', async () => {
         resumeBuffer: vi.fn(),
         resumeActiveSession: vi.fn(),
       }));
-      return React.createElement('aside', { 'data-testid': 'chat-area' });
+      return React.createElement(
+        'aside',
+        { 'data-testid': 'notes-panel' },
+        React.createElement('div', { 'data-testid': 'notes-tab' }, 'Notes'),
+        props.chatEnabled
+          ? React.createElement(
+              React.Fragment,
+              null,
+              React.createElement('div', { 'data-testid': 'chat-tab' }, 'Chat'),
+              React.createElement('div', { 'data-testid': 'chat-session-content' }, 'Chat body'),
+            )
+          : null,
+      );
     }),
   };
 });
@@ -452,13 +464,19 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
     expect(container.querySelector('[data-testid="owner-pill"]')).toBeNull();
   });
 
-  it('hides classroom chat when the Sahaya classroom chat flag is disabled', async () => {
+  it('keeps Notes mounted but hides classroom chat when the Sahaya flag is disabled', async () => {
     mocks.classroomChatEnabled = false;
 
     await renderOwner();
 
-    expect(container.querySelector('[data-testid="chat-area"]')).toBeNull();
-    expect(mocks.chatAreaRender).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="notes-panel"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="notes-tab"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-tab"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-session-content"]')).toBeNull();
+    expect(mocks.chatAreaRender).toHaveBeenCalledOnce();
+    expect(mocks.chatAreaRender).toHaveBeenCalledWith(
+      expect.objectContaining({ chatEnabled: false }),
+    );
     expect(mocks.canvasProps).toMatchObject({
       chatCollapsed: true,
       onToggleChat: undefined,
@@ -467,6 +485,29 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
       chatEnabled: false,
       chatCollapsed: true,
       onToggleChat: undefined,
+    });
+  });
+
+  it('keeps upstream classroom chat available when the Sahaya flag is enabled', async () => {
+    mocks.classroomChatEnabled = true;
+
+    await renderOwner();
+
+    expect(container.querySelector('[data-testid="notes-panel"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="notes-tab"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-tab"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-session-content"]')).not.toBeNull();
+    expect(mocks.chatAreaRender).toHaveBeenCalledWith(
+      expect.objectContaining({ chatEnabled: true }),
+    );
+    expect(mocks.canvasProps).toMatchObject({
+      chatCollapsed: false,
+      onToggleChat: expect.any(Function),
+    });
+    expect(mocks.roundtableProps).toMatchObject({
+      chatEnabled: true,
+      chatCollapsed: false,
+      onToggleChat: expect.any(Function),
     });
   });
 

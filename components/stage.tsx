@@ -29,6 +29,7 @@ import { useWorkbenchStore } from '@/lib/workbench/session-store';
 import { useWorkbenchPanelState } from '@/lib/workbench/panel-context';
 import { workspaceHref } from '@/lib/workbench/workspace-panes';
 import { exitProPlaybackToStandalone } from '@/lib/workbench/pro-playback-exit';
+import { enterEditMode } from '@/lib/edit/enter-edit-mode';
 
 /**
  * Stage — top-level classroom container. Standalone classrooms dispatch
@@ -262,9 +263,27 @@ export function Stage({
     });
   }, [router, setMode, stage?.id]);
 
+  const handleToggleEditMode = useCallback(async () => {
+    if (mode === 'edit') {
+      setMode('playback');
+      return;
+    }
+
+    await enterEditMode({
+      teardown: () => playbackRef.current?.teardown(),
+      preload: preloadEditor,
+      activate: () => setMode('edit'),
+      onError: (error) => console.error('[Stage] edit mode entry failed', error),
+    });
+  }, [mode, setMode]);
+
+  const normalEditToggleHandler =
+    editorEnabled && canEditOwnedStage ? handleToggleEditMode : undefined;
+
   // The embedded pane is already Pro-locked, so it has no switch. Full-screen
   // learning exposes an active switch whose off transition exits the workspace
-  // and returns to the ordinary classroom route.
+  // and returns to the ordinary classroom route. Standalone classrooms keep the
+  // normal Sahaya editor fallback independent of the Workbench entry gate.
   const chromeToggleHandler = hosted
     ? workbenchPlayback
       ? handleExitWorkbench
@@ -273,7 +292,7 @@ export function Stage({
       ? undefined
       : proWorkbenchEntry
         ? handleEnterWorkbench
-        : undefined;
+        : normalEditToggleHandler;
 
   // Mode swap choreography — a clean opacity cross-fade. Both roots layer
   // via `absolute inset-0` so they coexist for the ~280ms window without

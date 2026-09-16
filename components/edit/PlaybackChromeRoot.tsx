@@ -310,6 +310,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     const sendMessageWithElementReference = useCallback(
       (text: string, snapshot?: ElementReferenceSendSnapshot) => {
+        if (!classroomChatEnabled) return undefined;
         return chatAreaRef.current?.sendMessage(
           text,
           snapshot
@@ -332,7 +333,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             : undefined,
         );
       },
-      [setDraftElementReference],
+      [classroomChatEnabled, setDraftElementReference],
     );
 
     const updateCurrentPlaybackActionIndex = useCallback((actionIndex: number | null) => {
@@ -1046,6 +1047,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
      */
     const handleDiscussionSSE = useCallback(
       async (topic: string, prompt?: string, agentId?: string) => {
+        if (!classroomChatEnabled) return;
         // Start discussion display in ChatArea (lecture speech is preserved independently)
         chatAreaRef.current?.startDiscussion({
           topic,
@@ -1060,7 +1062,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         // Optimistic thinking: show thinking dots immediately (same as onMessageSend)
         setThinkingState({ stage: 'director' });
       },
-      [],
+      [classroomChatEnabled],
     );
 
     // First speech text for idle display (extracted here for playbackView)
@@ -1758,6 +1760,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                 softCloseDeadline={softCloseDeadline}
                 isTopicPending={isTopicPending}
                 onMessageSend={async (msg) => {
+                  if (!classroomChatEnabled) return;
                   const draft = showElementReference ? draftElementReferenceRef.current : null;
                   const elementReferenceSnapshot: ElementReferenceSendSnapshot | undefined = draft
                     ? {
@@ -1901,81 +1904,78 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           )}
         </div>
 
-        {/* Chat Area — playback / autonomous always renders it here; Pro
-          (edit) mode unmounts this whole PlaybackChromeRoot, so the
-          edit branch has no chat. */}
-        {classroomChatEnabled && (
-          <div className="flex shrink-0">
-            <ChatArea
-              ref={chatAreaRef}
-              width={chatAreaWidth}
-              onWidthChange={setChatAreaWidth}
-              collapsed={chatAreaCollapsed}
-              onCollapseChange={setChatAreaCollapsed}
-              activeBubbleId={activeBubbleId}
-              onActiveBubble={(id) => setActiveBubbleId(id)}
-              currentSceneId={currentSceneId}
-              currentActionIndex={currentPlaybackActionIndex}
-              canJumpToAction={canJumpToAction}
-              onJumpToAction={(sceneId, actionIndex) => {
-                void handleJumpToAction(sceneId, actionIndex);
-              }}
-              onLiveSpeech={(text, agentId) => {
-                // Capture epoch at call time — discard if scene has changed since
-                const epoch = sceneEpochRef.current;
-                // Use queueMicrotask to let any pending scene-switch reset settle first
-                queueMicrotask(() => {
-                  if (sceneEpochRef.current !== epoch) return; // stale — scene changed
-                  setLiveSpeech(text);
-                  if (agentId !== undefined) {
-                    setSpeakingAgentId(agentId);
-                  }
-                  if (text !== null || agentId) {
-                    setChatIsStreaming(true);
-                    setChatSessionType(chatAreaRef.current?.getActiveSessionType?.() ?? null);
-                    setIsTopicPending(false);
-                  } else if (text === null && agentId === null) {
-                    setChatIsStreaming(false);
-                    // Don't clear chatSessionType here — it's needed by the stop
-                    // button when director cues user (cue_user → done → liveSpeech null).
-                    // It gets properly cleared in doSessionCleanup and scene change.
-                  }
-                });
-              }}
-              onSpeechProgress={(ratio) => {
-                const epoch = sceneEpochRef.current;
-                queueMicrotask(() => {
-                  if (sceneEpochRef.current !== epoch) return;
-                  setSpeechProgress(ratio);
-                });
-              }}
-              onThinking={(state) => {
-                const epoch = sceneEpochRef.current;
-                queueMicrotask(() => {
-                  if (sceneEpochRef.current !== epoch) return;
-                  setThinkingState(state);
-                });
-              }}
-              onCueUser={(_fromAgentId, _prompt) => {
-                setIsCueUser(true);
-              }}
-              onLiveSessionError={handleLiveSessionError}
-              onSoftCloseSession={() => {
-                setThinkingState(null);
-                setSpeechProgress(null);
-                setIsCueUser(false);
-                setActiveBubbleId(null);
-              }}
-              onSoftClosingChange={(softClosing, deadline) => {
-                setChatIsSoftClosing(softClosing);
-                setSoftCloseDeadline(deadline);
-              }}
-              onStopSession={handleSessionStop}
-              onSegmentSealed={discussionTTS.handleSegmentSealed}
-              shouldHoldAfterReveal={discussionTTS.shouldHold}
-            />
-          </div>
-        )}
+        {/* Notes/current narration live here even when learner Chat is disabled. */}
+        <div className="flex shrink-0">
+          <ChatArea
+            ref={chatAreaRef}
+            chatEnabled={classroomChatEnabled}
+            width={chatAreaWidth}
+            onWidthChange={setChatAreaWidth}
+            collapsed={chatAreaCollapsed}
+            onCollapseChange={setChatAreaCollapsed}
+            activeBubbleId={activeBubbleId}
+            onActiveBubble={(id) => setActiveBubbleId(id)}
+            currentSceneId={currentSceneId}
+            currentActionIndex={currentPlaybackActionIndex}
+            canJumpToAction={canJumpToAction}
+            onJumpToAction={(sceneId, actionIndex) => {
+              void handleJumpToAction(sceneId, actionIndex);
+            }}
+            onLiveSpeech={(text, agentId) => {
+              // Capture epoch at call time — discard if scene has changed since
+              const epoch = sceneEpochRef.current;
+              // Use queueMicrotask to let any pending scene-switch reset settle first
+              queueMicrotask(() => {
+                if (sceneEpochRef.current !== epoch) return; // stale — scene changed
+                setLiveSpeech(text);
+                if (agentId !== undefined) {
+                  setSpeakingAgentId(agentId);
+                }
+                if (text !== null || agentId) {
+                  setChatIsStreaming(true);
+                  setChatSessionType(chatAreaRef.current?.getActiveSessionType?.() ?? null);
+                  setIsTopicPending(false);
+                } else if (text === null && agentId === null) {
+                  setChatIsStreaming(false);
+                  // Don't clear chatSessionType here — it's needed by the stop
+                  // button when director cues user (cue_user → done → liveSpeech null).
+                  // It gets properly cleared in doSessionCleanup and scene change.
+                }
+              });
+            }}
+            onSpeechProgress={(ratio) => {
+              const epoch = sceneEpochRef.current;
+              queueMicrotask(() => {
+                if (sceneEpochRef.current !== epoch) return;
+                setSpeechProgress(ratio);
+              });
+            }}
+            onThinking={(state) => {
+              const epoch = sceneEpochRef.current;
+              queueMicrotask(() => {
+                if (sceneEpochRef.current !== epoch) return;
+                setThinkingState(state);
+              });
+            }}
+            onCueUser={(_fromAgentId, _prompt) => {
+              setIsCueUser(true);
+            }}
+            onLiveSessionError={handleLiveSessionError}
+            onSoftCloseSession={() => {
+              setThinkingState(null);
+              setSpeechProgress(null);
+              setIsCueUser(false);
+              setActiveBubbleId(null);
+            }}
+            onSoftClosingChange={(softClosing, deadline) => {
+              setChatIsSoftClosing(softClosing);
+              setSoftCloseDeadline(deadline);
+            }}
+            onStopSession={handleSessionStop}
+            onSegmentSealed={discussionTTS.handleSegmentSealed}
+            shouldHoldAfterReveal={discussionTTS.shouldHold}
+          />
+        </div>
 
         {/* Scene switch confirmation dialog */}
         <AlertDialog

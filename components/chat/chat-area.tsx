@@ -30,6 +30,7 @@ import { LectureNotesView } from './lecture-notes-view';
 
 interface ChatAreaProps {
   className?: string;
+  chatEnabled?: boolean;
   width?: number;
   onWidthChange?: (width: number) => void;
   collapsed?: boolean;
@@ -88,6 +89,7 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
   (
     {
       className,
+      chatEnabled = true,
       width = DEFAULT_WIDTH,
       onWidthChange,
       collapsed = false,
@@ -171,15 +173,20 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
     );
 
     useEffect(() => {
+      if (!chatEnabled) {
+        onSoftClosingChange?.(false);
+        return;
+      }
       onSoftClosingChange?.(
         Boolean(softClosingChatSession),
         softClosingChatSession?.softCloseDeadline,
       );
-    }, [softClosingChatSession, onSoftClosingChange]);
+    }, [chatEnabled, softClosingChatSession, onSoftClosingChange]);
 
     // Wrap endSession for QA/Discussion: also notify parent for engine cleanup
     const handleEndSession = useCallback(
       async (sessionId: string) => {
+        if (!chatEnabled) return;
         const session = chatSessions.find((candidate) => candidate.id === sessionId);
         if (session?.status === 'soft-closing') {
           const payload = await confirmSoftClosingSession(sessionId);
@@ -189,24 +196,66 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
         await endSession(sessionId, MANUAL_STOP_END_OPTIONS);
         onStopSession?.({ sessionId, source: 'manual_stop' });
       },
-      [chatSessions, confirmSoftClosingSession, endSession, onStopSession],
+      [chatEnabled, chatSessions, confirmSoftClosingSession, endSession, onStopSession],
     );
 
     const handleStopActiveSession = useCallback(async () => {
+      if (!chatEnabled) return;
       const active = chatSessions.find(
         (session) => session.status === 'active' || session.status === 'soft-closing',
       );
       if (active) await handleEndSession(active.id);
-    }, [chatSessions, handleEndSession]);
+    }, [chatEnabled, chatSessions, handleEndSession]);
 
     const handleContinueActiveSoftClosingSession = useCallback((): boolean => {
+      if (!chatEnabled) return false;
       const softClosing = chatSessions.find((session) => session.status === 'soft-closing');
       return softClosing ? continueSoftClosingSession(softClosing.id) : false;
-    }, [chatSessions, continueSoftClosingSession]);
+    }, [chatEnabled, chatSessions, continueSoftClosingSession]);
 
-    const switchToTab = useCallback((tab: 'lecture' | 'chat') => {
-      setActiveTab(tab);
-    }, []);
+    const handleTabChange = useCallback(
+      (tab: string) => {
+        if (tab === 'chat' && !chatEnabled) return;
+        setActiveTab(tab === 'chat' ? 'chat' : 'lecture');
+      },
+      [chatEnabled],
+    );
+
+    const switchToTab = useCallback(
+      (tab: 'lecture' | 'chat') => {
+        if (tab === 'chat' && !chatEnabled) return;
+        setActiveTab(tab);
+      },
+      [chatEnabled],
+    );
+
+    const handleSendMessage = useCallback(
+      async (content: string, options?: ChatMessageSendOptions) => {
+        if (!chatEnabled) return;
+        await sendMessage(content, options);
+      },
+      [chatEnabled, sendMessage],
+    );
+
+    const handleStartDiscussion = useCallback(
+      async (request: DiscussionRequest) => {
+        if (!chatEnabled) return;
+        await startDiscussion(request);
+      },
+      [chatEnabled, startDiscussion],
+    );
+
+    const handlePauseActiveLiveBuffer = useCallback(() => {
+      if (!chatEnabled) return false;
+      return pauseActiveLiveBuffer();
+    }, [chatEnabled, pauseActiveLiveBuffer]);
+
+    const handleResumeActiveLiveBuffer = useCallback(() => {
+      if (!chatEnabled) return;
+      resumeActiveLiveBuffer();
+    }, [chatEnabled, resumeActiveLiveBuffer]);
+
+    const visibleActiveTab = chatEnabled ? activeTab : 'lecture';
 
     useImperativeHandle(ref, () => ({
       createSession,
@@ -216,8 +265,8 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
       continueActiveSoftClosingSession: handleContinueActiveSoftClosingSession,
       softPauseActiveSession,
       resumeActiveSession,
-      sendMessage,
-      startDiscussion,
+      sendMessage: handleSendMessage,
+      startDiscussion: handleStartDiscussion,
       startLecture,
       addLectureMessage,
       getIsStreaming: () => isStreaming,
@@ -225,8 +274,8 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
       getLectureMessageId,
       pauseBuffer,
       resumeBuffer,
-      pauseActiveLiveBuffer,
-      resumeActiveLiveBuffer,
+      pauseActiveLiveBuffer: handlePauseActiveLiveBuffer,
+      resumeActiveLiveBuffer: handleResumeActiveLiveBuffer,
       switchToTab,
     }));
 
@@ -287,8 +336,8 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
 
         <div className={cn('flex flex-col w-full h-full overflow-hidden', collapsed && 'hidden')}>
           <Tabs
-            value={activeTab}
-            onValueChange={(v) => setActiveTab(v as 'lecture' | 'chat')}
+            value={visibleActiveTab}
+            onValueChange={handleTabChange}
             className="flex flex-col h-full gap-0"
           >
             {/* Tab header row */}
@@ -298,17 +347,19 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
                   <BookOpen className="w-3.5 h-3.5" />
                   {t('chat.tabs.lecture')}
                 </TabsTrigger>
-                <TabsTrigger value="chat" className="text-xs gap-1 flex-1 relative">
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  {t('chat.tabs.chat')}
-                  {/* Amber pulse dot when there's an active chat session and user is on Notes tab */}
-                  {hasActiveChatSession && activeTab === 'lecture' && (
-                    <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
-                    </span>
-                  )}
-                </TabsTrigger>
+                {chatEnabled && (
+                  <TabsTrigger value="chat" className="text-xs gap-1 flex-1 relative">
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    {t('chat.tabs.chat')}
+                    {/* Amber pulse dot when there's an active chat session and user is on Notes tab */}
+                    {hasActiveChatSession && activeTab === 'lecture' && (
+                      <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
+                      </span>
+                    )}
+                  </TabsTrigger>
+                )}
               </TabsList>
 
               {onCollapseChange && (
@@ -333,36 +384,38 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
             </TabsContent>
 
             {/* Chat Tab */}
-            <TabsContent value="chat" className="flex-1 overflow-hidden flex flex-col">
-              <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2 scrollbar-hide">
-                {chatSessions.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center p-6 opacity-50">
-                    <div className="w-12 h-12 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center mb-3 text-gray-300 dark:text-gray-600">
-                      <MessageSquare className="w-6 h-6" />
+            {chatEnabled && (
+              <TabsContent value="chat" className="flex-1 overflow-hidden flex flex-col">
+                <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2 scrollbar-hide">
+                  {chatSessions.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center p-6 opacity-50">
+                      <div className="w-12 h-12 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center mb-3 text-gray-300 dark:text-gray-600">
+                        <MessageSquare className="w-6 h-6" />
+                      </div>
+                      <p className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                        {t('chat.noConversations')}
+                      </p>
+                      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1">
+                        {t('chat.startConversation')}
+                      </p>
                     </div>
-                    <p className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                      {t('chat.noConversations')}
-                    </p>
-                    <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1">
-                      {t('chat.startConversation')}
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    <SessionList
-                      sessions={chatSessions}
-                      expandedSessionIds={expandedSessionIds}
-                      isStreaming={isStreaming}
-                      activeBubbleId={activeBubbleId}
-                      onToggleExpand={toggleSessionExpand}
-                      onEndSession={handleEndSession}
-                      onContinueSession={continueSoftClosingSession}
-                    />
-                    <div ref={bottomRef} />
-                  </>
-                )}
-              </div>
-            </TabsContent>
+                  ) : (
+                    <>
+                      <SessionList
+                        sessions={chatSessions}
+                        expandedSessionIds={expandedSessionIds}
+                        isStreaming={isStreaming}
+                        activeBubbleId={activeBubbleId}
+                        onToggleExpand={toggleSessionExpand}
+                        onEndSession={handleEndSession}
+                        onContinueSession={continueSoftClosingSession}
+                      />
+                      <div ref={bottomRef} />
+                    </>
+                  )}
+                </div>
+              </TabsContent>
+            )}
           </Tabs>
         </div>
       </div>

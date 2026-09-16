@@ -50,17 +50,22 @@ describe('workbench entry gate', () => {
     expect(isWorkbenchEntryEnabled()).toBe(true);
   });
 
-  it('keeps standalone classroom Pro controls behind the workbench entry gate', () => {
+  it('keeps Workbench launch behind the entry gate while preserving normal editor fallback', () => {
     const stageSource = readFileSync(join(process.cwd(), 'components/stage.tsx'), 'utf8');
 
-    expect(stageSource).toContain('const chromeToggleHandler = hosted');
+    expect(stageSource).toContain("from '@/lib/edit/enter-edit-mode'");
     expect(stageSource).toContain(
+      'const normalEditToggleHandler =\n    editorEnabled && canEditOwnedStage ? handleToggleEditMode : undefined;',
+    );
+    expect(stageSource).toContain('const chromeToggleHandler = hosted');
+    expect(stageSource).not.toContain(
       'proWorkbenchEntry\n        ? handleEnterWorkbench\n        : undefined',
+    );
+    expect(stageSource).toContain(
+      'proWorkbenchEntry\n        ? handleEnterWorkbench\n        : normalEditToggleHandler',
     );
     expect(stageSource).toContain(
       'canEnterProMode={Boolean(chromeToggleHandler) && (workbenchPlayback || isEditable)}',
     );
-    expect(stageSource).not.toContain(': toggleHandler');
-    expect(stageSource).not.toContain("from '@/lib/edit/enter-edit-mode'");
   });
 });

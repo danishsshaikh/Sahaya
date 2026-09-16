@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   PanelLeftClose,
@@ -50,7 +50,7 @@ export function SceneSidebar({
   const failedOutlines = useStageStore.use.failedOutlines();
   const viewportSize = useCanvasStore.use.viewportSize();
   const viewportRatio = useCanvasStore.use.viewportRatio();
-  const visibleScenes = filterEnabledScenes(scenes);
+  const visibleScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
 
   const [retryingOutlineId, setRetryingOutlineId] = useState<string | null>(null);
 
