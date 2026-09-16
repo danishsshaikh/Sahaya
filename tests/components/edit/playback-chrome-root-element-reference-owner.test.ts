@@ -56,7 +56,7 @@ const scene = {
   title: 'Slide',
   order: 0,
   type: 'slide',
-  actions: [],
+  actions: [{ id: 'speech-1', type: 'speech', text: 'First scene narration' }],
   content: {
     type: 'slide',
     canvas: { elements: [textElement, shapeElement] },
@@ -67,6 +67,7 @@ const secondScene = {
   id: 'scene-2',
   title: 'Second slide',
   order: 1,
+  actions: [{ id: 'speech-2', type: 'speech', text: 'Second scene narration' }],
 };
 const disabledScene = {
   ...scene,
@@ -243,6 +244,16 @@ vi.mock('@/components/chat/chat-area', async () => {
   return {
     ChatArea: React.forwardRef(function MockChatArea(props: Record<string, unknown>, ref) {
       mocks.chatAreaRender(props);
+      const currentScene = stageState.scenes.find(
+        (candidate) => candidate.id === props.currentSceneId,
+      );
+      const currentActionIndex =
+        typeof props.currentActionIndex === 'number' ? props.currentActionIndex : 0;
+      const currentAction = currentScene?.actions?.[currentActionIndex];
+      const narration =
+        currentAction && 'text' in currentAction && typeof currentAction.text === 'string'
+          ? currentAction.text
+          : '';
       React.useImperativeHandle(ref, () => ({
         sendMessage: mocks.sendMessage,
         endActiveSession: vi.fn().mockResolvedValue(undefined),
@@ -265,6 +276,7 @@ vi.mock('@/components/chat/chat-area', async () => {
         'aside',
         { 'data-testid': 'notes-panel' },
         React.createElement('div', { 'data-testid': 'notes-tab' }, 'Notes'),
+        React.createElement('p', { 'data-testid': 'notes-current-narration' }, narration),
         props.chatEnabled
           ? React.createElement(
               React.Fragment,
@@ -400,6 +412,7 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
     stageState.currentSceneId = scene.id;
     stageState.setCurrentSceneId.mockClear();
     settingsState.autoPlayLecture = false;
+    settingsState.chatAreaCollapsed = false;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -466,24 +479,32 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
 
   it('keeps Notes mounted but hides classroom chat when the Sahaya flag is disabled', async () => {
     mocks.classroomChatEnabled = false;
+    settingsState.chatAreaCollapsed = true;
 
     await renderOwner();
 
     expect(container.querySelector('[data-testid="notes-panel"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="notes-tab"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="notes-current-narration"]')?.textContent).toBe(
+      'First scene narration',
+    );
     expect(container.querySelector('[data-testid="chat-tab"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-session-content"]')).toBeNull();
-    expect(mocks.chatAreaRender).toHaveBeenCalledOnce();
-    expect(mocks.chatAreaRender).toHaveBeenCalledWith(
-      expect.objectContaining({ chatEnabled: false }),
+    expect(mocks.chatAreaRender).toHaveBeenCalled();
+    expect(mocks.chatAreaRender).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        chatEnabled: false,
+        collapsed: false,
+        onCollapseChange: undefined,
+      }),
     );
     expect(mocks.canvasProps).toMatchObject({
-      chatCollapsed: true,
+      chatCollapsed: false,
       onToggleChat: undefined,
     });
     expect(mocks.roundtableProps).toMatchObject({
       chatEnabled: false,
-      chatCollapsed: true,
+      chatCollapsed: false,
       onToggleChat: undefined,
     });
   });
@@ -497,8 +518,12 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
     expect(container.querySelector('[data-testid="notes-tab"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-tab"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-session-content"]')).not.toBeNull();
-    expect(mocks.chatAreaRender).toHaveBeenCalledWith(
-      expect.objectContaining({ chatEnabled: true }),
+    expect(mocks.chatAreaRender).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        chatEnabled: true,
+        collapsed: false,
+        onCollapseChange: expect.any(Function),
+      }),
     );
     expect(mocks.canvasProps).toMatchObject({
       chatCollapsed: false,
@@ -509,6 +534,29 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
       chatCollapsed: false,
       onToggleChat: expect.any(Function),
     });
+  });
+
+  it('updates Notes narration when the current scene changes', async () => {
+    mocks.classroomChatEnabled = false;
+    settingsState.chatAreaCollapsed = true;
+
+    await renderOwner();
+    expect(container.querySelector('[data-testid="notes-current-narration"]')?.textContent).toBe(
+      'First scene narration',
+    );
+
+    stageState.currentSceneId = secondScene.id;
+    await rerenderOwner();
+
+    expect(container.querySelector('[data-testid="notes-current-narration"]')?.textContent).toBe(
+      'Second scene narration',
+    );
+    expect(mocks.chatAreaRender).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        chatEnabled: false,
+        collapsed: false,
+      }),
+    );
   });
 
   it('skips disabled scenes in Sahaya playback navigation', async () => {

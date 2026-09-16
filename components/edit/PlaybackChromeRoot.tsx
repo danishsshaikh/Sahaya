@@ -1616,6 +1616,14 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       const roundtableHeight = mode === 'playback' && !isPresenting ? 192 : 0;
       return `calc(100% - ${headerHeight + roundtableHeight}px)`;
     })();
+    const rightPanelCollapsed = isPresenting
+      ? chatAreaCollapsed
+      : classroomChatEnabled
+        ? chatAreaCollapsed
+        : false;
+    const toggleRightPanel = classroomChatEnabled
+      ? () => setChatAreaCollapsed(!chatAreaCollapsed)
+      : undefined;
 
     return (
       <div
@@ -1682,11 +1690,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               softCloseDeadline={softCloseDeadline}
               whiteboardOpen={whiteboardOpen}
               sidebarCollapsed={sidebarCollapsed}
-              chatCollapsed={classroomChatEnabled ? chatAreaCollapsed : true}
+              chatCollapsed={rightPanelCollapsed}
               onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-              onToggleChat={
-                classroomChatEnabled ? () => setChatAreaCollapsed(!chatAreaCollapsed) : undefined
-              }
+              onToggleChat={toggleRightPanel}
               onPrevSlide={handlePreviousScene}
               onNextSlide={handleNextScene}
               onPlayPause={handlePlayPause}
@@ -1867,11 +1873,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                 scenesCount={totalScenesCount}
                 whiteboardOpen={whiteboardOpen}
                 sidebarCollapsed={sidebarCollapsed}
-                chatCollapsed={classroomChatEnabled ? chatAreaCollapsed : true}
+                chatCollapsed={rightPanelCollapsed}
                 onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-                onToggleChat={
-                  classroomChatEnabled ? () => setChatAreaCollapsed(!chatAreaCollapsed) : undefined
-                }
+                onToggleChat={toggleRightPanel}
                 onPrevSlide={handlePreviousScene}
                 onNextSlide={handleNextScene}
                 onWhiteboardClose={handleWhiteboardToggle}
@@ -1911,8 +1915,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             chatEnabled={classroomChatEnabled}
             width={chatAreaWidth}
             onWidthChange={setChatAreaWidth}
-            collapsed={chatAreaCollapsed}
-            onCollapseChange={setChatAreaCollapsed}
+            collapsed={rightPanelCollapsed}
+            onCollapseChange={classroomChatEnabled ? setChatAreaCollapsed : undefined}
             activeBubbleId={activeBubbleId}
             onActiveBubble={(id) => setActiveBubbleId(id)}
             currentSceneId={currentSceneId}
