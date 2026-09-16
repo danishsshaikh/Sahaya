@@ -105,6 +105,30 @@ describe('provider-config', () => {
     yamlOverride = null;
   });
 
+  it('keeps router credentials private and adds no unrelated provider capabilities', async () => {
+    const snapshot = async () => {
+      const config = await import('@/lib/server/provider-config');
+      return {
+        llm: config.getServerProviders(),
+        image: config.getServerImageProviders(),
+        video: config.getServerVideoProviders(),
+        asr: config.getServerASRProviders(),
+        pdf: config.getServerPDFProviders(),
+        webSearch: config.getServerWebSearchProviders(),
+      };
+    };
+    const before = await snapshot();
+    vi.stubEnv('LLM_ROUTER_ENABLED', 'true');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:nvidia/nemotron-test');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_API_KEY', 'private-router-test-key');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_BASE_URL', 'https://primary.example/v1');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_API_KEY', 'private-fallback-test-key');
+    vi.resetModules();
+    const after = await snapshot();
+    expect(after).toEqual(before);
+    expect(JSON.stringify(after)).not.toMatch(/private-router|private-fallback|primary\.example/);
+  });
+
   describe('resolveApiKey', () => {
     it('returns client key when provided', async () => {
       const { resolveApiKey } = await import('@/lib/server/provider-config');

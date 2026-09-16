@@ -11,6 +11,7 @@ import { PROVIDERS } from './providers';
 import { thinkingContext } from './thinking-context';
 import { getModelMetadataKey } from './model-metadata';
 import { getCanonicalModelId } from './model-aliases';
+import { createLLMRouter, type LLMRoutingPolicy } from '@/lib/server/llm-router';
 import type { ThinkingCapability, ThinkingConfig } from '@/lib/types/provider';
 import {
   getThinkingMode,
@@ -22,10 +23,16 @@ const log = createLogger('LLM');
 
 // Re-export for external use
 export type { ThinkingConfig } from '@/lib/types/provider';
+export type { LLMRoutingPolicy } from '@/lib/server/llm-router';
 
 // Re-export the parameter types accepted by AI SDK
 type GenerateTextParams = Parameters<typeof generateText>[0];
 type StreamTextParams = Parameters<typeof streamText>[0];
+
+function routerTimeout(timeout: GenerateTextParams['timeout'], totalMs: number) {
+  const configured = typeof timeout === 'number' ? { totalMs: timeout } : timeout;
+  return { ...configured, totalMs: Math.min(configured?.totalMs ?? totalMs, totalMs) };
+}
 
 function _extractRequestInfo(params: GenerateTextParams | StreamTextParams) {
   const tools = params.tools ? Object.keys(params.tools as Record<string, unknown>) : undefined;
@@ -327,8 +334,18 @@ export async function callLLM<T extends GenerateTextParams>(
   source: string,
   retryOptions?: LLMRetryOptions,
   thinking?: ThinkingConfig,
+  routingPolicy?: LLMRoutingPolicy,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<GenerateTextResult<any, any>> {
+  const router = createLLMRouter(source, routingPolicy, params.abortSignal);
+  const routedParams = router
+    ? {
+        ...params,
+        model: router.model,
+        maxRetries: 0,
+        timeout: routerTimeout(params.timeout, router.totalTimeoutMs),
+      }
+    : params;
   const maxAttempts = (retryOptions?.retries ?? 0) + 1;
   const validate = retryOptions?.validate ?? (maxAttempts > 1 ? DEFAULT_VALIDATE : undefined);
 
@@ -340,7 +357,7 @@ export async function callLLM<T extends GenerateTextParams>(
     try {
       // Resolve effective thinking config: per-call > global env > undefined
       const effectiveThinking = thinking ?? getGlobalThinkingConfig();
-      const injectedParams = injectProviderOptions(params, effectiveThinking);
+      const injectedParams = injectProviderOptions(routedParams, effectiveThinking);
 
       // Wrap in thinkingContext so the custom fetch wrapper in providers.ts
       // can read the config and inject vendor-specific body params for
@@ -358,7 +375,10 @@ export async function callLLM<T extends GenerateTextParams>(
       // every earlier step would go unaccounted. `totalUsage` aggregates across
       // steps and equals `usage` for a single-step call. Mirrors streamLLM,
       // which already prefers the aggregate.
-      recordUsageSafe(result.totalUsage ?? result.usage, buildUsageMeta(params, source));
+      recordUsageSafe(
+        result.totalUsage ?? result.usage,
+        router?.usageMeta() ?? buildUsageMeta(params, source),
+      );
 
       // Validate result (only when retries are configured)
       if (validate && !validate(result.text)) {
@@ -371,6 +391,9 @@ export async function callLLM<T extends GenerateTextParams>(
 
       return result;
     } catch (error) {
+      // Routed transport failures already exhausted the permitted attempts.
+      // Validation retries above remain available, without restarting failover.
+      if (router) throw error;
       lastError = error;
 
       if (attempt < maxAttempts) {
@@ -398,8 +421,10 @@ export function streamLLM<T extends StreamTextParams>(
   params: T,
   source: string,
   thinking?: ThinkingConfig,
+  routingPolicy?: LLMRoutingPolicy,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): StreamTextResult<any, any> {
+  const router = createLLMRouter(source, routingPolicy, params.abortSignal);
   // Resolve effective thinking config and wrap in thinkingContext
   const effectiveThinking = thinking ?? getGlobalThinkingConfig();
 
@@ -411,8 +436,15 @@ export function streamLLM<T extends StreamTextParams>(
     | undefined;
   const wrappedParams = {
     ...params,
+    ...(router
+      ? {
+          model: router.model,
+          maxRetries: 0,
+          timeout: routerTimeout(params.timeout, router.totalTimeoutMs),
+        }
+      : {}),
     onFinish: async (event: { totalUsage?: unknown; usage?: unknown }) => {
-      recordUsageSafe(event.totalUsage ?? event.usage, usageMeta);
+      recordUsageSafe(event.totalUsage ?? event.usage, router?.usageMeta() ?? usageMeta);
       if (callerOnFinish) await callerOnFinish(event);
     },
   } as T;
