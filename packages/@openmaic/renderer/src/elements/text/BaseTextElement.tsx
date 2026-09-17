@@ -5,6 +5,7 @@ import type { PPTTextElement } from '@openmaic/dsl';
 import { useElementShadow } from '../shared/useElementShadow';
 import { ElementOutline } from '../shared/ElementOutline';
 import { preservesPlainTextLineBreaks } from '../../utils/richText';
+import { formatInlineMarkdownBold } from '../../utils/inlineMarkdown';
 
 export interface BaseTextElementProps {
   elementInfo: PPTTextElement;
@@ -14,6 +15,9 @@ export interface BaseTextElementProps {
 
 export function BaseTextElement({ elementInfo, target, renderContent }: BaseTextElementProps) {
   const { shadowStyle } = useElementShadow(elementInfo.shadow);
+  const content = formatInlineMarkdownBold(
+    typeof elementInfo.content === 'string' ? elementInfo.content : '',
+  );
 
   const vAlign = elementInfo.vAlign ?? 'top';
   const justifyContent =
@@ -24,9 +28,9 @@ export function BaseTextElement({ elementInfo, target, renderContent }: BaseText
       style={{
         position: 'relative',
         pointerEvents: target === 'thumbnail' ? 'none' : undefined,
-        whiteSpace: preservesPlainTextLineBreaks(elementInfo.content) ? 'pre-line' : undefined,
+        whiteSpace: preservesPlainTextLineBreaks(content) ? 'pre-line' : undefined,
       }}
-      dangerouslySetInnerHTML={{ __html: elementInfo.content }}
+      dangerouslySetInnerHTML={{ __html: content }}
     />
   );
 

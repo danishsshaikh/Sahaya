@@ -29,15 +29,37 @@ import { normalizeLegacyPBLContent } from '@/lib/pbl/legacy/read';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { llmApiError } from '@/lib/server/llm-error-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
-import { isDiscussionScenesEnabled } from '@/lib/config/feature-flags';
+import {
+  createGenerationTimingCollector,
+  logSceneGenerationTiming,
+  shouldCollectLLMRouteTiming,
+  withRouteTiming,
+} from '@/lib/server/generation-timing';
 
 const log = createLogger('Scene Actions API');
 
 export const maxDuration = 60;
 
+async function resolveDiscussionActionsEnabled(): Promise<boolean> {
+  try {
+    const flags = await import('@/lib/config/feature-flags');
+    return typeof flags.isDiscussionScenesEnabled === 'function'
+      ? flags.isDiscussionScenesEnabled()
+      : false;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(req: NextRequest) {
   let outlineTitle: string | undefined;
   let resolvedModelString: string | undefined;
+  let timingCollector: ReturnType<typeof createGenerationTimingCollector> | undefined;
+  let phaseStartedAt = Date.now();
+  let routeEventStart = 0;
+  let stageIdForTiming: string | undefined;
+  let outlineIdForTiming: string | undefined;
+  let sceneTypeForTiming: string | undefined;
   try {
     const body = await req.json();
     const {
@@ -90,8 +112,17 @@ export async function POST(req: NextRequest) {
       modelString,
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, 'scene-actions');
+    const collector = createGenerationTimingCollector();
+    const invokeSceneActionsLLM = (params: Parameters<typeof callLLM>[0]) =>
+      shouldCollectLLMRouteTiming()
+        ? callLLM(params, 'scene-actions', undefined, thinkingConfig, collector.routingPolicy)
+        : callLLM(params, 'scene-actions', undefined, thinkingConfig);
+    timingCollector = collector;
     outlineTitle = outline?.title;
     resolvedModelString = modelString;
+    stageIdForTiming = stageId;
+    outlineIdForTiming = outline.id;
+    sceneTypeForTiming = outline.type;
 
     // Detect vision capability
     const hasVision = !!modelInfo?.capabilities?.vision;
@@ -103,37 +134,27 @@ export async function POST(req: NextRequest) {
       images?: Array<{ id: string; src: string }>,
     ): Promise<string> => {
       if (images?.length && hasVision) {
-        const result = await callLLM(
-          {
-            model: languageModel,
-            system: systemPrompt,
-            messages: [
-              {
-                role: 'user' as const,
-                content: buildVisionUserContent(userPrompt, images),
-              },
-            ],
-            maxOutputTokens: modelInfo?.outputWindow,
-            maxRetries: 0,
-          },
-          'scene-actions',
-          undefined,
-          thinkingConfig,
-        );
-        return result.text;
-      }
-      const result = await callLLM(
-        {
+        const result = await invokeSceneActionsLLM({
           model: languageModel,
           system: systemPrompt,
-          prompt: userPrompt,
+          messages: [
+            {
+              role: 'user' as const,
+              content: buildVisionUserContent(userPrompt, images),
+            },
+          ],
           maxOutputTokens: modelInfo?.outputWindow,
           maxRetries: 0,
-        },
-        'scene-actions',
-        undefined,
-        thinkingConfig,
-      );
+        });
+        return result.text;
+      }
+      const result = await invokeSceneActionsLLM({
+        model: languageModel,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxOutputTokens: modelInfo?.outputWindow,
+        maxRetries: 0,
+      });
       return result.text;
     };
 
@@ -149,6 +170,8 @@ export async function POST(req: NextRequest) {
 
     // ── Generate actions ──
     log.info(`Generating actions: "${outline.title}" (${outline.type}) [model=${modelString}]`);
+    phaseStartedAt = Date.now();
+    routeEventStart = collector.events.length;
 
     const generationContent = (
       'type' in content && content.type === 'pbl' ? normalizeLegacyPBLContent(content) : content
@@ -163,8 +186,24 @@ export async function POST(req: NextRequest) {
       agents,
       userProfile,
       languageDirective,
-      allowDiscussionActions: isDiscussionScenesEnabled(),
+      allowDiscussionActions: await resolveDiscussionActionsEnabled(),
     });
+
+    logSceneGenerationTiming(
+      withRouteTiming(
+        {
+          requestId: collector.requestId,
+          phase: 'actions',
+          stageId,
+          outlineId: outline.id,
+          sceneType: outline.type,
+          status: 'success',
+          durationMs: Date.now() - phaseStartedAt,
+          actionCount: actions.length,
+        },
+        collector.events.slice(routeEventStart),
+      ),
+    );
 
     log.info(`Generated ${actions.length} actions for: "${outline.title}"`);
 
@@ -188,6 +227,22 @@ export async function POST(req: NextRequest) {
 
     return apiSuccess({ scene, previousSpeeches: outputPreviousSpeeches });
   } catch (error) {
+    if (timingCollector) {
+      logSceneGenerationTiming(
+        withRouteTiming(
+          {
+            requestId: timingCollector.requestId,
+            phase: 'actions',
+            stageId: stageIdForTiming,
+            outlineId: outlineIdForTiming,
+            sceneType: sceneTypeForTiming,
+            status: 'failed',
+            durationMs: Date.now() - phaseStartedAt,
+          },
+          timingCollector.events.slice(routeEventStart),
+        ),
+      );
+    }
     log.error(
       `Scene actions generation failed [scene="${outlineTitle ?? 'unknown'}", model=${resolvedModelString ?? 'unknown'}]:`,
       error,

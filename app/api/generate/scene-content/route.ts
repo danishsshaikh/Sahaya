@@ -40,6 +40,12 @@ import {
   type VisionPromptImage,
 } from '@/lib/persistence/resolve-vision-images';
 import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
+import {
+  createGenerationTimingCollector,
+  logSceneGenerationTiming,
+  shouldCollectLLMRouteTiming,
+  withRouteTiming,
+} from '@/lib/server/generation-timing';
 
 const log = createLogger('Scene Content API');
 const SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
@@ -123,6 +129,11 @@ export async function POST(req: NextRequest) {
       modelString,
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, stage);
+    const timingCollector = createGenerationTimingCollector();
+    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) =>
+      shouldCollectLLMRouteTiming()
+        ? callLLM(params, 'scene-content', undefined, thinkingConfig, timingCollector.routingPolicy)
+        : callLLM(params, 'scene-content', undefined, thinkingConfig);
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
 
@@ -149,37 +160,27 @@ export async function POST(req: NextRequest) {
         // bytes the base64 path would send BEFORE prompt assembly, keeping the
         // vision prompt byte-identical in both modes (RFC #1153 part 2 B).
         const resolvedImages = await resolveVisionImagesForPrompt(images, req.headers);
-        const result = await callLLM(
-          {
-            model: languageModel,
-            system: systemPrompt,
-            messages: [
-              {
-                role: 'user' as const,
-                content: buildVisionUserContent(userPrompt, resolvedImages),
-              },
-            ],
-            maxOutputTokens: modelInfo?.outputWindow,
-            maxRetries: 0,
-          },
-          'scene-content',
-          undefined,
-          thinkingConfig,
-        );
-        return result.text;
-      }
-      const result = await callLLM(
-        {
+        const result = await invokeSceneContentLLM({
           model: languageModel,
           system: systemPrompt,
-          prompt: userPrompt,
+          messages: [
+            {
+              role: 'user' as const,
+              content: buildVisionUserContent(userPrompt, resolvedImages),
+            },
+          ],
           maxOutputTokens: modelInfo?.outputWindow,
           maxRetries: 0,
-        },
-        'scene-content',
-        undefined,
-        thinkingConfig,
-      );
+        });
+        return result.text;
+      }
+      const result = await invokeSceneContentLLM({
+        model: languageModel,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxOutputTokens: modelInfo?.outputWindow,
+        maxRetries: 0,
+      });
       return result.text;
     };
 
@@ -326,6 +327,8 @@ export async function POST(req: NextRequest) {
     const userLocale = req.headers?.get('x-user-locale') ?? '';
 
     const generateResolvedContent = async () => {
+      const phaseStartedAt = Date.now();
+      const routeEventStart = timingCollector.events.length;
       log.info(
         `Generating content: "${effectiveOutline.title}" (${effectiveOutline.type}) [model=${modelString}]`,
       );
@@ -356,11 +359,41 @@ export async function POST(req: NextRequest) {
       });
 
       if (!content) {
+        logSceneGenerationTiming(
+          withRouteTiming(
+            {
+              requestId: timingCollector.requestId,
+              phase: 'content',
+              stageId,
+              outlineId: effectiveOutline.id,
+              sceneType: effectiveOutline.type,
+              status: 'failed',
+              durationMs: Date.now() - phaseStartedAt,
+            },
+            timingCollector.events.slice(routeEventStart),
+          ),
+        );
         log.error(
           `Failed to generate content for: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,
         );
         return { content: null, effectiveOutline };
       }
+
+      logSceneGenerationTiming(
+        withRouteTiming(
+          {
+            requestId: timingCollector.requestId,
+            phase: 'content',
+            stageId,
+            outlineId: effectiveOutline.id,
+            sceneType: effectiveOutline.type,
+            status: 'success',
+            durationMs: Date.now() - phaseStartedAt,
+            elementCount: 'elements' in content ? content.elements.length : undefined,
+          },
+          timingCollector.events.slice(routeEventStart),
+        ),
+      );
 
       log.info(
         `Content generated successfully: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,

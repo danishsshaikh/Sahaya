@@ -11,9 +11,26 @@ type Part = StreamResult['stream'] extends ReadableStream<infer T> ? T : never;
 type Role = 'primary' | 'fallback';
 type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
+export interface LLMRouteTelemetry {
+  requestId: string;
+  source: string;
+  selectedRole: Role;
+  selectedProvider: string;
+  selectedModel: string;
+  fallbackUsed: boolean;
+  fallbackReason?: string;
+  circuitState: CircuitState;
+  status: string;
+  timeoutBudgetMs: number;
+  latencyMs: number;
+  attempt: number;
+  timeToFirstPartMs?: number;
+}
+
 export interface LLMRoutingPolicy {
   externalAllowed?: boolean;
   requestId?: string;
+  onRouteEvent?: (event: LLMRouteTelemetry) => void;
 }
 
 interface Endpoint {
@@ -321,6 +338,7 @@ export function createLLMRouter(
   let fallbackReason: string | undefined;
   let epoch = b.epoch;
   let probing = false;
+  let attempt = 0;
   const models: Partial<Record<Role, Model>> = {};
   const meta = () => {
     const e = config[selected ?? 'primary'];
@@ -333,23 +351,28 @@ export function createLLMRouter(
   };
   const report = (status: string, start: number, timeoutBudgetMs: number, firstPartMs?: number) => {
     const e = config[selected ?? 'primary'];
-    log.info({
+    const event: LLMRouteTelemetry = {
       requestId,
       source,
-      primaryProvider: config.primary.providerId,
-      primaryModel: config.primary.modelId,
-      fallbackProvider: config.fallback.providerId,
-      fallbackModel: config.fallback.modelId,
       selectedProvider: e.providerId,
       selectedModel: e.modelId,
       selectedRole: selected ?? 'primary',
       fallbackUsed: selected === 'fallback',
-      fallbackReason,
       circuitState: state(b),
       status,
       timeoutBudgetMs,
       latencyMs: Date.now() - start,
+      attempt,
+      ...(fallbackReason === undefined ? {} : { fallbackReason }),
       ...(firstPartMs === undefined ? {} : { timeToFirstPartMs: firstPartMs }),
+    };
+    policy.onRouteEvent?.(event);
+    log.info({
+      ...event,
+      primaryProvider: config.primary.providerId,
+      primaryModel: config.primary.modelId,
+      fallbackProvider: config.fallback.providerId,
+      fallbackModel: config.fallback.modelId,
     });
   };
   const choose = (): Role => {
@@ -447,6 +470,7 @@ export function createLLMRouter(
       deadline ??= Date.now() + config.totalMs;
       selected = choose();
       for (;;) {
+        attempt += 1;
         const start = Date.now();
         const timeoutMs = attemptBudgetMs(deadline, start, roleTimeoutMs(config, selected));
         const scope = budget(options.abortSignal, start + timeoutMs);
@@ -471,6 +495,7 @@ export function createLLMRouter(
       deadline ??= Date.now() + config.totalMs;
       selected = choose();
       for (;;) {
+        attempt += 1;
         const start = Date.now();
         const timeoutMs = attemptBudgetMs(
           deadline,

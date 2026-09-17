@@ -24,6 +24,8 @@ export type {
 } from './scene-generator.js';
 export { buildCompleteScene } from './scene-builder.js';
 export type { BuildCompleteSceneOptions } from './scene-builder.js';
+export { repairGeneratedSlideLayout } from './slide-layout.js';
+export type { SlideLayoutRepairResult, SlideLayoutRepairSummary } from './slide-layout.js';
 export {
   isAbortError,
   isRetryableGenerationError,

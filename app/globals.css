@@ -302,6 +302,16 @@ body[data-maic-editor='true'] .editable-element-text li,
 .base-element-shape .ProseMirror-static li:last-child {
   margin-bottom: 0;
 }
+.base-element-text .ProseMirror-static .katex,
+.base-element-shape .ProseMirror-static .katex {
+  max-width: 100%;
+}
+.base-element-text .ProseMirror-static .katex-display,
+.base-element-shape .ProseMirror-static .katex-display {
+  max-width: 100%;
+  margin: 0.35em 0;
+  overflow: hidden;
+}
 
 /* Compact react-colorful for the slide editor's color popover. Defaults are
    a 200×200 square with a thick separator — we squeeze it tight + round it

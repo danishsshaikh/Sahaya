@@ -58,6 +58,7 @@ import { isAbortError } from './generation-retry.js';
 import { generatePBLV2ProjectSingleCall } from './pbl/planner-single-call.js';
 import { PlannerV2Error } from './pbl/planner-core.js';
 import type { PBLPlannerV2Input } from './pbl/types.js';
+import { repairGeneratedSlideLayout } from './slide-layout.js';
 
 function isGeneratedMediaPlaceholder(value: string | undefined): value is string {
   return !!value && /^gen_(img|vid)_[\w-]+$/i.test(value);
@@ -886,6 +887,8 @@ async function generateSlideContent(
     rotate: 0,
   })) as PPTElement[];
 
+  const layoutRepaired = repairGeneratedSlideLayout(processedElements, log);
+
   // Process background
   let background: SlideBackground | undefined;
   if (generatedData.background) {
@@ -900,7 +903,7 @@ async function generateSlideContent(
   }
 
   return {
-    elements: processedElements,
+    elements: layoutRepaired.elements,
     background,
     remark: generatedData.remark || outline.description,
   };
