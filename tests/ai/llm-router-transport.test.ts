@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tool } from 'ai';
+import { z } from 'zod';
 import { callLLM, streamLLM } from '@/lib/ai/llm';
 import { createLLMRouter } from '@/lib/server/llm-router';
 
@@ -35,7 +37,7 @@ function completion(content: string) {
 }
 
 describe('routed OpenAI-compatible transport (mock HTTP only)', () => {
-  it('uses Chat Completions, isolated credentials, no redirects or automatic thinking, and no key for keyless Gemma', async () => {
+  it('uses Chat Completions, isolated credentials, no redirects, Nemotron structured thinking off, and no key for keyless Gemma', async () => {
     const requests: { url: string; init: RequestInit; body: Record<string, unknown> }[] = [];
     vi.stubGlobal(
       'fetch',
@@ -65,12 +67,55 @@ describe('routed OpenAI-compatible transport (mock HTTP only)', () => {
       'Bearer test-primary-key',
     );
     expect(new Headers(requests[1].init.headers).has('authorization')).toBe(false);
-    for (const request of requests) {
-      expect(request.init.redirect).toBe('error');
-      expect(request.body).not.toHaveProperty('thinking');
-      expect(request.body).not.toHaveProperty('reasoning_effort');
-      expect(request.body).not.toHaveProperty('chat_template_kwargs');
-    }
+    expect(requests[0].init.redirect).toBe('error');
+    expect(requests[0].body).toMatchObject({
+      chat_template_kwargs: { enable_thinking: false },
+    });
+    expect(requests[0].body).not.toHaveProperty('thinking');
+    expect(requests[0].body).not.toHaveProperty('reasoning_effort');
+    expect(requests[1].init.redirect).toBe('error');
+    expect(requests[1].body).not.toHaveProperty('thinking');
+    expect(requests[1].body).not.toHaveProperty('reasoning_effort');
+    expect(requests[1].body).not.toHaveProperty('chat_template_kwargs');
+  });
+  it('does not inject Nemotron chat-template fields for non-Nemotron providers', async () => {
+    vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:gpt-compatible-test');
+    const requests: { body: Record<string, unknown> }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init: RequestInit) => {
+        requests.push({ body: JSON.parse(String(init.body)) });
+        return completion('{"html":"<p>Lesson</p>"}');
+      }),
+    );
+    const output = await callLLM(
+      { model: createLLMRouter('fixture')!.model, prompt: 'hi' },
+      'transport-test',
+    );
+    expect(JSON.parse(output.text)).toEqual({ html: '<p>Lesson</p>' });
+    expect(requests[0].body).not.toHaveProperty('chat_template_kwargs');
+  });
+  it('preserves tool-bearing Nemotron request semantics without forcing structured thinking mode', async () => {
+    const requests: { body: Record<string, unknown> }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init: RequestInit) => {
+        requests.push({ body: JSON.parse(String(init.body)) });
+        return completion('tool-safe answer');
+      }),
+    );
+    const output = await callLLM(
+      {
+        model: createLLMRouter('fixture')!.model,
+        prompt: 'hi',
+        tools: { inspect: tool({ inputSchema: z.object({ topic: z.string() }) }) },
+        toolChoice: 'auto',
+      },
+      'transport-test',
+    );
+    expect(output.text).toBe('tool-safe answer');
+    expect(requests[0].body.tools).toBeTruthy();
+    expect(requests[0].body).not.toHaveProperty('chat_template_kwargs');
   });
   it('preserves separate reasoning and answer streams with actual SDK parsing', async () => {
     const chunks = [{ reasoning_content: 'check evidence' }, { content: '{"answer":42}' }].map(

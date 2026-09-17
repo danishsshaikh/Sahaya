@@ -20,7 +20,9 @@ Use ignored runtime environment configuration, never `NEXT_PUBLIC_*`:
 | `LLM_ROUTER_FALLBACK_BASE_URL` | Required deployment-configured compatible endpoint |
 | `LLM_ROUTER_FALLBACK_API_KEY` | Optional server-only credential |
 | `LLM_ROUTER_FALLBACK_LOCAL` | Explicit local attestation, default false |
-| `LLM_ROUTER_INITIAL_TIMEOUT_MS` | 60000; per-attempt non-stream response or stream establishment deadline |
+| `LLM_ROUTER_INITIAL_TIMEOUT_MS` | 60000; legacy per-attempt default used when role-specific timeouts are unset |
+| `LLM_ROUTER_PRIMARY_TIMEOUT_MS` | Optional primary attempt deadline; defaults to `LLM_ROUTER_INITIAL_TIMEOUT_MS` |
+| `LLM_ROUTER_FALLBACK_TIMEOUT_MS` | Optional fallback attempt deadline; defaults to `LLM_ROUTER_INITIAL_TIMEOUT_MS` |
 | `LLM_ROUTER_STREAM_INITIAL_CHUNK_TIMEOUT_MS` | 45000; from attempt start through first meaningful provider part |
 | `LLM_ROUTER_TOTAL_TIMEOUT_MS` | 180000; shared budget across primary, fallback and tool steps |
 | `LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD` | 3 consecutive qualifying primary failures |
@@ -44,9 +46,13 @@ are replaced by safe classified causes; prompts, URLs, keys and responses are no
 included in router logs or errors.
 
 Non-streaming attempt deadlines include response generation, not just connection.
-Streaming first-part deadlines include connection time. Fallback receives only
-the remaining total budget. After stream commitment the total deadline remains
-active. Slow models may need larger deployment-specific budgets.
+Primary and fallback can use different attempt budgets so a fast primary failure
+does not force the local fallback to die at the same short deadline. Streaming
+first-part establishment is capped by both the role-specific attempt budget and
+`LLM_ROUTER_STREAM_INITIAL_CHUNK_TIMEOUT_MS`; after stream commitment the total
+deadline remains active. Fallback receives only the remaining total budget, so
+primary time plus fallback time never exceeds `LLM_ROUTER_TOTAL_TIMEOUT_MS`.
+Slow models may need larger deployment-specific budgets.
 
 Only the inert provider `stream-start` header is held back. Every other non-error
 event commits selection, including reasoning/tool starts, response metadata and
@@ -55,7 +61,11 @@ After commitment, errors propagate through the ordinary SDK stream error path;
 providers are never spliced. A successful generation or committed stream pins
 selection across subsequent tool steps, avoiding replay of executed tools.
 The existing compatible-provider reasoning extraction separates `<think>` content
-from text; no provider-specific thinking mode is automatically enabled.
+from text. For NVIDIA Nemotron-compatible structured requests without tools, the
+router adds `chat_template_kwargs.enable_thinking=false` centrally to reduce
+unneeded reasoning latency and token use. Tool-bearing Nemotron requests keep
+their existing request shape, and non-Nemotron endpoints, including local Gemma,
+are not given Nemotron-specific fields.
 
 The circuit is in-memory and process-local (not shared across workers). CLOSED
 attempts primary. Qualifying failures open it at the threshold. OPEN bypasses
@@ -72,7 +82,8 @@ eligible endpoint (or with routing disabled), it fails closed. Locality is an
 operator assertion, not inferred from a hostname. No automatic sensitive-data
 classification is performed. Use opaque request IDs and fixed operation labels,
 never private content. Logs contain only IDs, operation, provider/model identifiers,
-selection, fallback reason, circuit state, status, latency and time to first part.
+selection role, fallback reason, circuit state, status, attempt timeout budget,
+latency and time to first part.
 
 All tests use fake models or mocked HTTP. Live endpoint compatibility and latency
 must be verified separately in an isolated deployment. No deployment is performed

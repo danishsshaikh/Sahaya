@@ -345,6 +345,69 @@ describe('deadlines and cancellation', () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(remove).toHaveBeenCalled();
   });
+  it('lets primary and fallback use independently configured attempt budgets', async () => {
+    vi.stubEnv('LLM_ROUTER_PRIMARY_TIMEOUT_MS', '100');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_TIMEOUT_MS', '800');
+    vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '1000');
+    primary.doGenerate.mockImplementation(() => new Promise(() => {}));
+    fallback.doGenerate.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(result('slow-gemma')), 300)),
+    );
+    const pending = request();
+    await vi.advanceTimersByTimeAsync(101);
+    expect(primary.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(true);
+    expect(fallback.doGenerate).toHaveBeenCalledTimes(1);
+    expect(fallback.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(300);
+    expect((await pending).text).toBe('slow-gemma');
+    expect(logs()).toContainEqual(
+      expect.objectContaining({
+        selectedRole: 'primary',
+        status: 'timeout',
+        timeoutBudgetMs: 100,
+      }),
+    );
+    expect(logs()).toContainEqual(
+      expect.objectContaining({
+        selectedRole: 'fallback',
+        status: 'success',
+        timeoutBudgetMs: 800,
+      }),
+    );
+  });
+  it('keeps legacy INITIAL_TIMEOUT_MS behavior when role-specific budgets are unset', async () => {
+    primary.doGenerate.mockImplementation(() => new Promise(() => {}));
+    fallback.doGenerate.mockImplementation(() => new Promise(() => {}));
+    const pending = request().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(primary.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(true);
+    expect(fallback.doGenerate).toHaveBeenCalledTimes(1);
+    expect(fallback.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await pending).toMatchObject({ cause: { selected: { reason: 'timeout' } } });
+    expect(logs()).toContainEqual(
+      expect.objectContaining({
+        selectedRole: 'fallback',
+        status: 'timeout',
+        timeoutBudgetMs: 1000,
+      }),
+    );
+  });
+  it('caps a longer fallback attempt by the remaining shared total budget', async () => {
+    vi.stubEnv('LLM_ROUTER_PRIMARY_TIMEOUT_MS', '500');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_TIMEOUT_MS', '5000');
+    vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '1200');
+    primary.doGenerate.mockImplementation(() => new Promise(() => {}));
+    fallback.doGenerate.mockImplementation(() => new Promise(() => {}));
+    const pending = request().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(fallback.doGenerate).toHaveBeenCalledTimes(1);
+    expect(fallback.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(await pending).toMatchObject({ cause: { selected: { reason: 'timeout' } } });
+    expect(fallback.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('bounds both providers by one total budget', async () => {
     vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '1500');
     primary.doGenerate.mockImplementation(() => new Promise(() => {}));

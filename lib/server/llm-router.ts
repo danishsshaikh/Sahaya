@@ -28,6 +28,8 @@ interface Config {
   primary: Endpoint;
   fallback: Endpoint;
   initialMs: number;
+  primaryMs: number;
+  fallbackMs: number;
   streamInitialMs: number;
   totalMs: number;
   threshold: number;
@@ -141,10 +143,13 @@ function endpoint(role: 'PRIMARY' | 'FALLBACK'): Endpoint {
 
 function loadConfig(): Config | undefined {
   if (process.env.LLM_ROUTER_ENABLED !== 'true') return undefined;
+  const initialMs = positiveInt('LLM_ROUTER_INITIAL_TIMEOUT_MS', 60_000);
   return {
     primary: endpoint('PRIMARY'),
     fallback: endpoint('FALLBACK'),
-    initialMs: positiveInt('LLM_ROUTER_INITIAL_TIMEOUT_MS', 60_000),
+    initialMs,
+    primaryMs: positiveInt('LLM_ROUTER_PRIMARY_TIMEOUT_MS', initialMs),
+    fallbackMs: positiveInt('LLM_ROUTER_FALLBACK_TIMEOUT_MS', initialMs),
     streamInitialMs: positiveInt('LLM_ROUTER_STREAM_INITIAL_CHUNK_TIMEOUT_MS', 45_000),
     totalMs: positiveInt('LLM_ROUTER_TOTAL_TIMEOUT_MS', 180_000),
     threshold: positiveInt('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', 3),
@@ -222,6 +227,55 @@ function budget(parent: AbortSignal | undefined, deadline: number) {
   };
 }
 
+function roleTimeoutMs(config: Config, role: Role): number {
+  return role === 'primary' ? config.primaryMs : config.fallbackMs;
+}
+
+function attemptBudgetMs(deadline: number, start: number, ...limits: number[]): number {
+  return Math.max(0, Math.min(deadline - start, ...limits));
+}
+
+function hasToolRequest(body: Record<string, unknown>): boolean {
+  return (
+    (Array.isArray(body.tools) && body.tools.length > 0) ||
+    (Array.isArray(body.functions) && body.functions.length > 0) ||
+    body.tool_choice !== undefined ||
+    body.function_call !== undefined
+  );
+}
+
+function isNemotronEndpoint(endpoint: Endpoint): boolean {
+  const provider = endpoint.providerId.toLowerCase();
+  const model = endpoint.modelId.toLowerCase();
+  return model.includes('nemotron') && (provider === 'nvidia' || model.startsWith('nvidia/'));
+}
+
+function adaptCompatibleRequestBody(
+  endpoint: Endpoint,
+  init?: RequestInit,
+): RequestInit | undefined {
+  if (!init?.body || typeof init.body !== 'string' || !isNemotronEndpoint(endpoint)) return init;
+  try {
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+    if (hasToolRequest(body)) return init;
+    const current =
+      body.chat_template_kwargs &&
+      typeof body.chat_template_kwargs === 'object' &&
+      !Array.isArray(body.chat_template_kwargs)
+        ? (body.chat_template_kwargs as Record<string, unknown>)
+        : {};
+    return {
+      ...init,
+      body: JSON.stringify({
+        ...body,
+        chat_template_kwargs: { ...current, enable_thinking: false },
+      }),
+    };
+  } catch {
+    return init;
+  }
+}
+
 function buildModel(e: Endpoint): Model {
   // A private compatible-provider ID forces Chat Completions and avoids inheriting
   // native OpenAI/other catalog thinking defaults. Existing reasoning extraction stays active.
@@ -234,7 +288,8 @@ function buildModel(e: Endpoint): Model {
     fetchImpl: (input, init) => {
       const headers = new Headers(init?.headers);
       if (!e.apiKey) headers.delete('authorization');
-      return globalThis.fetch(input, { ...init, headers, redirect: 'error' });
+      const adapted = adaptCompatibleRequestBody(e, init);
+      return globalThis.fetch(input, { ...adapted, headers, redirect: 'error' });
     },
   });
   if (typeof model !== 'object' || model.specificationVersion !== 'v3') {
@@ -276,7 +331,7 @@ export function createLLMRouter(
       modelString: `${e.providerId}:${e.modelId}`,
     };
   };
-  const report = (status: string, start: number, firstPartMs?: number) => {
+  const report = (status: string, start: number, timeoutBudgetMs: number, firstPartMs?: number) => {
     const e = config[selected ?? 'primary'];
     log.info({
       requestId,
@@ -287,10 +342,12 @@ export function createLLMRouter(
       fallbackModel: config.fallback.modelId,
       selectedProvider: e.providerId,
       selectedModel: e.modelId,
+      selectedRole: selected ?? 'primary',
       fallbackUsed: selected === 'fallback',
       fallbackReason,
       circuitState: state(b),
       status,
+      timeoutBudgetMs,
       latencyMs: Date.now() - start,
       ...(firstPartMs === undefined ? {} : { timeToFirstPartMs: firstPartMs }),
     });
@@ -341,7 +398,12 @@ export function createLLMRouter(
     b.probe = false;
     probing = false;
   };
-  const handleFailure = (error: unknown, options: CallOptions, start: number): boolean => {
+  const handleFailure = (
+    error: unknown,
+    options: CallOptions,
+    start: number,
+    timeoutBudgetMs: number,
+  ): boolean => {
     // The SDK composes its own total deadline with the caller signal. Only an
     // actual caller cancellation is exempt from provider health accounting.
     const sdkReason: unknown = options.abortSignal?.reason;
@@ -352,7 +414,7 @@ export function createLLMRouter(
       cancelled ? (callerSignal?.aborted ? callerSignal : options.abortSignal) : undefined,
     );
     failed(failure);
-    report(failure.reason, start);
+    report(failure.reason, start, timeoutBudgetMs);
     if (cancelled) throw callerSignal?.aborted ? callerSignal.reason : options.abortSignal?.reason;
     if (failure.reason === 'abort') throw error;
     if (
@@ -386,7 +448,8 @@ export function createLLMRouter(
       selected = choose();
       for (;;) {
         const start = Date.now();
-        const scope = budget(options.abortSignal, Math.min(deadline, start + config.initialMs));
+        const timeoutMs = attemptBudgetMs(deadline, start, roleTimeoutMs(config, selected));
+        const scope = budget(options.abortSignal, start + timeoutMs);
         try {
           const target = (models[selected] ??= buildModel(config[selected]));
           const result = await scope.wait(() =>
@@ -394,10 +457,10 @@ export function createLLMRouter(
           );
           committed = true;
           healthy();
-          report('success', start);
+          report('success', start, timeoutMs);
           return result;
         } catch (error) {
-          if (!handleFailure(error, options, start)) throw error;
+          if (!handleFailure(error, options, start, timeoutMs)) throw error;
         } finally {
           scope.dispose(true);
         }
@@ -409,10 +472,13 @@ export function createLLMRouter(
       selected = choose();
       for (;;) {
         const start = Date.now();
-        const scope = budget(
-          options.abortSignal,
-          Math.min(deadline, start + config.initialMs, start + config.streamInitialMs),
+        const timeoutMs = attemptBudgetMs(
+          deadline,
+          start,
+          roleTimeoutMs(config, selected),
+          config.streamInitialMs,
         );
+        const scope = budget(options.abortSignal, start + timeoutMs);
         let reader: ReadableStreamDefaultReader<Part> | undefined;
         const cancel = () => {
           scope.dispose(true);
@@ -443,7 +509,7 @@ export function createLLMRouter(
           }
           committed = true;
           scope.arm(deadline);
-          report('stream_committed', start, Date.now() - start);
+          report('stream_committed', start, timeoutMs, Date.now() - start);
           const initial = header ? [header, first] : [first];
           let finished = first.type === 'finish';
           return {
@@ -460,7 +526,7 @@ export function createLLMRouter(
                     }
                     if (finished) {
                       healthy();
-                      report('success', start);
+                      report('success', start, timeoutMs);
                       cancel();
                       controller.close();
                       return;
@@ -473,7 +539,7 @@ export function createLLMRouter(
                   } catch (error) {
                     cancel();
                     try {
-                      handleFailure(error, options, start);
+                      handleFailure(error, options, start, timeoutMs);
                     } catch (normalized) {
                       if (options.abortSignal?.aborted) controller.error(normalized);
                       else {
@@ -494,7 +560,7 @@ export function createLLMRouter(
           };
         } catch (error) {
           cancel();
-          if (!handleFailure(error, options, start)) throw error;
+          if (!handleFailure(error, options, start, timeoutMs)) throw error;
         }
       }
     },
