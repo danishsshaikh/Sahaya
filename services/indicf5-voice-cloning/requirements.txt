@@ -1,0 +1,13 @@
+# Server runtime only; no clean-room installation has been validated.
+# Tested CUDA stack: torch 2.14.0+cu130, torchaudio 2.11.0+cu130,
+# torchcodec 0.16.0+cu130. Provision compatible CUDA builds separately.
+# This source checkout reported f5_tts==0.1.0.
+git+https://github.com/AI4Bharat/IndicF5.git@13f7c4d627cc10111aea8fe9c0039462cacacdc7
+transformers==4.49.0
+torchcodec==0.16.0
+# HTTP/audio versions reused from the supplied Qwen POC, not an IndicF5 install test.
+fastapi==0.141.1
+uvicorn==0.53.0
+soundfile==0.14.0
+pydantic>=2,<3
+numpy

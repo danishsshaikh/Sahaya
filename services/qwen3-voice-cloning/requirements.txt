@@ -1,0 +1,8 @@
+# Server runtime only; no clean-room installation has been validated.
+# Provide compatible CUDA PyTorch separately: tested torch 2.14.0+cu130.
+qwen-tts==0.1.1
+fastapi==0.141.1
+uvicorn==0.53.0
+soundfile==0.14.0
+pydantic>=2,<3
+numpy
