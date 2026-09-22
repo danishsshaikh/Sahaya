@@ -7,7 +7,7 @@ import {
 } from '@/lib/voice-cloning/types';
 import type { ChatterboxModelVariant } from '@/lib/voice-cloning/types';
 
-function assertModelVariant(value: ChatterboxModelVariant): ChatterboxModelVariant {
+function assertModelVariant(value: ChatterboxModelVariant | undefined): ChatterboxModelVariant {
   if (!isChatterboxModelVariant(value)) {
     throw new Error(`Unsupported Chatterbox model variant: ${String(value)}`);
   }
@@ -81,8 +81,8 @@ export class ChatterboxVoiceCloningProvider implements VoiceCloningProvider {
     profileId: string;
     referenceAudioKey: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ providerReferenceId: string }> {
     const modelVariant = assertModelVariant(input.modelVariant);
     const result = await fetchJson<{ providerReferenceId?: string }>(`${this.baseUrl()}/profiles`, {
@@ -102,8 +102,8 @@ export class ChatterboxVoiceCloningProvider implements VoiceCloningProvider {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }> {
     return this.synthesize(input);
   }
@@ -112,8 +112,8 @@ export class ChatterboxVoiceCloningProvider implements VoiceCloningProvider {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }> {
     const modelVariant = assertModelVariant(input.modelVariant);
     return fetchAudio(

@@ -7,7 +7,16 @@ import {
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
 import { markVoiceConfigured, requireSessionUser } from '@/lib/auth/server';
-import { VOICE_CLONING_CONSENT_VERSION, VOICE_PREVIEW_TEXT } from '@/lib/voice-cloning/phrases';
+import {
+  VOICE_CLONING_CONSENT_VERSION,
+  getVoiceEnrollmentPhrases,
+  getVoicePreviewText,
+} from '@/lib/voice-cloning/phrases';
+import {
+  newTeachingVoiceProvider,
+  resolveTeachingVoiceLanguage,
+  validateTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import {
   createVoiceProfileId,
   deleteVoiceProfileAssets,
@@ -16,10 +25,12 @@ import {
   referenceAudioExists,
   writeReferenceAudio,
   writeVoiceProfile,
+  resolveReferenceAudioPath,
 } from '@/lib/voice-cloning/storage';
 import {
   isChatterboxModelVariant,
-  resolveNewVoiceProfileModelVariant,
+  resolveVoiceProfileProvider,
+  TeachingVoiceError,
   resolveVoiceProfileGenerationSettings,
   resolveVoiceProfileLanguageId,
   resolveVoiceProfileModelVariant,
@@ -43,17 +54,10 @@ import { resolveTTSLanguageCode, tryResolveTTSLanguageCode } from '@/lib/audio/t
 
 const log = createLogger('VoiceCloningProfileAPI');
 
-export const maxDuration = 120;
+export const maxDuration = 960;
 
 function disabled() {
   return apiError('PROVIDER_DISABLED', 404, 'Voice cloning is disabled');
-}
-
-function requestedModelVariant(
-  value: FormDataEntryValue | null,
-): ChatterboxModelVariant | null | undefined {
-  if (value === null) return undefined;
-  return resolveNewVoiceProfileModelVariant(typeof value === 'string' ? value : String(value));
 }
 
 function serverDefaultModelVariant(): ChatterboxModelVariant {
@@ -100,6 +104,19 @@ function resolveVoiceConfiguration(input: {
   fallbackProfile?: VoiceProfile;
 }): VoiceConfiguration {
   const profile = input.fallbackProfile;
+  if (profile) {
+    const languageId = validateTeachingVoiceLanguage(
+      profile,
+      typeof input.languageId === 'string' ? input.languageId : resolveVoiceProfileLanguageId(profile),
+    );
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
+      if (input.modelVariant !== undefined || input.generationSettings !== undefined) {
+        throw new TeachingVoiceError('Chatterbox settings do not apply to this Teaching Voice.');
+      }
+      return { languageId };
+    }
+  }
   const modelVariant =
     input.modelVariant === undefined
       ? profile
@@ -138,17 +155,20 @@ async function generateVariantPreview(
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new Error('Voice profile reference audio not found');
   }
-  const provider = getVoiceCloningProvider();
+  const providerId = resolveVoiceProfileProvider(profile);
+  validateTeachingVoiceLanguage(profile, config.languageId);
+  const provider = getVoiceCloningProvider(providerId);
   const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
-    referenceAudioKey: profile.referenceAudioKey,
+    referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
+    referenceText: profile.referenceText,
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
   });
   const preview = await provider.generatePreview({
     providerReferenceId,
-    text: VOICE_PREVIEW_TEXT,
+    text: getVoicePreviewText(config.languageId, providerId),
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
@@ -181,8 +201,26 @@ export async function GET(req: NextRequest) {
   if (!isVoiceCloningServerEnabled()) return disabled();
   const user = await requireSessionUser(req);
   if (user instanceof Response) return user;
-  const profile = await findCurrentVoiceProfile(user.id);
-  return apiSuccess({ profile: toPublicVoiceProfile(profile) });
+  try {
+    const params = req.nextUrl.searchParams;
+    const requested = params.get('language');
+    const language = requested === null ? undefined : resolveTeachingVoiceLanguage(requested);
+    if (language === null) return apiError('INVALID_REQUEST', 400, 'Unsupported or ambiguous voice language');
+    const profileId = params.get('profileId');
+    const profile = profileId
+      ? await readVoiceProfile(profileId, user.id)
+      : await findCurrentVoiceProfile(user.id, language);
+    if (profileId && (!profile || profile.ownerId !== user.id || profile.status !== 'ready')) {
+      return apiError('INVALID_REQUEST', 404, 'Selected Teaching Voice is not ready or no longer exists');
+    }
+    if (profileId && profile) {
+      getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
+      validateTeachingVoiceLanguage(profile, requested ?? undefined);
+    }
+    return apiSuccess({ profile: toPublicVoiceProfile(profile) });
+  } catch (error) {
+    return apiError('INVALID_REQUEST', 400, error instanceof TeachingVoiceError ? error.message : 'Could not load Teaching Voice');
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -202,18 +240,18 @@ export async function POST(req: NextRequest) {
       typeof formData.get('displayName') === 'string'
         ? String(formData.get('displayName')).trim().slice(0, 80)
         : '';
-    const parsedModelVariant = requestedModelVariant(formData.get('modelVariant'));
-    if (parsedModelVariant === null) {
-      return apiError('INVALID_REQUEST', 400, 'Unsupported voice model');
-    }
     let languageId: string;
-    let generationSettings: VoiceGenerationSettings;
+    let providerId: 'qwen3' | 'indicf5';
+    let referenceText: string;
     try {
-      languageId = parseProfileLanguageId(
-        formData.get('languageId') ?? formData.get('language'),
-        getVoiceCloningDefaultLanguage(),
-      );
-      generationSettings = parseGenerationSettings(formData.get('generationSettings'));
+      const languageValue = formData.get('languageId') ?? formData.get('language');
+      languageId = resolveTeachingVoiceLanguage(typeof languageValue === 'string' ? languageValue : null) || '';
+      providerId = newTeachingVoiceProvider(languageId);
+      const phrase = getVoiceEnrollmentPhrases(languageId).find((item) => item.id === formData.get('phraseId'));
+      if (!phrase || formData.get('referenceText') !== phrase.text) {
+        throw new TeachingVoiceError('The enrollment paragraph has changed. Reload and record the displayed paragraph again.');
+      }
+      referenceText = phrase.text;
     } catch (error) {
       return apiError(
         'INVALID_REQUEST',
@@ -222,9 +260,7 @@ export async function POST(req: NextRequest) {
       );
     }
     const config: VoiceConfiguration = {
-      modelVariant: parsedModelVariant ?? serverDefaultModelVariant(),
       languageId,
-      generationSettings,
     };
     const attemptId = randomUUID();
     let normalizedReference: Awaited<ReturnType<typeof normalizeVoiceEnrollmentRecording>>;
@@ -271,11 +307,11 @@ export async function POST(req: NextRequest) {
       return apiError(
         'INVALID_REQUEST',
         400,
-        error instanceof Error ? error.message : 'Invalid voice recording',
+        'Invalid voice recording',
       );
     }
 
-    previousProfile = await findCurrentVoiceProfile(user.id);
+    previousProfile = await findCurrentVoiceProfile(user.id, languageId, true);
 
     const profileId = createVoiceProfileId();
     const now = new Date().toISOString();
@@ -283,11 +319,10 @@ export async function POST(req: NextRequest) {
       id: profileId,
       ownerId: user.id,
       displayName: displayName || 'My Teaching Voice',
-      provider: 'chatterbox',
+      provider: providerId,
       language: languageId,
       languageId,
-      modelVariant: config.modelVariant,
-      generationSettings,
+      referenceText,
       status: 'processing',
       createdAt: now,
       updatedAt: now,
@@ -346,21 +381,20 @@ export async function POST(req: NextRequest) {
         ...profile,
         status: 'failed' as const,
         updatedAt: new Date().toISOString(),
-        failureReason: error instanceof Error ? error.message : 'Voice enrollment failed',
+        failureReason: error instanceof TeachingVoiceError ? error.message : 'Voice enrollment failed',
       };
       await writeVoiceProfile(failed).catch(() => undefined);
     }
     log.warn('voice profile enrollment failed', {
       operation: 'enroll',
       status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
+      error: error instanceof TeachingVoiceError ? error.message : 'Voice enrollment failed',
       profileId: profile?.id,
     });
     return apiError(
       'GENERATION_FAILED',
       500,
-      'Voice enrollment failed',
-      error instanceof Error ? error.message : String(error),
+      error instanceof TeachingVoiceError ? error.message : 'Voice enrollment failed',
     );
   }
 }
@@ -403,7 +437,14 @@ export async function PATCH(req: NextRequest) {
     if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
       return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready for preview');
     }
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config);
+    let generated: Awaited<ReturnType<typeof generateVariantPreview>>;
+    try {
+      generated = await generateVariantPreview(profile, config);
+    } catch (error) {
+      return apiError('GENERATION_FAILED', error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Teaching Voice preview failed');
+    }
+    const { providerReferenceId, preview } = generated;
     const next = {
       ...profile,
       providerReferenceId,
@@ -440,18 +481,20 @@ export async function PATCH(req: NextRequest) {
     if (
       previousProfile &&
       previousProfile.ownerId === user.id &&
+      resolveTeachingVoiceLanguage(resolveVoiceProfileLanguageId(previousProfile)) === config.languageId &&
       previousProfile.status !== 'deleted'
     ) {
       if (previousProfile.providerReferenceId) {
-        await getVoiceCloningProvider()
+        await getVoiceCloningProvider(resolveVoiceProfileProvider(previousProfile))
           .deleteProfile({ providerReferenceId: previousProfile.providerReferenceId })
-          .catch(() => undefined);
+          .catch(() => log.warn('Could not remove replaced Teaching Voice service registration'));
       }
       await deleteVoiceProfileAssets(previousProfile);
       await writeVoiceProfile({
         ...previousProfile,
         status: 'deleted',
         referenceAudioKey: undefined,
+        referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,
         previewVariants: undefined,
@@ -476,15 +519,15 @@ export async function DELETE(req: NextRequest) {
   }
   try {
     if (profile.providerReferenceId) {
-      await getVoiceCloningProvider()
-        .deleteProfile({ providerReferenceId: profile.providerReferenceId })
-        .catch(() => undefined);
+      await getVoiceCloningProvider(resolveVoiceProfileProvider(profile))
+        .deleteProfile({ providerReferenceId: profile.providerReferenceId });
     }
     await deleteVoiceProfileAssets(profile);
     await writeVoiceProfile({
       ...profile,
       status: 'deleted',
       referenceAudioKey: undefined,
+      referenceText: undefined,
       providerReferenceId: undefined,
       preview: undefined,
       previewVariants: undefined,
@@ -501,8 +544,7 @@ export async function DELETE(req: NextRequest) {
     return apiError(
       'INTERNAL_ERROR',
       500,
-      'Voice profile deletion failed',
-      error instanceof Error ? error.message : String(error),
+      error instanceof TeachingVoiceError ? error.message : 'Voice profile deletion failed',
     );
   }
 }

@@ -16,7 +16,7 @@ import type { AgentInfo } from '@openmaic/generation';
 import type { Scene } from '@/lib/types/stage';
 import type { SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
-import { resolveTTSLanguageCode } from '@/lib/audio/tts-language';
+import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { resolveAgentVoiceOptions, pickNarratorAgent } from '@/lib/audio/agent-voice';
@@ -429,7 +429,10 @@ export async function generateAndStoreTTS(
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
-  const ttsLanguageCode = teacherVoiceProfileId ? resolveTTSLanguageCode(language) : undefined;
+  const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
+  const ttsLanguageCode = teacherVoiceProfileId
+    ? resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage
+    : undefined;
   // A generated roster's explicit voice binding is the course voice source of truth.
   // Global settings remain the fallback for classrooms without a binding.
   const teacher = pickNarratorAgent(useAgentRegistry.getState().listAgents());
@@ -474,6 +477,7 @@ export async function generateAndStoreTTS(
   // same broken provider — swap in the deterministic enabled-provider pick
   // instead of silently skipping narration below.
   if (
+    !teacherVoiceProfileId &&
     boundVoice &&
     !globalDiffers &&
     !isTTSProviderEnabled(
@@ -545,6 +549,7 @@ export async function generateAndStoreTTS(
         label: `tts "${requestId}"`,
         shouldRetryResult: (result) => !result.success || !result.base64 || !result.format,
         ...retryOptions,
+        ...(teacherVoiceProfileId ? { maxRetries: 0 } : {}),
         signal,
       },
     );
@@ -561,6 +566,7 @@ export async function generateAndStoreTTS(
     // hot-looping /api/generate/tts (bound-dead → global-dead → …). The
     // fallbackHops bound keeps even pathological chains at a single hop.
     if (
+      !teacherVoiceProfileId &&
       errorCode === 'QWEN_VC_VOICE_NOT_FOUND' &&
       boundKey &&
       boundVoice &&
@@ -795,10 +801,9 @@ export async function generateTTSForScene(
   // the server opts into parallel generation, render them with bounded
   // concurrency (reusing the PARALLEL_SCENE_CONCURRENCY knob) instead of one at a
   // time. Default (0 / unset) keeps the original strictly-serial behaviour.
-  const ttsConcurrency = Math.max(
-    0,
-    Math.floor(useSettingsStore.getState().parallelSceneConcurrency ?? 0),
-  );
+  const ttsConcurrency = teacherVoiceProfileId
+    ? 1
+    : Math.max(0, Math.floor(useSettingsStore.getState().parallelSceneConcurrency ?? 0));
   try {
     if (ttsConcurrency > 1 && speechActions.length > 1) {
       const settled = await Promise.allSettled(

@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFeatureFlagBoolean } from '@/lib/config/feature-flags';
-import { VOICE_ENROLLMENT_PARAGRAPH } from '@/lib/voice-cloning/phrases';
+import { VOICE_ENROLLMENT_PARAGRAPH, getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
 import {
   MAX_RECORDING_DURATION_SECONDS,
   MIN_RECORDING_DURATION_SECONDS,
@@ -262,6 +262,7 @@ describe('faculty voice synthesis language resolution', () => {
       })),
       referenceAudioExists,
       writeVoiceProfile,
+      resolveReferenceAudioPath: (key: string) => key,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', async () => {
       const actual = await vi.importActual<typeof import('@/lib/voice-cloning/audio-validation')>(
@@ -280,25 +281,17 @@ describe('faculty voice synthesis language resolution', () => {
     }));
   });
 
-  it('never forwards arbitrary generation prose as a provider language id', async () => {
+  it('rejects ambiguous narration language before contacting the provider', async () => {
     synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
     const { synthesizeFacultyVoice } = await import('@/lib/voice-cloning/synthesis');
 
-    await synthesizeFacultyVoice({
+    await expect(synthesizeFacultyVoice({
       profileId: 'vcp_ready',
       ownerId: 'local-faculty',
       text: 'Hello class',
       language: 'Use clear beginner-friendly wording throughout.',
-    });
-
-    expect(synthesize).toHaveBeenCalledWith({
-      providerReferenceId: 'ref-1',
-      text: 'Hello class',
-      language: 'hi',
-      modelVariant: 'v3',
-      generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
-    });
-    expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(new Uint8Array([1]), 'wav');
+    })).rejects.toThrow('unambiguous narration language');
+    expect(synthesize).not.toHaveBeenCalled();
   });
 
   it('re-registers a persisted profile after provider restart and retries synthesis once', async () => {
@@ -312,7 +305,7 @@ describe('faculty voice synthesis language resolution', () => {
       profileId: 'vcp_ready',
       ownerId: 'local-faculty',
       text: 'Hello class',
-      language: 'en-US',
+      language: 'hi-IN',
     });
 
     expect(result).toEqual({ audio: new Uint8Array([1, 8]), format: 'wav' });
@@ -448,7 +441,7 @@ describe('faculty voice setup UI contract', () => {
     expect(source).toContain('Balanced settings for clear, natural teaching narration.');
     expect(source).toContain('Adds more emphasis and energy to the delivery.');
     expect(source).toContain('Uses lower voice guidance to test whether the generated accent');
-    expect(source).toContain('Choose the language this teaching voice will speak.');
+    expect(source).toContain("The reference recording fixes this voice's language.");
     expect(source).toContain('Voice Model');
     expect(source).toContain('Advanced Voice Settings');
     expect(source).toContain('Expert Settings');
@@ -679,6 +672,7 @@ describe('voice profile model preview API', () => {
       referenceAudioExists,
       writeReferenceAudio,
       writeVoiceProfile,
+      resolveReferenceAudioPath: (key: string) => key,
     }));
     vi.doMock('@/lib/voice-cloning/provider', () => ({
       getVoiceCloningProvider: () => ({
@@ -719,10 +713,18 @@ describe('voice profile model preview API', () => {
     };
   }
 
-  it('creates new faculty profiles with V3 by default', async () => {
+  function enrollmentForm(): FormData {
+    const data = new FormData();
+    data.set('consent', 'true');
+    data.set('languageId', 'en');
+    data.set('phraseId', 'teaching-paragraph');
+    data.set('referenceText', VOICE_ENROLLMENT_PARAGRAPH);
+    return data;
+  }
+
+  it('creates new English profiles with Qwen and the exact approved transcript', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
-    const formData = new FormData();
-    formData.set('consent', 'true');
+    const formData = enrollmentForm();
     formData.set(
       'recording',
       new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
@@ -745,40 +747,40 @@ describe('voice profile model preview API', () => {
         fileName: 'voice.webm',
       }),
     );
-    expect(data.profile.modelVariant).toBe('v3');
+    expect(data.profile.provider).toBe('qwen3');
+    expect(data.profile.modelVariant).toBeUndefined();
     expect(data.profile.languageId).toBe('en');
-    expect(data.profile.generationSettings).toEqual(RECOMMENDED_VOICE_GENERATION_SETTINGS);
+    expect(data.profile.generationSettings).toBeUndefined();
+    expect(data.profile.referenceText).toBeUndefined();
+    expect(writeVoiceProfile).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'qwen3', referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+    }));
+    expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', 'en', true);
     expect(data.profile.draftPreview.config).toEqual({
-      modelVariant: 'v3',
       languageId: 'en',
-      generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
     });
     expect(data.profile.draftPreview.preview.base64).toBe(
       Buffer.from([1, 2, 9]).toString('base64'),
     );
     expect(createProfile).toHaveBeenCalledWith(
       expect.objectContaining({
-        modelVariant: 'v3',
         language: 'en',
         referenceAudioKey: '/private/reference.wav',
-        generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
       }),
     );
     expect(generatePreview).toHaveBeenCalledWith(
       expect.objectContaining({
-        modelVariant: 'v3',
         language: 'en',
-        generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
       }),
     );
     expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(new Uint8Array([1, 2]), 'wav');
   });
 
-  it('rejects unknown profile model variants clearly', async () => {
+  it('rejects an enrollment transcript that differs from the displayed approved phrase', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
-    const formData = new FormData();
-    formData.set('consent', 'true');
-    formData.set('modelVariant', 'checkpoint-name');
+    const formData = enrollmentForm();
+    formData.set('referenceText', 'An unrelated recording transcript');
 
     const response = await POST(
       new Request('http://localhost/api/voice-cloning/profile', {
@@ -793,7 +795,41 @@ describe('voice profile model preview API', () => {
     expect(createProfile).not.toHaveBeenCalled();
   });
 
-  it('rejects unsupported profile languages and malformed settings clearly', async () => {
+  it.each(['hi', 'mr'])('enrolls %s with its approved transcript and Indic preview', async (language) => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = enrollmentForm();
+    const phrase = getVoiceEnrollmentPhrases(language)[0];
+    form.set('languageId', language);
+    form.set('phraseId', phrase.id);
+    form.set('referenceText', phrase.text);
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.webm', { type: 'audio/webm' }));
+    const response = await POST(new Request('http://localhost/api/voice-cloning/profile', {
+      method: 'POST', body: form,
+    }) as never);
+    expect(response.status).toBe(201);
+    expect(writeVoiceProfile).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'indicf5', languageId: language, referenceText: phrase.text,
+    }));
+    expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', language, true);
+    expect(generatePreview).toHaveBeenCalledWith(expect.objectContaining({
+      language, text: getVoicePreviewText(language, 'indicf5'),
+    }));
+  });
+
+  it('rejects changing a recorded profile language through preview settings', async () => {
+    readVoiceProfile.mockResolvedValue(readyProfile());
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+    const response = await PATCH(new Request('http://localhost/api/voice-cloning/profile', {
+      method: 'PATCH', body: JSON.stringify({
+        profileId: 'vcp_ready', action: 'preview-model', languageId: 'hi',
+      }),
+    }) as never);
+    expect(response.status).toBe(400);
+    expect(generatePreview).not.toHaveBeenCalled();
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported languages and mismatched phrase IDs clearly', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
     const unsupportedLanguage = new FormData();
     unsupportedLanguage.set('consent', 'true');
@@ -807,9 +843,8 @@ describe('voice profile model preview API', () => {
     );
     expect(languageResponse.status).toBe(400);
 
-    const malformedSettings = new FormData();
-    malformedSettings.set('consent', 'true');
-    malformedSettings.set('generationSettings', JSON.stringify({ cfgWeight: 3 }));
+    const malformedSettings = enrollmentForm();
+    malformedSettings.set('phraseId', 'unknown-phrase');
 
     const settingsResponse = await POST(
       new Request('http://localhost/api/voice-cloning/profile', {
@@ -829,8 +864,7 @@ describe('voice profile model preview API', () => {
       ),
     );
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
-    const formData = new FormData();
-    formData.set('consent', 'true');
+    const formData = enrollmentForm();
     formData.set(
       'recording',
       new File([new Uint8Array([1, 2])], 'voice.webm', { type: 'audio/webm' }),
@@ -858,8 +892,7 @@ describe('voice profile model preview API', () => {
     const existingProfile = readyProfile('v3');
     findCurrentVoiceProfile.mockResolvedValue(existingProfile);
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
-    const formData = new FormData();
-    formData.set('consent', 'true');
+    const formData = enrollmentForm();
     formData.set(
       'recording',
       new File([new Uint8Array([1, 2, 3, 4])], 'replacement.webm', { type: 'audio/webm' }),
@@ -912,7 +945,7 @@ describe('voice profile model preview API', () => {
           profileId: 'vcp_ready',
           action: 'preview-model',
           modelVariant: 'v3',
-          languageId: 'hi',
+          languageId: 'en',
           generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         }),
       }) as never,
@@ -930,7 +963,7 @@ describe('voice profile model preview API', () => {
     expect(createProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         modelVariant: 'v3',
-        language: 'hi',
+        language: 'en',
         referenceAudioKey: '/private/reference.wav',
         generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
       }),
@@ -943,7 +976,7 @@ describe('voice profile model preview API', () => {
         draftPreview: expect.objectContaining({
           config: {
             modelVariant: 'v3',
-            languageId: 'hi',
+            languageId: 'en',
             generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
           },
         }),
@@ -959,7 +992,7 @@ describe('voice profile model preview API', () => {
         draftPreview: {
           config: {
             modelVariant: 'v3',
-            languageId: 'hi',
+            languageId: 'en',
             generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
           },
           preview: { format: 'wav', base64: 'new', createdAt: '2026-08-12T00:00:00.000Z' },
@@ -979,7 +1012,7 @@ describe('voice profile model preview API', () => {
           profileId: 'vcp_ready',
           action: 'accept-preview',
           modelVariant: 'v3',
-          languageId: 'hi',
+          languageId: 'en',
           generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         }),
       }) as never,
@@ -988,7 +1021,7 @@ describe('voice profile model preview API', () => {
 
     expect(response.status).toBe(200);
     expect(data.profile.modelVariant).toBe('v3');
-    expect(data.profile.languageId).toBe('hi');
+    expect(data.profile.languageId).toBe('en');
     expect(data.profile.generationSettings).toEqual(VOICE_SETTINGS_PRESETS['accent-test']);
     expect(writeVoiceProfile).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -1004,8 +1037,8 @@ describe('voice profile model preview API', () => {
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         modelVariant: 'v3',
-        language: 'hi',
-        languageId: 'hi',
+        language: 'en',
+        languageId: 'en',
         generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         referenceAudioKey: '/private/reference.wav',
         preview: { format: 'wav', base64: 'new', createdAt: '2026-08-12T00:00:00.000Z' },

@@ -46,9 +46,9 @@ export const VOICE_SETTINGS_PRESETS: Record<
 };
 
 export interface VoiceConfiguration {
-  modelVariant: ChatterboxModelVariant;
+  modelVariant?: ChatterboxModelVariant;
   languageId: string;
-  generationSettings: VoiceGenerationSettings;
+  generationSettings?: VoiceGenerationSettings;
 }
 
 export interface VoicePreview {
@@ -79,6 +79,7 @@ export interface VoiceProfile {
   consentTimestamp: string;
   consentVersion: string;
   referenceAudioKey?: string;
+  referenceText?: string;
   providerReferenceId?: string;
   modelVariant?: ChatterboxModelVariant;
   languageId?: string;
@@ -102,9 +103,9 @@ export interface PublicVoiceProfile {
   updatedAt: string;
   consentTimestamp: string;
   consentVersion: string;
-  modelVariant: ChatterboxModelVariant;
+  modelVariant?: ChatterboxModelVariant;
   languageId: string;
-  generationSettings: VoiceGenerationSettings;
+  generationSettings?: VoiceGenerationSettings;
   profileVersion: number;
   preview?: VoicePreview;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
@@ -117,9 +118,10 @@ export interface VoiceCloningProvider {
   createProfile(input: {
     profileId: string;
     referenceAudioKey: string;
+    referenceText?: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{
     providerReferenceId: string;
   }>;
@@ -127,21 +129,33 @@ export interface VoiceCloningProvider {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }>;
   synthesize(input: {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }>;
   deleteProfile(input: { providerReferenceId: string }): Promise<void>;
 }
 
 export function isChatterboxModelVariant(value: unknown): value is ChatterboxModelVariant {
   return value === 'v2' || value === 'v3';
+}
+
+export function resolveVoiceProfileProvider(profile: { provider?: string }): string {
+  // Only absent legacy metadata implies Chatterbox; unknown explicit IDs fail.
+  return profile.provider === undefined ? 'chatterbox' : profile.provider;
+}
+
+export class TeachingVoiceError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = 'TeachingVoiceError';
+  }
 }
 
 export function resolveVoiceProfileModelVariant(profile: {
@@ -243,12 +257,16 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
   return {
     id: profile.id,
     displayName: profile.displayName,
-    provider: profile.provider,
+    provider: resolveVoiceProfileProvider(profile),
     language: profile.language,
     status: profile.status,
-    modelVariant: resolveVoiceProfileModelVariant(profile),
     languageId: resolveVoiceProfileLanguageId(profile),
-    generationSettings: resolveVoiceProfileGenerationSettings(profile),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
+      ? {
+          modelVariant: resolveVoiceProfileModelVariant(profile),
+          generationSettings: resolveVoiceProfileGenerationSettings(profile),
+        }
+      : {}),
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     consentTimestamp: profile.consentTimestamp,

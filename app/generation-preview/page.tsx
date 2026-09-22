@@ -732,6 +732,18 @@ function GenerationPreviewContent() {
       if (languageDirective) {
         stage.languageDirective = languageDirective;
       }
+      // Voice selection precedes language inference. Verify before generating media.
+      if (stage.teacherVoiceProfileId) {
+        const query = new URLSearchParams({
+          profileId: stage.teacherVoiceProfileId,
+          language: languageDirective || '',
+        });
+        const response = await fetch(`/api/voice-cloning/profile?${query}`);
+        const result = await response.json();
+        if (!response.ok || !result.profile) {
+          throw new Error(result.error || 'Select a Teaching Voice matching the narration language.');
+        }
+      }
 
       // Adopt the LLM-inferred course title as the stage name when available,
       // replacing the raw-requirement placeholder set at stage creation time.

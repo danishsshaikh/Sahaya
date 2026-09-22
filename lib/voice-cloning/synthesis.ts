@@ -4,15 +4,17 @@ import {
   readVoiceProfile,
   referenceAudioExists,
   writeVoiceProfile,
+  resolveReferenceAudioPath,
 } from '@/lib/voice-cloning/storage';
-import { resolveTTSLanguageCode } from '@/lib/audio/tts-language';
+import { validateTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import { masterGeneratedVoiceAudio } from '@/lib/voice-cloning/audio-validation';
 import { createLogger } from '@/lib/logger';
 import {
   isVoiceProviderProfileNotFoundError,
   resolveVoiceProfileGenerationSettings,
-  resolveVoiceProfileLanguageId,
+  resolveVoiceProfileProvider,
   resolveVoiceProfileModelVariant,
+  TeachingVoiceError,
 } from '@/lib/voice-cloning/types';
 
 const log = createLogger('VoiceCloningSynthesis');
@@ -24,31 +26,31 @@ export async function synthesizeFacultyVoice(input: {
   language?: string;
 }): Promise<{ audio: Uint8Array; format: string }> {
   if (!isVoiceCloningServerEnabled()) {
-    throw new Error('Voice cloning is disabled');
+    throw new TeachingVoiceError('Voice cloning is disabled.', 403);
   }
   const profile = await readVoiceProfile(input.profileId, input.ownerId);
   if (!profile || profile.ownerId !== input.ownerId || profile.status === 'deleted') {
-    throw new Error('Voice profile not found');
+    throw new TeachingVoiceError('Voice profile not found.', 404);
   }
   if (profile.status !== 'ready' || !profile.providerReferenceId) {
-    throw new Error('Voice profile is not ready');
+    throw new TeachingVoiceError('Voice profile is not ready.');
   }
   if (!(await referenceAudioExists(profile.referenceAudioKey))) {
-    throw new Error('Voice profile reference audio not found');
+    throw new TeachingVoiceError('Voice profile reference audio not found. Re-enroll this voice.');
   }
-  const language = resolveTTSLanguageCode(resolveVoiceProfileLanguageId(profile), {
-    fallbackLanguage: profile.language,
-  });
-  const modelVariant = resolveVoiceProfileModelVariant(profile);
-  const generationSettings = resolveVoiceProfileGenerationSettings(profile);
-  const provider = getVoiceCloningProvider();
+  const language = validateTeachingVoiceLanguage(profile, input.language);
+  const providerId = resolveVoiceProfileProvider(profile);
+  const settings = providerId === 'chatterbox' ? {
+    modelVariant: resolveVoiceProfileModelVariant(profile),
+    generationSettings: resolveVoiceProfileGenerationSettings(profile),
+  } : {};
+  const provider = getVoiceCloningProvider(providerId);
   const synthesize = async (providerReferenceId: string) => {
     const result = await provider.synthesize({
       providerReferenceId,
       text: input.text,
       language,
-      modelVariant,
-      generationSettings,
+      ...settings,
     });
     const mastered = await masterGeneratedVoiceAudio(result.audio, result.format);
     log.info('voice output mastering completed', {
@@ -69,10 +71,10 @@ export async function synthesizeFacultyVoice(input: {
 
   const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
-    referenceAudioKey: profile.referenceAudioKey!,
+    referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
+    ...(profile.referenceText ? { referenceText: profile.referenceText } : {}),
     language,
-    modelVariant,
-    generationSettings,
+    ...settings,
   });
   if (providerReferenceId !== profile.providerReferenceId) {
     await writeVoiceProfile({

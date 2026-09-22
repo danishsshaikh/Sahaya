@@ -47,6 +47,7 @@ import {
 } from '@/lib/playback/action-navigation';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useSettingsStore } from '@/lib/store/settings';
+import { useStageStore } from '@/lib/store/stage';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { createLogger } from '@/lib/logger';
 
@@ -631,6 +632,7 @@ export class PlaybackEngine {
               // the selected provider AND actually enabled (opt-in, #665).
               const settings = useSettingsStore.getState();
               if (
+                !useStageStore.getState().stage?.teacherVoiceProfileId &&
                 hasText &&
                 settings.ttsEnabled &&
                 settings.ttsProviderId === 'browser-native-tts' &&

@@ -30,13 +30,15 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
+import { TeachingVoiceError } from '@/lib/voice-cloning/types';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
 import { isQwenCloneVoice } from '@/lib/audio/constants';
 
 const log = createLogger('TTS API');
 
-export const maxDuration = 30;
+// Local GPU Teaching Voice can take several minutes, including a cold load.
+export const maxDuration = 960;
 
 export async function POST(req: NextRequest) {
   const user = await requireSessionUser(req);
@@ -73,7 +75,7 @@ export async function POST(req: NextRequest) {
           : undefined;
 
     // Validate required fields
-    if (!text || !audioId || !ttsProviderId || !ttsVoice) {
+    if (!text || !audioId) {
       return apiError(
         'MISSING_REQUIRED_FIELD',
         400,
@@ -82,14 +84,34 @@ export async function POST(req: NextRequest) {
     }
 
     if (teacherVoiceProfileId) {
-      const { audio, format } = await synthesizeFacultyVoice({
-        profileId: teacherVoiceProfileId,
-        ownerId: user.id,
-        text,
-        language: ttsLanguageCode,
-      });
-      const base64 = Buffer.from(audio).toString('base64');
-      return apiSuccess({ audioId, base64, format });
+      try {
+        const { audio, format } = await synthesizeFacultyVoice({
+          profileId: teacherVoiceProfileId,
+          ownerId: user.id,
+          text,
+          language: ttsLanguageCode,
+        });
+        const base64 = Buffer.from(audio).toString('base64');
+        return apiSuccess({ audioId, base64, format });
+      } catch (error) {
+        const message = error instanceof TeachingVoiceError
+          ? error.message
+          : 'Teaching Voice generation failed. No alternate voice was used.';
+        log.warn('Teaching Voice generation failed', { message });
+        return apiError(
+          'GENERATION_FAILED',
+          error instanceof TeachingVoiceError ? error.status : 500,
+          message,
+        );
+      }
+    }
+
+    if (!ttsProviderId || !ttsVoice) {
+      return apiError(
+        'MISSING_REQUIRED_FIELD',
+        400,
+        'Missing required fields: text, audioId, ttsProviderId, ttsVoice',
+      );
     }
 
     // Reject browser-native TTS — must be handled client-side

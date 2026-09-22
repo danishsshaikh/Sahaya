@@ -3,6 +3,8 @@ import path from 'path';
 import { nanoid } from 'nanoid';
 import { getVoiceCloningStorageDir } from '@/lib/voice-cloning/config';
 import type { VoiceProfile } from '@/lib/voice-cloning/types';
+import { resolveVoiceProfileLanguageId } from '@/lib/voice-cloning/types';
+import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 
 const PROFILE_FILE = 'profile.json';
 const REFERENCE_FILE = 'reference.wav';
@@ -44,7 +46,11 @@ function profilePath(profileId: string, ownerId: string): string {
 }
 
 export function referenceAudioKeyForProfile(profileId: string, ownerId: string): string {
-  return path.join(getVoiceProfileDir(profileId, ownerId), REFERENCE_FILE);
+  return path.resolve(getVoiceProfileDir(profileId, ownerId), REFERENCE_FILE);
+}
+
+export function resolveReferenceAudioPath(referenceAudioKey: string): string {
+  return path.resolve(referenceAudioKey);
 }
 
 export async function writeVoiceProfile(profile: VoiceProfile): Promise<void> {
@@ -81,7 +87,11 @@ export async function referenceAudioExists(
   }
 }
 
-export async function findCurrentVoiceProfile(ownerId: string): Promise<VoiceProfile | null> {
+export async function findCurrentVoiceProfile(
+  ownerId: string,
+  language?: string,
+  readyOnly = false,
+): Promise<VoiceProfile | null> {
   const root = path.join(
     getVoiceCloningStorageDir(),
     'users',
@@ -100,7 +110,12 @@ export async function findCurrentVoiceProfile(ownerId: string): Promise<VoicePro
   for (const entry of entries) {
     if (!entry.startsWith('vcp_')) continue;
     const profile = await readVoiceProfile(entry, ownerId).catch(() => null);
-    if (profile?.ownerId === ownerId && profile.status !== 'deleted') {
+    if (
+      profile?.ownerId === ownerId && profile.status !== 'deleted' &&
+      (!readyOnly || profile.status === 'ready') &&
+      (language === undefined ||
+        resolveTeachingVoiceLanguage(resolveVoiceProfileLanguageId(profile)) === language)
+    ) {
       profiles.push(profile);
     }
   }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   CircleAlert,
@@ -19,9 +19,9 @@ import {
   CHATTERBOX_LANGUAGE_LABELS,
   CHATTERBOX_SUPPORTED_LANGUAGE_IDS,
   isTTSLanguageCode,
-  type TTSLanguageCode,
 } from '@/lib/audio/tts-language';
-import { VOICE_ENROLLMENT_PARAGRAPH } from '@/lib/voice-cloning/phrases';
+import { getVoiceEnrollmentPhrases } from '@/lib/voice-cloning/phrases';
+import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import {
   MIN_RECORDING_SIZE_BYTES,
   VOICE_ENROLLMENT_TARGET_SECONDS,
@@ -32,6 +32,7 @@ import {
   VOICE_GENERATION_SETTING_RANGES,
   VOICE_SETTINGS_PRESETS,
   voiceGenerationPresetForSettings,
+  resolveVoiceProfileProvider,
   type ChatterboxModelVariant,
   type PublicVoiceProfile,
   type VoiceConfiguration,
@@ -136,29 +137,29 @@ function cloneRecommendedSettings(): VoiceGenerationSettings {
   return { ...RECOMMENDED_VOICE_GENERATION_SETTINGS };
 }
 
-function normalizeProfileLanguageId(profile: PublicVoiceProfile | null): TTSLanguageCode {
-  return isTTSLanguageCode(profile?.languageId) ? profile.languageId : 'en';
+function normalizeProfileLanguageId(profile: PublicVoiceProfile | null): string {
+  return resolveTeachingVoiceLanguage(profile?.languageId || profile?.language) || 'en';
 }
 
 function profileConfiguration(profile: PublicVoiceProfile): VoiceConfiguration {
   return {
-    modelVariant: profile.modelVariant,
     languageId: normalizeProfileLanguageId(profile),
-    generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox' ? {
+      modelVariant: profile.modelVariant,
+      generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
+    } : {}),
   };
 }
 
 function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
-  return (
-    left.modelVariant === right.modelVariant &&
-    left.languageId === right.languageId &&
-    Object.keys(RECOMMENDED_VOICE_GENERATION_SETTINGS).every((key) => {
-      const typedKey = key as keyof VoiceGenerationSettings;
-      return (
-        Math.abs(left.generationSettings[typedKey] - right.generationSettings[typedKey]) < 0.000001
-      );
-    })
-  );
+  if (left.modelVariant !== right.modelVariant || left.languageId !== right.languageId) return false;
+  const a = left.generationSettings;
+  const b = right.generationSettings;
+  if (!a || !b) return a === b;
+  return Object.keys(RECOMMENDED_VOICE_GENERATION_SETTINGS).every((key) => {
+    const typedKey = key as keyof VoiceGenerationSettings;
+    return Math.abs(a[typedKey] - b[typedKey]) < 0.000001;
+  });
 }
 
 function chooseMimeType(): string {
@@ -181,17 +182,21 @@ export function TeachingVoiceCard({
   selectedProfileId,
   onSelectedProfileIdChange,
 }: TeachingVoiceCardProps) {
-  const enrollmentParagraph = useMemo(() => VOICE_ENROLLMENT_PARAGRAPH, []);
+  const [enrollmentLanguage, setEnrollmentLanguage] = useState('en');
+  const enrollmentPhrase = getVoiceEnrollmentPhrases(enrollmentLanguage)[0];
+  const enrollmentParagraph = enrollmentPhrase?.text;
   const [profile, setProfile] = useState<PublicVoiceProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [consented, setConsented] = useState(false);
   const [recording, setRecording] = useState<ClipState>({});
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
+  const [recordingPending, setRecordingPending] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [draftModelVariant, setDraftModelVariant] = useState<ChatterboxModelVariant>(
     DEFAULT_CHATTERBOX_MODEL_VARIANT,
   );
-  const [draftLanguageId, setDraftLanguageId] = useState<TTSLanguageCode>('en');
+  const [draftLanguageId, setDraftLanguageId] = useState('en');
   const [draftGenerationSettings, setDraftGenerationSettings] =
     useState<VoiceGenerationSettings>(cloneRecommendedSettings);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -217,10 +222,13 @@ export function TeachingVoiceCard({
   const recordingUrlRef = useRef<string | undefined>(undefined);
 
   const readyProfile = profile?.status === 'ready' ? profile : null;
+  const isChatterboxProfile = !!profile && resolveVoiceProfileProvider(profile) === 'chatterbox';
   const draftConfiguration: VoiceConfiguration = {
-    modelVariant: draftModelVariant,
     languageId: draftLanguageId,
-    generationSettings: draftGenerationSettings,
+    ...(isChatterboxProfile ? {
+      modelVariant: draftModelVariant,
+      generationSettings: draftGenerationSettings,
+    } : {}),
   };
   const draftPreset = voiceGenerationPresetForSettings(draftGenerationSettings);
   const draftPresetDescription =
@@ -282,8 +290,13 @@ export function TeachingVoiceCard({
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/voice-cloning/profile')
-      .then((res) => (res.ok ? res.json() : null))
+    setProfileLoading(true);
+    fetch(`/api/voice-cloning/profile?language=${encodeURIComponent(enrollmentLanguage)}`)
+      .then(async (res) => {
+        const data = await res.json() as ApiProfileResponse;
+        if (!res.ok) throw new Error(data.error || 'Could not load Teaching Voice.');
+        return data;
+      })
       .then((data: ApiProfileResponse | null) => {
         if (cancelled) return;
         const next = data?.profile ?? null;
@@ -293,28 +306,29 @@ export function TeachingVoiceCard({
           setCustomizeOpen(false);
         }
         if (next?.draftPreview) {
-          setDraftModelVariant(next.draftPreview.config.modelVariant);
-          setDraftLanguageId(
-            isTTSLanguageCode(next.draftPreview.config.languageId)
-              ? next.draftPreview.config.languageId
-              : 'en',
-          );
-          setDraftGenerationSettings(next.draftPreview.config.generationSettings);
+          setDraftModelVariant(next.draftPreview.config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+          setDraftLanguageId(next.draftPreview.config.languageId);
+          setDraftGenerationSettings(next.draftPreview.config.generationSettings ?? cloneRecommendedSettings());
         } else if (next) {
           const config = profileConfiguration(next);
-          setDraftModelVariant(config.modelVariant);
-          setDraftLanguageId(config.languageId as TTSLanguageCode);
-          setDraftGenerationSettings(config.generationSettings);
+          setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+          setDraftLanguageId(config.languageId);
+          setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
         }
         if (next?.status === 'ready' && !selectedProfileIdRef.current) {
           onSelectedProfileIdChangeRef.current(next.id);
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) setError('Could not load Teaching Voice. Try again before selecting a voice.');
+      })
+      .finally(() => {
+        if (!cancelled) setProfileLoading(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [enrollmentLanguage]);
 
   useEffect(() => {
     return () => {
@@ -475,7 +489,7 @@ export function TeachingVoiceCard({
           <select
             id="voice-language-id"
             value={draftLanguageId}
-            onChange={(event) => setDraftLanguageId(event.target.value as TTSLanguageCode)}
+            disabled
             className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
           >
             {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.map((languageId) => (
@@ -485,8 +499,7 @@ export function TeachingVoiceCard({
             ))}
           </select>
           <p className="text-xs leading-snug text-muted-foreground">
-            Choose the language this teaching voice will speak. Matching it to your narration
-            usually gives the best pronunciation.
+            The reference recording fixes this voice's language. Record another voice to change it.
           </p>
         </div>
 
@@ -557,7 +570,7 @@ export function TeachingVoiceCard({
   );
 
   const startRecording = async () => {
-    if (busy) return;
+    if (busy || profileLoading || recordingPending || recorderRef.current || !enrollmentPhrase) return;
     clearCandidateRecording();
     if (!consented) {
       setEnrollmentError('Consent is required before recording.');
@@ -572,6 +585,7 @@ export function TeachingVoiceCard({
       setEnrollmentError('This browser cannot record a supported audio format.');
       return;
     }
+    setRecordingPending(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const chunks: BlobPart[] = [];
@@ -614,6 +628,8 @@ export function TeachingVoiceCard({
           ? 'Microphone permission was denied.'
           : 'Microphone is unavailable.',
       );
+    } finally {
+      setRecordingPending(false);
     }
   };
 
@@ -627,6 +643,7 @@ export function TeachingVoiceCard({
     if (
       !recordingReady ||
       !recording.blob ||
+      !enrollmentPhrase ||
       recordingRequiresRetry ||
       enrollmentRequestInFlightRef.current
     ) {
@@ -646,10 +663,10 @@ export function TeachingVoiceCard({
       const formData = new FormData();
       formData.set('consent', 'true');
       formData.set('displayName', 'My Teaching Voice');
-      formData.set('language', draftLanguageId);
-      formData.set('languageId', draftLanguageId);
-      formData.set('modelVariant', draftModelVariant);
-      formData.set('generationSettings', JSON.stringify(draftGenerationSettings));
+      formData.set('language', enrollmentLanguage);
+      formData.set('languageId', enrollmentLanguage);
+      formData.set('phraseId', enrollmentPhrase.id);
+      formData.set('referenceText', enrollmentPhrase.text);
       formData.set('recording', recording.blob, 'teaching-voice.webm');
       const response = await fetch('/api/voice-cloning/profile', {
         method: 'POST',
@@ -672,9 +689,9 @@ export function TeachingVoiceCard({
       setCustomizeOpen(false);
       setRecordingRequiresRetry(false);
       const config = data.profile.draftPreview?.config ?? profileConfiguration(data.profile);
-      setDraftModelVariant(config.modelVariant);
-      setDraftLanguageId(isTTSLanguageCode(config.languageId) ? config.languageId : 'en');
-      setDraftGenerationSettings(config.generationSettings);
+      setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+      setDraftLanguageId(config.languageId);
+      setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Voice enrollment failed.');
     } finally {
@@ -697,9 +714,7 @@ export function TeachingVoiceCard({
         body: JSON.stringify({
           profileId: profile.id,
           action: 'accept-preview',
-          modelVariant: draftModelVariant,
-          languageId: draftLanguageId,
-          generationSettings: draftGenerationSettings,
+          ...draftConfiguration,
         }),
       });
       const data = (await response.json()) as ApiProfileResponse;
@@ -710,9 +725,9 @@ export function TeachingVoiceCard({
       setSetupStep('review');
       setCustomizeOpen(false);
       const config = profileConfiguration(data.profile);
-      setDraftModelVariant(config.modelVariant);
-      setDraftLanguageId(config.languageId as TTSLanguageCode);
-      setDraftGenerationSettings(config.generationSettings);
+      setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+      setDraftLanguageId(config.languageId);
+      setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
       onSelectedProfileIdChange(data.profile.id);
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Could not accept preview.');
@@ -736,9 +751,7 @@ export function TeachingVoiceCard({
         body: JSON.stringify({
           profileId: profile.id,
           action: 'preview-model',
-          modelVariant: draftModelVariant,
-          languageId: draftLanguageId,
-          generationSettings: draftGenerationSettings,
+          ...draftConfiguration,
         }),
       });
       const data = (await response.json()) as ApiProfileResponse;
@@ -761,8 +774,10 @@ export function TeachingVoiceCard({
     startBusy('finishing');
     setError(null);
     try {
-      const query = profileId ? `?profileId=${encodeURIComponent(profileId)}` : '';
-      await fetch(`/api/voice-cloning/profile${query}`, { method: 'DELETE' });
+      const id = profileId ?? profile?.id;
+      if (!id) return;
+      const response = await fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error('Could not delete Teaching Voice');
       setProfile(null);
       setSetupStep('record');
       setCustomizeOpen(false);
@@ -783,17 +798,20 @@ export function TeachingVoiceCard({
   const discardCandidateProfile = async (profileId: string) => {
     if (previewRequestInFlightRef.current) return;
     previewRequestInFlightRef.current = true;
-    clearCandidateRecording();
-    setProfile(null);
-    setCustomizeOpen(false);
+    startBusy('finishing');
     try {
-      await fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(profileId)}`, {
+      const response = await fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(profileId)}`, {
         method: 'DELETE',
       });
+      if (!response.ok) throw new Error('Could not delete Teaching Voice');
+      clearCandidateRecording();
+      setProfile(null);
+      setCustomizeOpen(false);
     } catch {
       setError('Could not delete the candidate voice preview.');
     } finally {
       previewRequestInFlightRef.current = false;
+      stopBusy();
     }
   };
 
@@ -845,6 +863,36 @@ export function TeachingVoiceCard({
 
   return (
     <div className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <label htmlFor="teaching-voice-language" className="text-xs font-medium">Teaching Voice language</label>
+        <select
+          id="teaching-voice-language"
+          value={enrollmentLanguage}
+          disabled={busy || recordingPending || recordingStartedAt !== null}
+          onChange={(event) => {
+            clearCandidateRecording();
+            setProfile(null);
+            setCustomizeOpen(false);
+            setDraftLanguageId(event.target.value);
+            setEnrollmentLanguage(event.target.value);
+            selectedProfileIdRef.current = undefined;
+            onSelectedProfileIdChange(undefined);
+          }}
+          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+        >
+          {['en', 'hi', 'mr'].map((language) => (
+            <option key={language} value={language}>
+              {language === 'en' ? 'English' : language === 'hi' ? 'Hindi' : 'Marathi'}
+            </option>
+          ))}
+          <optgroup label="Existing voices">
+            {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.filter((language) => language !== 'en' && language !== 'hi').map((language) => (
+              <option key={language} value={language}>{CHATTERBOX_LANGUAGE_LABELS[language]}</option>
+            ))}
+          </optgroup>
+        </select>
+      </div>
+      {error && !open && <p role="alert" className="mb-3 text-xs text-destructive">{error}</p>}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">My Teaching Voice</div>
@@ -874,7 +922,7 @@ export function TeachingVoiceCard({
               {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use Voice'}
             </Button>
           )}
-          <Button type="button" size="sm" variant="outline" onClick={() => setOpen((v) => !v)}>
+          <Button type="button" size="sm" variant="outline" disabled={profileLoading} onClick={() => setOpen((v) => !v)}>
             <Volume2 className="size-4" />
             {readyProfile ? 'Manage Voice' : profile ? 'Continue Setup' : 'Create Voice'}
           </Button>
@@ -915,7 +963,7 @@ export function TeachingVoiceCard({
                   Generate Preview
                 </Button>
               )}
-              {customizeOpen && (
+              {isChatterboxProfile && customizeOpen && (
                 <div className="rounded-lg border border-border/70 p-3">
                   {renderVoiceConfigurationControls()}
                 </div>
@@ -931,7 +979,7 @@ export function TeachingVoiceCard({
                   <Check className="size-4" />
                   Use This Voice
                 </Button>
-                <Button
+                {isChatterboxProfile && <Button
                   type="button"
                   size="sm"
                   variant="outline"
@@ -940,7 +988,7 @@ export function TeachingVoiceCard({
                 >
                   <SlidersHorizontal className="size-4" />
                   {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
-                </Button>
+                </Button>}
                 <Button
                   type="button"
                   size="sm"
@@ -967,7 +1015,7 @@ export function TeachingVoiceCard({
                   src={`data:audio/${selectedPreview.format};base64,${selectedPreview.base64}`}
                 />
               )}
-              {customizeOpen && (
+              {isChatterboxProfile && customizeOpen && (
                 <div className="rounded-lg border border-border/70 p-3">
                   {renderVoiceConfigurationControls()}
                 </div>
@@ -996,7 +1044,7 @@ export function TeachingVoiceCard({
                       Generate Preview
                     </Button>
                   ))}
-                <Button
+                {isChatterboxProfile && <Button
                   type="button"
                   size="sm"
                   variant="outline"
@@ -1005,7 +1053,7 @@ export function TeachingVoiceCard({
                 >
                   <SlidersHorizontal className="size-4" />
                   {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
-                </Button>
+                </Button>}
                 <Button
                   type="button"
                   size="sm"
@@ -1083,7 +1131,7 @@ export function TeachingVoiceCard({
                   not rush.
                 </p>
                 <p className="mt-3 max-w-[70ch] text-sm leading-relaxed text-foreground">
-                  {enrollmentParagraph}
+                  {enrollmentParagraph || 'New voice enrollment is available in English, Hindi and Marathi.'}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
                   <span>Quiet room</span>
@@ -1113,7 +1161,7 @@ export function TeachingVoiceCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={!consented || busy}
+                      disabled={!consented || busy || profileLoading || recordingPending || !enrollmentPhrase}
                       onClick={startRecording}
                       aria-label={
                         recording.blob

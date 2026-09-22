@@ -55,4 +55,20 @@ describe('voice profile user isolation', () => {
     await expect(referenceAudioExists(referenceKey)).resolves.toBe(true);
     expect(referenceKey).toContain(join('users', 'usr_a', 'voice-profiles', 'vcp_a'));
   });
+
+  it('looks up and replaces only ready profiles in the requested language', async () => {
+    const { findCurrentVoiceProfile, writeVoiceProfile } = await import('@/lib/voice-cloning/storage');
+    await writeVoiceProfile(profile('usr_a', 'vcp_en'));
+    await writeVoiceProfile({ ...profile('usr_a', 'vcp_hi'), language: 'hi' });
+    await writeVoiceProfile({ ...profile('usr_a', 'vcp_mr'), language: 'mr' });
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_candidate'), language: 'hi', status: 'failed',
+      updatedAt: '2026-09-22T00:00:00.000Z',
+    });
+    await expect(findCurrentVoiceProfile('usr_a', 'en', true)).resolves.toMatchObject({ id: 'vcp_en' });
+    await expect(findCurrentVoiceProfile('usr_a', 'hi', true)).resolves.toMatchObject({ id: 'vcp_hi' });
+    await expect(findCurrentVoiceProfile('usr_a', 'mr', true)).resolves.toMatchObject({ id: 'vcp_mr' });
+    await expect(findCurrentVoiceProfile('usr_a')).resolves.toMatchObject({ id: 'vcp_candidate' });
+    await expect(findCurrentVoiceProfile('usr_b', 'hi', true)).resolves.toBeNull();
+  });
 });
