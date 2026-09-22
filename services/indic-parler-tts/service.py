@@ -213,6 +213,7 @@ def generate_audio(runtime: IndicParlerRuntime, text: str, description: str) -> 
 def serialize_wav(soundfile: Any, audio: Any, sample_rate: int) -> bytes:
     buffer = io.BytesIO()
     try:
+        audio = audio.astype("float32", copy=False)
         soundfile.write(buffer, audio, sample_rate, format="WAV")
     except Exception as exc:
         log.error("Indic Parler-TTS WAV serialization failed: %s", exc)
