@@ -8,7 +8,8 @@ type Model = Extract<LanguageModel, { specificationVersion: 'v3' }>;
 type CallOptions = Parameters<Model['doGenerate']>[0];
 type StreamResult = Awaited<ReturnType<Model['doStream']>>;
 type Part = StreamResult['stream'] extends ReadableStream<infer T> ? T : never;
-type Role = 'primary' | 'fallback';
+type Role = 'primary' | 'secondary' | 'fallback';
+type BreakerRole = Exclude<Role, 'fallback'>;
 type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
 export interface LLMRouteTelemetry {
@@ -43,9 +44,11 @@ interface Endpoint {
 
 interface Config {
   primary: Endpoint;
+  secondary?: Endpoint;
   fallback: Endpoint;
   initialMs: number;
   primaryMs: number;
+  secondaryMs: number;
   fallbackMs: number;
   streamInitialMs: number;
   totalMs: number;
@@ -125,10 +128,10 @@ function positiveInt(name: string, fallback: number): number {
   return value;
 }
 
-function endpoint(role: 'PRIMARY' | 'FALLBACK'): Endpoint {
+function endpoint(role: 'PRIMARY' | 'SECONDARY' | 'FALLBACK', inherited?: Endpoint): Endpoint {
   const prefix = `LLM_ROUTER_${role}`;
   const model = process.env[`${prefix}_MODEL`]?.trim();
-  const baseUrl = process.env[`${prefix}_BASE_URL`]?.trim();
+  const baseUrl = process.env[`${prefix}_BASE_URL`]?.trim() || inherited?.baseUrl;
   if (!model || !baseUrl) throw new Error(`${prefix}_MODEL and ${prefix}_BASE_URL are required.`);
   let url: URL;
   try {
@@ -153,7 +156,7 @@ function endpoint(role: 'PRIMARY' | 'FALLBACK'): Endpoint {
     providerId,
     modelId,
     baseUrl,
-    apiKey: process.env[`${prefix}_API_KEY`] || '',
+    apiKey: process.env[`${prefix}_API_KEY`] ?? inherited?.apiKey ?? '',
     local: process.env[`${prefix}_LOCAL`] === 'true',
   };
 }
@@ -161,11 +164,17 @@ function endpoint(role: 'PRIMARY' | 'FALLBACK'): Endpoint {
 function loadConfig(): Config | undefined {
   if (process.env.LLM_ROUTER_ENABLED !== 'true') return undefined;
   const initialMs = positiveInt('LLM_ROUTER_INITIAL_TIMEOUT_MS', 60_000);
+  const primary = endpoint('PRIMARY');
+  const secondary = process.env.LLM_ROUTER_SECONDARY_MODEL?.trim()
+    ? endpoint('SECONDARY', primary)
+    : undefined;
   return {
-    primary: endpoint('PRIMARY'),
+    primary,
+    secondary,
     fallback: endpoint('FALLBACK'),
     initialMs,
     primaryMs: positiveInt('LLM_ROUTER_PRIMARY_TIMEOUT_MS', initialMs),
+    secondaryMs: secondary ? positiveInt('LLM_ROUTER_SECONDARY_TIMEOUT_MS', initialMs) : initialMs,
     fallbackMs: positiveInt('LLM_ROUTER_FALLBACK_TIMEOUT_MS', initialMs),
     streamInitialMs: positiveInt('LLM_ROUTER_STREAM_INITIAL_CHUNK_TIMEOUT_MS', 45_000),
     totalMs: positiveInt('LLM_ROUTER_TOTAL_TIMEOUT_MS', 180_000),
@@ -181,15 +190,18 @@ interface Breaker {
   epoch: number;
 }
 const processState = globalThis as typeof globalThis & {
-  __sahayaLlmCircuit?: { key: string; breaker: Breaker };
+  __sahayaLlmCircuits?: Partial<Record<BreakerRole, { key: string; breaker: Breaker }>>;
 };
 
-function circuit(config: Config): Breaker {
-  const key = createHash('sha256').update(JSON.stringify(config)).digest('hex');
-  if (processState.__sahayaLlmCircuit?.key !== key) {
-    processState.__sahayaLlmCircuit = { key, breaker: { failures: 0, probe: false, epoch: 0 } };
+function circuit(config: Config, role: BreakerRole): Breaker {
+  const key = createHash('sha256')
+    .update(JSON.stringify([config[role], config.threshold, config.cooldownMs]))
+    .digest('hex');
+  const circuits = (processState.__sahayaLlmCircuits ??= {});
+  if (circuits[role]?.key !== key) {
+    circuits[role] = { key, breaker: { failures: 0, probe: false, epoch: 0 } };
   }
-  return processState.__sahayaLlmCircuit.breaker;
+  return circuits[role]!.breaker;
 }
 
 function state(b: Breaker): CircuitState {
@@ -245,7 +257,11 @@ function budget(parent: AbortSignal | undefined, deadline: number) {
 }
 
 function roleTimeoutMs(config: Config, role: Role): number {
-  return role === 'primary' ? config.primaryMs : config.fallbackMs;
+  return role === 'primary'
+    ? config.primaryMs
+    : role === 'secondary'
+      ? config.secondaryMs
+      : config.fallbackMs;
 }
 
 function attemptBudgetMs(deadline: number, start: number, ...limits: number[]): number {
@@ -281,11 +297,19 @@ function adaptCompatibleRequestBody(
       !Array.isArray(body.chat_template_kwargs)
         ? (body.chat_template_kwargs as Record<string, unknown>)
         : {};
+    const isSuper = endpoint.modelId.toLowerCase() === 'nvidia/nemotron-3-super-120b-a12b';
     return {
       ...init,
       body: JSON.stringify({
         ...body,
-        chat_template_kwargs: { ...current, enable_thinking: false },
+        // Preserve existing Nemotron/Ultra behavior; Super may retain an explicit toggle.
+        chat_template_kwargs: isSuper
+          ? {
+              ...current,
+              enable_thinking:
+                typeof current.enable_thinking === 'boolean' ? current.enable_thinking : false,
+            }
+          : { ...current, enable_thinking: false },
       }),
     };
   } catch {
@@ -329,7 +353,19 @@ export function createLLMRouter(
       throw new Error('Local-only routing requires LLM_ROUTER_ENABLED.');
     return undefined;
   }
-  const b = circuit(config);
+  const roles: Role[] = config.secondary
+    ? ['primary', 'secondary', 'fallback']
+    : ['primary', 'fallback'];
+  const breakers = {
+    primary: circuit(config, 'primary'),
+    secondary: config.secondary ? circuit(config, 'secondary') : undefined,
+  };
+  const endpointFor = (role: Role): Endpoint => {
+    const target = config[role];
+    if (!target) throw new Error('LLM router selected an unconfigured endpoint.');
+    return target;
+  };
+  let b = breakers.primary;
   const requestId = policy.requestId ?? randomUUID();
   let selected: Role | undefined;
   let committed = false;
@@ -341,7 +377,7 @@ export function createLLMRouter(
   let attempt = 0;
   const models: Partial<Record<Role, Model>> = {};
   const meta = () => {
-    const e = config[selected ?? 'primary'];
+    const e = endpointFor(selected ?? 'primary');
     return {
       source,
       providerId: e.providerId,
@@ -350,14 +386,14 @@ export function createLLMRouter(
     };
   };
   const report = (status: string, start: number, timeoutBudgetMs: number, firstPartMs?: number) => {
-    const e = config[selected ?? 'primary'];
+    const e = endpointFor(selected ?? 'primary');
     const event: LLMRouteTelemetry = {
       requestId,
       source,
       selectedProvider: e.providerId,
       selectedModel: e.modelId,
       selectedRole: selected ?? 'primary',
-      fallbackUsed: selected === 'fallback',
+      fallbackUsed: selected !== undefined && selected !== 'primary',
       circuitState: state(b),
       status,
       timeoutBudgetMs,
@@ -371,33 +407,43 @@ export function createLLMRouter(
       ...event,
       primaryProvider: config.primary.providerId,
       primaryModel: config.primary.modelId,
+      secondaryConfigured: !!config.secondary,
+      ...(config.secondary
+        ? {
+            secondaryProvider: config.secondary.providerId,
+            secondaryModel: config.secondary.modelId,
+          }
+        : {}),
       fallbackProvider: config.fallback.providerId,
       fallbackModel: config.fallback.modelId,
     });
   };
-  const choose = (): Role => {
-    if (selected) return selected;
-    if (policy.externalAllowed === false) {
-      if (config.primary.local) return 'primary';
-      if (config.fallback.local) {
+  const choose = (after?: Role): Role | undefined => {
+    for (const role of roles.slice(after ? roles.indexOf(after) + 1 : 0)) {
+      if (policy.externalAllowed === false && !endpointFor(role).local) {
         fallbackReason = 'local_only';
-        return 'fallback';
+        continue;
       }
-      throw new Error('Local-only routing requires an explicitly local endpoint.');
-    }
-    if (b.openedAt !== undefined) {
-      if (b.probe || Date.now() - b.openedAt < config.cooldownMs) {
-        fallbackReason = 'circuit_open';
-        return 'fallback';
+      selected = role;
+      // Final fallback has no breaker; retain the preceding breaker in legacy telemetry.
+      if (role === 'fallback') return role;
+      b = breakers[role]!;
+      if (b.openedAt !== undefined) {
+        if (b.probe || Date.now() - b.openedAt < config.cooldownMs) {
+          fallbackReason = 'circuit_open';
+          report('circuit_open', Date.now(), 0);
+          continue;
+        }
+        b.probe = true;
+        probing = true;
       }
-      b.probe = true;
-      probing = true;
+      epoch = b.epoch;
+      return role;
     }
-    epoch = b.epoch;
-    return 'primary';
+    return undefined;
   };
   const healthy = () => {
-    if (selected === 'primary' && epoch === b.epoch) {
+    if (selected !== 'fallback' && epoch === b.epoch) {
       b.failures = 0;
       b.openedAt = undefined;
       b.probe = false;
@@ -405,7 +451,7 @@ export function createLLMRouter(
     probing = false;
   };
   const failed = (failure: Failure) => {
-    if (selected !== 'primary' || epoch !== b.epoch) return;
+    if (selected === 'fallback' || epoch !== b.epoch) return;
     if (failure.retryable) {
       b.failures++;
       if (probing || b.failures >= config.threshold) {
@@ -443,15 +489,17 @@ export function createLLMRouter(
     if (
       !committed &&
       !options.abortSignal?.aborted &&
-      selected === 'primary' &&
+      selected !== 'fallback' &&
       failure.retryable &&
-      (policy.externalAllowed !== false || config.fallback.local) &&
       Date.now() < deadline!
     ) {
-      firstFailure = failure;
+      firstFailure ??= failure;
       fallbackReason = failure.reason;
-      selected = 'fallback';
-      return true;
+      const next = choose(selected);
+      if (next) {
+        selected = next;
+        return true;
+      }
     }
     throw new RouterError(failure, firstFailure);
   };
@@ -468,14 +516,15 @@ export function createLLMRouter(
     async doGenerate(options) {
       options.abortSignal?.throwIfAborted();
       deadline ??= Date.now() + config.totalMs;
-      selected = choose();
+      selected ??= choose();
+      if (!selected) throw new Error('Local-only routing requires an explicitly local endpoint.');
       for (;;) {
         attempt += 1;
         const start = Date.now();
         const timeoutMs = attemptBudgetMs(deadline, start, roleTimeoutMs(config, selected));
         const scope = budget(options.abortSignal, start + timeoutMs);
         try {
-          const target = (models[selected] ??= buildModel(config[selected]));
+          const target = (models[selected] ??= buildModel(endpointFor(selected)));
           const result = await scope.wait(() =>
             target.doGenerate({ ...options, abortSignal: scope.signal }),
           );
@@ -493,7 +542,8 @@ export function createLLMRouter(
     async doStream(options) {
       options.abortSignal?.throwIfAborted();
       deadline ??= Date.now() + config.totalMs;
-      selected = choose();
+      selected ??= choose();
+      if (!selected) throw new Error('Local-only routing requires an explicitly local endpoint.');
       for (;;) {
         attempt += 1;
         const start = Date.now();
@@ -510,7 +560,7 @@ export function createLLMRouter(
           void reader?.cancel().catch(() => {});
         };
         try {
-          const target = (models[selected] ??= buildModel(config[selected]));
+          const target = (models[selected] ??= buildModel(endpointFor(selected)));
           const result = await scope.wait(async () => {
             const value = await target.doStream({ ...options, abortSignal: scope.signal });
             if (scope.signal.aborted) void value.stream.cancel().catch(() => {});

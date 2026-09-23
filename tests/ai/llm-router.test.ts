@@ -63,6 +63,7 @@ function fake(modelId: string) {
   };
 }
 let primary = fake('nemotron');
+let secondary = fake('super');
 let fallback = fake('gemma');
 let original = fake('original');
 const request = () =>
@@ -79,6 +80,13 @@ beforeEach(() => {
   vi.stubEnv('LLM_ROUTER_PRIMARY_BASE_URL', 'https://primary.example/v1');
   vi.stubEnv('LLM_ROUTER_PRIMARY_API_KEY', 'SECRET-primary-key');
   vi.stubEnv('LLM_ROUTER_PRIMARY_LOCAL', 'false');
+  vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', '');
+  vi.stubEnv('LLM_ROUTER_SECONDARY_BASE_URL', undefined);
+  vi.stubEnv('LLM_ROUTER_SECONDARY_API_KEY', undefined);
+  vi.stubEnv('LLM_ROUTER_SECONDARY_LOCAL', 'false');
+  vi.stubEnv('LLM_ROUTER_SECONDARY_TIMEOUT_MS', '');
+  vi.stubEnv('LLM_ROUTER_PRIMARY_TIMEOUT_MS', '');
+  vi.stubEnv('LLM_ROUTER_FALLBACK_TIMEOUT_MS', '');
   vi.stubEnv('LLM_ROUTER_FALLBACK_MODEL', 'local:gemma');
   vi.stubEnv('LLM_ROUTER_FALLBACK_BASE_URL', 'http://fallback.example/v1');
   vi.stubEnv('LLM_ROUTER_FALLBACK_API_KEY', 'SECRET-fallback-key');
@@ -88,8 +96,9 @@ beforeEach(() => {
   vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '5000');
   vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '2');
   vi.stubEnv('LLM_ROUTER_CIRCUIT_COOLDOWN_MS', '100');
-  delete (globalThis as { __sahayaLlmCircuit?: unknown }).__sahayaLlmCircuit;
+  delete (globalThis as { __sahayaLlmCircuits?: unknown }).__sahayaLlmCircuits;
   primary = fake('nemotron');
+  secondary = fake('super');
   fallback = fake('gemma');
   original = fake('original');
   capture.log.mockClear();
@@ -97,13 +106,14 @@ beforeEach(() => {
   vi.mocked(getModel)
     .mockReset()
     .mockImplementation(({ modelId }) => ({
-      model: modelId === 'nemotron' ? primary : fallback,
+      model: modelId === 'nemotron' ? primary : modelId === 'super' ? secondary : fallback,
       modelInfo: null,
     }));
 });
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -640,6 +650,309 @@ describe('circuit recovery', () => {
     await request();
     expect(primary.doGenerate).toHaveBeenCalledTimes(3);
     expect(logs().at(-1)).toMatchObject({ circuitState: 'OPEN', fallbackReason: 'circuit_open' });
+  });
+});
+
+describe('optional secondary tier', () => {
+  beforeEach(() => {
+    vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', 'openai:super');
+  });
+
+  it.each(['generate', 'stream'] as const)(
+    'routes all success/failure combinations for %s',
+    async (mode) => {
+      const invoke = async () =>
+        mode === 'generate'
+          ? (await request()).text
+          : await streamLLM({ model: original, prompt: 'hi' }, 'router-test').text;
+      const p = mode === 'generate' ? primary.doGenerate : primary.doStream;
+      const s = mode === 'generate' ? secondary.doGenerate : secondary.doStream;
+      const f = mode === 'generate' ? fallback.doGenerate : fallback.doStream;
+      expect(await invoke()).toBe('nemotron');
+      expect(s).not.toHaveBeenCalled();
+      expect(f).not.toHaveBeenCalled();
+      p.mockRejectedValue(networkError());
+      expect(await invoke()).toBe('super');
+      expect(f).not.toHaveBeenCalled();
+      s.mockRejectedValue(httpError(503));
+      capture.log.mockClear();
+      expect(await invoke()).toBe('gemma');
+      const events = logs().filter((entry) => entry.status !== 'stream_committed');
+      expect(events.map((entry) => entry.selectedRole)).toEqual([
+        'primary',
+        'secondary',
+        'fallback',
+      ]);
+      expect(events.map((entry) => entry.attempt)).toEqual([1, 2, 3]);
+      expect(events.map((entry) => entry.selectedModel)).toEqual(['nemotron', 'super', 'gemma']);
+      expect(events.map((entry) => entry.fallbackUsed)).toEqual([false, true, true]);
+      for (const event of events)
+        expect(event).toMatchObject({
+          requestId: expect.any(String),
+          latencyMs: expect.any(Number),
+          circuitState: expect.any(String),
+          status: expect.any(String),
+        });
+    },
+  );
+
+  it.each(['', undefined])('keeps two tiers with secondary model %s', async (model) => {
+    vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', model);
+    primary.doGenerate.mockRejectedValue(networkError());
+    expect((await request()).text).toBe('gemma');
+    expect(secondary.doGenerate).not.toHaveBeenCalled();
+  });
+
+  it('inherits only secondary URL/key, while respecting explicit overrides and keyless access', async () => {
+    primary.doGenerate.mockRejectedValue(networkError());
+    await request();
+    expect(getModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelId: 'super',
+        baseUrl: 'https://primary.example/v1',
+        apiKey: 'SECRET-primary-key',
+      }),
+    );
+    vi.stubEnv('LLM_ROUTER_SECONDARY_BASE_URL', 'https://secondary.example/v1');
+    vi.stubEnv('LLM_ROUTER_SECONDARY_API_KEY', 'secondary-test-key');
+    await request();
+    expect(getModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelId: 'super',
+        baseUrl: 'https://secondary.example/v1',
+        apiKey: 'secondary-test-key',
+      }),
+    );
+    vi.stubEnv('LLM_ROUTER_SECONDARY_API_KEY', '');
+    await request();
+    expect(getModel).toHaveBeenLastCalledWith(
+      expect.objectContaining({ modelId: 'super', apiKey: 'unused' }),
+    );
+    expect(process.env.LLM_ROUTER_PRIMARY_API_KEY).toBe('SECRET-primary-key');
+  });
+
+  it.each([
+    ['openai:nvidia/nemotron-3-super-120b-a12b', true],
+    ['openai:nvidia/nemotron-3-ultra-550b-a55b', false],
+  ] as const)(
+    'preserves custom template fields at the %s transport boundary',
+    async (model, expectedThinking) => {
+      vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', model);
+      await request();
+      const fetchImpl = vi.mocked(getModel).mock.calls[0][0].fetchImpl!;
+      const fetch = vi.fn(async () => new Response('{}'));
+      vi.stubGlobal('fetch', fetch);
+      const body = {
+        messages: [],
+        chat_template_kwargs: { enable_thinking: true, custom: 'kept' },
+      };
+      await fetchImpl('https://primary.example/v1/chat/completions', {
+        body: JSON.stringify(body),
+      });
+      const sent = fetch.mock.calls[0] as unknown as [unknown, RequestInit];
+      expect(JSON.parse(String(sent[1].body))).toMatchObject({
+        chat_template_kwargs: {
+          enable_thinking: expectedThinking,
+          custom: 'kept',
+        },
+      });
+    },
+  );
+
+  it('enforces local-only policy across all three tiers', async () => {
+    const localRequest = () =>
+      callLLM({ model: original, prompt: 'hi' }, 'test', undefined, undefined, {
+        externalAllowed: false,
+      });
+    expect((await localRequest()).text).toBe('gemma');
+    expect(secondary.doGenerate).not.toHaveBeenCalled();
+    vi.stubEnv('LLM_ROUTER_SECONDARY_LOCAL', 'true');
+    expect((await localRequest()).text).toBe('super');
+    expect(primary.doGenerate).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 401, 403, 404, 422])('does not cascade secondary HTTP %i', async (code) => {
+    primary.doGenerate.mockRejectedValue(networkError());
+    secondary.doGenerate.mockRejectedValue(httpError(code));
+    await expect(request()).rejects.toMatchObject({ statusCode: code });
+    expect(fallback.doGenerate).not.toHaveBeenCalled();
+  });
+
+  it('surfaces final failure with classified causes only', async () => {
+    primary.doGenerate.mockRejectedValue(httpError(429));
+    secondary.doGenerate.mockRejectedValue(httpError(503));
+    fallback.doGenerate.mockRejectedValue(networkError());
+    const error = await request().catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      cause: { primary: { reason: 'http_429' }, selected: { reason: 'network' } },
+    });
+    expect(JSON.stringify({ error, logs: logs() })).not.toMatch(
+      /SECRET|private faculty content|primary\.example/,
+    );
+  });
+
+  it('keeps breakers independent, skips open tiers, and closes independent recovery probes', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
+    primary.doGenerate.mockRejectedValue(networkError());
+    expect((await request()).text).toBe('super');
+    expect((await request()).text).toBe('super');
+    expect(primary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(fallback.doGenerate).not.toHaveBeenCalled();
+    expect(logs().at(-1)).toMatchObject({
+      selectedRole: 'secondary',
+      circuitState: 'CLOSED',
+      fallbackReason: 'circuit_open',
+    });
+    secondary.doGenerate.mockRejectedValueOnce(networkError());
+    expect((await request()).text).toBe('gemma');
+    expect((await request()).text).toBe('gemma');
+    expect(secondary.doGenerate).toHaveBeenCalledTimes(3);
+    expect(logs()).toContainEqual(
+      expect.objectContaining({
+        selectedRole: 'secondary',
+        status: 'circuit_open',
+        circuitState: 'OPEN',
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(101);
+    // Ultra's failed probe must not prevent Super's successful probe.
+    expect((await request()).text).toBe('super');
+    expect((await request()).text).toBe('super');
+    expect(primary.doGenerate).toHaveBeenCalledTimes(2);
+    expect(logs().at(-1)).toMatchObject({ selectedRole: 'secondary', circuitState: 'CLOSED' });
+    primary.doGenerate.mockResolvedValue(result('nemotron'));
+    await vi.advanceTimersByTimeAsync(101);
+    expect((await request()).text).toBe('nemotron');
+    expect((await request()).text).toBe('nemotron');
+    expect(logs().at(-1)).toMatchObject({ selectedRole: 'primary', circuitState: 'CLOSED' });
+  });
+
+  it('admits only one secondary half-open probe and reopens on probe failure', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
+    primary.doGenerate.mockRejectedValue(networkError());
+    secondary.doGenerate.mockRejectedValue(networkError());
+    await request();
+    await vi.advanceTimersByTimeAsync(101);
+    let rejectProbe!: (reason: unknown) => void;
+    secondary.doGenerate.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectProbe = reject;
+        }),
+    );
+    const probe = request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await request()).text).toBe('gemma');
+    expect(secondary.doGenerate).toHaveBeenCalledTimes(2);
+    expect(logs()).toContainEqual(
+      expect.objectContaining({
+        selectedRole: 'secondary',
+        status: 'circuit_open',
+        circuitState: 'HALF_OPEN',
+      }),
+    );
+    rejectProbe(networkError());
+    expect((await probe).text).toBe('gemma');
+    expect((await request()).text).toBe('gemma');
+    expect(secondary.doGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it('resets only the changed endpoint breaker', async () => {
+    vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
+    primary.doGenerate.mockRejectedValue(networkError());
+    secondary.doGenerate.mockRejectedValue(networkError());
+    await request();
+    vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', 'openai:replacement');
+    await request();
+    expect(primary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(getModel).toHaveBeenLastCalledWith(expect.objectContaining({ modelId: 'replacement' }));
+    vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:new-primary');
+    await request();
+    expect(getModel).toHaveBeenLastCalledWith(expect.objectContaining({ modelId: 'new-primary' }));
+  });
+
+  it.each(['primary', 'secondary'] as const)(
+    'caller abort during %s is terminal in both paths',
+    async (role) => {
+      vi.useFakeTimers();
+      for (const mode of ['generate', 'stream'] as const) {
+        const p = mode === 'generate' ? primary.doGenerate : primary.doStream;
+        const s = mode === 'generate' ? secondary.doGenerate : secondary.doStream;
+        if (role === 'secondary') p.mockRejectedValue(networkError());
+        const active = role === 'primary' ? p : s;
+        active.mockImplementation(() => new Promise(() => {}));
+        const controller = new AbortController();
+        const router = createLLMRouter('abort-test', {}, controller.signal)!;
+        const call = { ...options, abortSignal: controller.signal };
+        const pending = (
+          mode === 'generate' ? router.model.doGenerate(call) : router.model.doStream(call)
+        ).catch((e: unknown) => e);
+        await vi.advanceTimersByTimeAsync(0);
+        const reason = new DOMException('Cancelled', 'AbortError');
+        controller.abort(reason);
+        expect(await pending).toBe(reason);
+        if (role === 'primary') expect(s).not.toHaveBeenCalled();
+        expect(fallback.doGenerate).not.toHaveBeenCalled();
+        expect(fallback.doStream).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    },
+  );
+
+  it('uses secondary timeout and caps final fallback by the shared remaining budget', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('LLM_ROUTER_PRIMARY_TIMEOUT_MS', '100');
+    vi.stubEnv('LLM_ROUTER_SECONDARY_TIMEOUT_MS', '200');
+    vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '450');
+    for (const m of [primary, secondary, fallback])
+      m.doGenerate.mockImplementation(() => new Promise(() => {}));
+    const pending = request().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(451);
+    expect(await pending).toMatchObject({ cause: { selected: { reason: 'timeout' } } });
+    expect(logs().map((entry) => [entry.selectedRole, entry.timeoutBudgetMs])).toEqual([
+      ['primary', 100],
+      ['secondary', 200],
+      ['fallback', 150],
+    ]);
+    for (const m of [primary, secondary, fallback])
+      expect(m.doGenerate.mock.calls[0][0].abortSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels stalled streams on both upstream tiers before serving fallback', async () => {
+    vi.useFakeTimers();
+    const cancellations = [vi.fn(), vi.fn()];
+    for (const [index, m] of [primary, secondary].entries())
+      m.doStream.mockResolvedValue({
+        stream: new ReadableStream<Part>({
+          start(controller) {
+            controller.enqueue({ type: 'stream-start', warnings: [] });
+          },
+          cancel: cancellations[index],
+        }),
+      });
+    const pending = streamLLM({ model: original, prompt: 'hi' }, 'test').text;
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await pending).toBe('gemma');
+    for (const cancel of cancellations) expect(cancel).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('never switches away from secondary after stream commitment', async () => {
+    primary.doStream.mockRejectedValue(networkError());
+    secondary.doStream.mockResolvedValue(
+      partsStream([
+        { type: 'text-start', id: 's' },
+        { type: 'error', error: networkError() },
+      ]),
+    );
+    const response = await createLLMRouter('test')!.model.doStream(options);
+    const reader = response.stream.getReader();
+    expect((await reader.read()).value).toMatchObject({ type: 'text-start' });
+    expect((await reader.read()).value).toMatchObject({ type: 'error' });
+    expect(fallback.doStream).not.toHaveBeenCalled();
   });
 });
 
