@@ -35,7 +35,6 @@ const ENV_PREFIXES_TO_CLEAR = [
   'TTS_ELEVENLABS',
   'TTS_MINIMAX',
   'TTS_VOXCPM',
-  'TTS_INDIC_PARLER',
   'ASR_OPENAI',
   'ASR_QWEN',
   'ASR_FUNASR',
@@ -104,32 +103,6 @@ describe('provider-config', () => {
     vi.unstubAllEnvs();
     clearProviderEnv();
     yamlOverride = null;
-  });
-
-  it('discovers keyless Indic Parler only when explicitly configured and keeps managed URL private', async () => {
-    const unconfigured = await import('@/lib/server/provider-config');
-    expect(unconfigured.getServerTTSProviders()).not.toHaveProperty('indic-parler-tts');
-    expect(unconfigured.resolveTTSBaseUrl('indic-parler-tts')).toBe('http://127.0.0.1:8770');
-    vi.stubEnv('TTS_INDIC_PARLER_BASE_URL', 'http://configured.example:8770');
-    vi.resetModules();
-    const configured = await import('@/lib/server/provider-config');
-    expect(configured.getServerTTSProviders()['indic-parler-tts']).toEqual({});
-    expect(configured.resolveTTSBaseUrl('indic-parler-tts', 'http://client.example')).toBe(
-      'http://configured.example:8770',
-    );
-    expect(configured.resolveTTSApiKey('indic-parler-tts')).toBe('');
-    expect(configured.enabledServerTTSProviderIds()).toContain('indic-parler-tts');
-    vi.stubEnv('TTS_INDIC_PARLER_ENABLED', 'false');
-    vi.resetModules();
-    const disabled = await import('@/lib/server/provider-config');
-    expect(disabled.getServerTTSProviders()['indic-parler-tts']).toEqual({ disabled: true });
-  });
-
-  it('accepts keyless Indic Parler YAML configuration', async () => {
-    yamlOverride = 'tts:\n  indic-parler-tts:\n    baseUrl: http://configured.example:8770\n';
-    const config = await import('@/lib/server/provider-config');
-    expect(config.getServerTTSProviders()['indic-parler-tts']).toEqual({});
-    expect(config.resolveTTSBaseUrl('indic-parler-tts')).toBe('http://configured.example:8770');
   });
 
   it('keeps router credentials private and adds no unrelated provider capabilities', async () => {

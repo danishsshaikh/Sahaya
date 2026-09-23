@@ -748,10 +748,7 @@ export async function generateTTSForScene(
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
-  // The standard provider's new limit must not alter Teaching Voice narration.
-  if (!(teacherVoiceProfileId && providerId === 'indic-parler-tts')) {
-    scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
-  }
+  scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
   const speechActions = scene.actions.filter(
     (a): a is SpeechAction => a.type === 'speech' && !!a.text,
   );
@@ -804,7 +801,7 @@ export async function generateTTSForScene(
   // the server opts into parallel generation, render them with bounded
   // concurrency (reusing the PARALLEL_SCENE_CONCURRENCY knob) instead of one at a
   // time. Default (0 / unset) keeps the original strictly-serial behaviour.
-  const ttsConcurrency = teacherVoiceProfileId || providerId === 'indic-parler-tts'
+  const ttsConcurrency = teacherVoiceProfileId
     ? 1
     : Math.max(0, Math.floor(useSettingsStore.getState().parallelSceneConcurrency ?? 0));
   try {

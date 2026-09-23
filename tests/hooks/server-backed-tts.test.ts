@@ -136,66 +136,6 @@ describe('server-backed narration storage', () => {
     );
   });
 
-  it('keeps Indic Parler scene speech serial even when parallel generation is enabled', async () => {
-    const { generateTTSForScene } = await import('@/lib/hooks/use-scene-generator');
-    mocks.settingsState.mockReturnValue({
-      ...mocks.settingsState(),
-      ttsProviderId: 'indic-parler-tts',
-      ttsVoice: 'default',
-      ttsProvidersConfig: { 'indic-parler-tts': { isServerConfigured: true } },
-      parallelSceneConcurrency: 4,
-    });
-    let active = 0;
-    let maxActive = 0;
-    mockFetch.mockImplementation(async () => {
-      maxActive = Math.max(maxActive, ++active);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      active--;
-      return ttsResponse();
-    });
-    const scene = {
-      order: 0,
-      actions: [{ id: 'speech', type: 'speech', text: 'x'.repeat(8001) }],
-    } as import('@/lib/types/stage').Scene;
-    expect(await generateTTSForScene(scene)).toMatchObject({ success: true });
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(maxActive).toBe(1);
-    expect(scene.actions).toHaveLength(3);
-    for (const [, init] of mockFetch.mock.calls)
-      expect(JSON.parse(init.body).ttsProviderId).toBe('indic-parler-tts');
-  });
-
-  it('does not apply Indic Parler text limits to a stage using Teaching Voice', async () => {
-    const { generateTTSForScene } = await import('@/lib/hooks/use-scene-generator');
-    const { useStageStore } = await import('@/lib/store/stage');
-    const previous = useStageStore.getState().stage;
-    useStageStore.setState({
-      stage: { ...previous, teacherVoiceProfileId: 'vcp_test' } as NonNullable<typeof previous>,
-    });
-    try {
-      mocks.settingsState.mockReturnValue({
-        ...mocks.settingsState(),
-        ttsProviderId: 'indic-parler-tts',
-        ttsVoice: 'default',
-      });
-      mockFetch.mockResolvedValue(ttsResponse());
-      const scene = {
-        order: 0,
-        actions: [{ id: 'speech', type: 'speech', text: 'x'.repeat(4001) }],
-      } as import('@/lib/types/stage').Scene;
-      expect(await generateTTSForScene(scene, 'English')).toMatchObject({ success: true });
-      expect(scene.actions).toHaveLength(1);
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({
-        teacherVoiceProfileId: 'vcp_test',
-        ttsLanguageCode: 'en',
-        text: 'x'.repeat(4001),
-      });
-    } finally {
-      useStageStore.setState({ stage: previous });
-    }
-  });
-
   it('keeps a cache write failure from losing narration the pool already holds', async () => {
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
     mockFetch.mockResolvedValueOnce(ttsResponse());

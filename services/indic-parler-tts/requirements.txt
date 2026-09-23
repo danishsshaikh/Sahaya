@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-torch
-transformers
-soundfile
-git+https://github.com/huggingface/parler-tts.git
