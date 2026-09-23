@@ -5,12 +5,14 @@
 import type { TTSProviderId } from './types';
 import type { Action, SpeechAction } from '@/lib/types/action';
 import { createLogger } from '@/lib/logger';
+import { INDIC_PARLER_MAX_TEXT_CHARS } from './indic-parler';
 
 const log = createLogger('TTS');
 
 /** Provider-specific max text length limits. */
 export const TTS_MAX_TEXT_LENGTH: Partial<Record<TTSProviderId, number>> = {
   'glm-tts': 1024,
+  'indic-parler-tts': INDIC_PARLER_MAX_TEXT_CHARS,
 };
 
 /**

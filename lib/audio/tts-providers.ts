@@ -105,6 +105,7 @@ import {
   type VoxCPMProviderOptions,
 } from './voxcpm';
 import { createLogger } from '@/lib/logger';
+import { INDIC_PARLER_VOICES, INDIC_PARLER_MAX_TEXT_CHARS } from './indic-parler';
 
 const log = createLogger('TTSProviders');
 
@@ -174,10 +175,17 @@ export class TTSInvalidResponseError extends Error {
  */
 const DEFAULT_TTS_REQUEST_TIMEOUT_MS = 30_000;
 
-function ttsRequestTimeoutMs(): number {
-  const raw = process.env.TTS_REQUEST_TIMEOUT_MS?.trim();
+function ttsRequestTimeoutMs(providerId?: string): number {
+  const indicParler = providerId === 'indic-parler-tts';
+  const raw =
+    (indicParler ? process.env.TTS_INDIC_PARLER_TIMEOUT_MS?.trim() : '') ||
+    process.env.TTS_REQUEST_TIMEOUT_MS?.trim();
   const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTS_REQUEST_TIMEOUT_MS;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : indicParler
+      ? 900_000
+      : DEFAULT_TTS_REQUEST_TIMEOUT_MS;
 }
 
 /**
@@ -196,8 +204,8 @@ export class TTSRequestTimeoutError extends Error {
 }
 
 /** Combine the caller's cancel signal with the per-request timeout. */
-function ttsRequestSignal(callerSignal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(ttsRequestTimeoutMs());
+function ttsRequestSignal(callerSignal?: AbortSignal, providerId?: string): AbortSignal {
+  const timeout = AbortSignal.timeout(ttsRequestTimeoutMs(providerId));
   return callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
 }
 
@@ -238,7 +246,7 @@ export async function generateTTS(
     throw new Error(`API key required for TTS provider: ${config.providerId}`);
   }
 
-  const signal = ttsRequestSignal(config.signal);
+  const signal = ttsRequestSignal(config.signal, config.providerId);
   try {
     switch (config.providerId) {
       case 'openai-tts':
@@ -266,6 +274,9 @@ export async function generateTTS(
       case 'lemonade-tts':
         return await generateLemonadeTTS(config, text, signal);
 
+      case 'indic-parler-tts':
+        return await generateIndicParlerTTS(config, text, signal);
+
       case 'browser-native-tts':
         throw new Error(
           'Browser Native TTS must be handled client-side using Web Speech API. This provider cannot be used on the server.',
@@ -284,11 +295,40 @@ export async function generateTTS(
     if (isTimeoutSignal(signal)) {
       throw new TTSRequestTimeoutError(
         config.providerId,
-        `TTS request timed out after ${ttsRequestTimeoutMs()}ms (provider ${config.providerId}) — the provider did not respond. Retry the tool call.`,
+        `TTS request timed out after ${ttsRequestTimeoutMs(config.providerId)}ms (provider ${config.providerId}) — the provider did not respond. Retry the tool call.`,
       );
     }
     throw error;
   }
+}
+
+async function generateIndicParlerTTS(
+  config: TTSModelConfig,
+  text: string,
+  signal: AbortSignal,
+): Promise<TTSGenerationResult> {
+  const voice = INDIC_PARLER_VOICES.find((entry) => entry.id === (config.voice || 'default'));
+  if (!voice) throw new Error('Unknown Indic Parler description choice.');
+  if (!text.trim() || text.length > INDIC_PARLER_MAX_TEXT_CHARS) {
+    throw new Error(
+      `Indic Parler requires 1-${INDIC_PARLER_MAX_TEXT_CHARS} characters per request.`,
+    );
+  }
+  const baseUrl = (config.baseUrl || TTS_PROVIDERS['indic-parler-tts'].defaultBaseUrl!).replace(
+    /\/+$/,
+    '',
+  );
+  const response = await fetch(`${baseUrl}/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ text, description: voice.description }),
+    signal,
+  });
+  if (!response.ok) {
+    throwIfTtsRateLimited('Indic Parler', response.status);
+    throw new Error(`Indic Parler TTS API error (HTTP ${response.status}).`);
+  }
+  return validateTTSAudioResponse(response, 'Indic Parler', 'wav');
 }
 
 /**

@@ -37,6 +37,7 @@ import type {
   ASRProviderConfig,
 } from './types';
 import { isCustomTTSProvider } from './types';
+import { INDIC_PARLER_VOICES } from './indic-parler';
 import {
   VOXCPM_AUTO_VOICE,
   VOXCPM_AUTO_VOICE_ID,
@@ -1067,6 +1068,16 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     supportedFormats: ['wav'],
     speedRange: { min: 0.25, max: 4.0, default: 1.0 },
   },
+  'indic-parler-tts': {
+    id: 'indic-parler-tts',
+    name: 'Indic Parler TTS (Local)',
+    requiresApiKey: false,
+    defaultBaseUrl: 'http://127.0.0.1:8770',
+    models: [],
+    defaultModelId: '',
+    voices: INDIC_PARLER_VOICES,
+    supportedFormats: ['wav'],
+  },
 };
 
 /**
@@ -1343,6 +1354,7 @@ export const DEFAULT_TTS_VOICES: Record<BuiltInTTSProviderId, string> = {
   'elevenlabs-tts': 'EXAVITQu4vr4xnSDxMaL',
   'minimax-tts': 'English_Graceful_Lady',
   'lemonade-tts': 'af_heart',
+  'indic-parler-tts': 'default',
   'browser-native-tts': 'default',
 };
 
@@ -1356,6 +1368,7 @@ export const DEFAULT_TTS_MODELS: Record<BuiltInTTSProviderId, string> = {
   'elevenlabs-tts': 'eleven_multilingual_v2',
   'minimax-tts': 'speech-2.8-hd',
   'lemonade-tts': 'kokoro-v1',
+  'indic-parler-tts': '',
   'browser-native-tts': '',
 };
 
