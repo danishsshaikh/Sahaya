@@ -40,9 +40,14 @@ function completion(content: string) {
 }
 
 describe('routed OpenAI-compatible transport (mock HTTP only)', () => {
-  it.each([false, true])(
-    'adapts Ultra -> Super -> Gemma without leaking options (Super fails: %s)',
-    async (superFails) => {
+  it.each([
+    [false, 503],
+    [true, 503],
+    [false, 404],
+    [true, 404],
+  ] as const)(
+    'adapts Ultra -> Super -> Gemma without leaking options (Super fails: %s, HTTP %i)',
+    async (superFails, status) => {
       vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:nvidia/nemotron-3-ultra-550b-a55b');
       vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', 'openai:nvidia/nemotron-3-super-120b-a12b');
       const requests: { url: string; init: RequestInit; body: Record<string, unknown> }[] = [];
@@ -58,7 +63,7 @@ describe('routed OpenAI-compatible transport (mock HTTP only)', () => {
             return new Response(
               JSON.stringify({ error: { message: 'unavailable', type: 'server_error' } }),
               {
-                status: 503,
+                status,
                 headers: { 'content-type': 'application/json' },
               },
             );

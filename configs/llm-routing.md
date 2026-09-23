@@ -44,8 +44,11 @@ the requests used by the deployment (including tools/vision where needed).
 
 Each call attempts primary, optional secondary, then fallback, at most once per
 tier before commitment. Failover is eligible for network errors, router or
-provider timeouts, HTTP 408/429/5xx. No SDK transport retries are added. HTTP
-400/401/403/404, unknown errors, malformed requests, validation failures and user
+provider timeouts, HTTP 408/429/5xx, and upstream LLM HTTP 404 on primary/secondary.
+Such 404s count toward that tier's breaker and can advance to the next eligible
+tier before commitment; final-fallback 404s remain terminal. Generic HTTP 404
+classification outside router attempts is unchanged. No SDK transport retries
+are added. HTTP 400/401/403, unknown errors, malformed requests, validation failures and user
 cancellation do not trigger failover. Retry-After never delays the current request.
 Configured content-validation retries remain separate. Raw provider exceptions
 are replaced by safe classified causes; prompts, URLs, keys and responses are not

@@ -132,7 +132,7 @@ describe('central routed generation', () => {
       ),
     );
   });
-  it.each([408, 429, 500, 502, 503, 504])(
+  it.each([404, 408, 429, 500, 502, 503, 504])(
     'falls back once for HTTP %i and records health',
     async (status) => {
       primary.doGenerate.mockRejectedValue(httpError(status));
@@ -160,7 +160,7 @@ describe('central routed generation', () => {
       ),
     );
   });
-  it.each([400, 401, 403, 404, 422])(
+  it.each([400, 401, 403, 422])(
     'does not fall back or open the circuit on HTTP %i',
     async (status) => {
       primary.doGenerate.mockRejectedValue(httpError(status));
@@ -771,7 +771,7 @@ describe('optional secondary tier', () => {
     expect(primary.doGenerate).not.toHaveBeenCalled();
   });
 
-  it.each([400, 401, 403, 404, 422])('does not cascade secondary HTTP %i', async (code) => {
+  it.each([400, 401, 403, 422])('does not cascade secondary HTTP %i', async (code) => {
     primary.doGenerate.mockRejectedValue(networkError());
     secondary.doGenerate.mockRejectedValue(httpError(code));
     await expect(request()).rejects.toMatchObject({ statusCode: code });
@@ -791,42 +791,106 @@ describe('optional secondary tier', () => {
     );
   });
 
-  it('keeps breakers independent, skips open tiers, and closes independent recovery probes', async () => {
-    vi.useFakeTimers();
-    vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
-    primary.doGenerate.mockRejectedValue(networkError());
-    expect((await request()).text).toBe('super');
-    expect((await request()).text).toBe('super');
-    expect(primary.doGenerate).toHaveBeenCalledTimes(1);
-    expect(fallback.doGenerate).not.toHaveBeenCalled();
-    expect(logs().at(-1)).toMatchObject({
-      selectedRole: 'secondary',
-      circuitState: 'CLOSED',
-      fallbackReason: 'circuit_open',
-    });
-    secondary.doGenerate.mockRejectedValueOnce(networkError());
-    expect((await request()).text).toBe('gemma');
-    expect((await request()).text).toBe('gemma');
-    expect(secondary.doGenerate).toHaveBeenCalledTimes(3);
-    expect(logs()).toContainEqual(
-      expect.objectContaining({
+  it.each(['generate', 'stream'] as const)(
+    'fails over upstream 404s once per tier in %s',
+    async (mode) => {
+      const invoke = async () =>
+        mode === 'generate'
+          ? (await request()).text
+          : await streamLLM({ model: original, prompt: 'hi' }, 'test').text;
+      const p = mode === 'generate' ? primary.doGenerate : primary.doStream;
+      const s = mode === 'generate' ? secondary.doGenerate : secondary.doStream;
+      const f = mode === 'generate' ? fallback.doGenerate : fallback.doStream;
+      p.mockRejectedValue(httpError(404));
+      expect(await invoke()).toBe('super');
+      expect(p).toHaveBeenCalledTimes(1);
+      expect(s).toHaveBeenCalledTimes(1);
+      expect(f).not.toHaveBeenCalled();
+      expect(logs()).toContainEqual(
+        expect.objectContaining({ selectedRole: 'primary', status: 'http_404', attempt: 1 }),
+      );
+      expect(logs().at(-1)).toMatchObject({
         selectedRole: 'secondary',
-        status: 'circuit_open',
-        circuitState: 'OPEN',
-      }),
-    );
-    await vi.advanceTimersByTimeAsync(101);
-    // Ultra's failed probe must not prevent Super's successful probe.
-    expect((await request()).text).toBe('super');
-    expect((await request()).text).toBe('super');
-    expect(primary.doGenerate).toHaveBeenCalledTimes(2);
-    expect(logs().at(-1)).toMatchObject({ selectedRole: 'secondary', circuitState: 'CLOSED' });
-    primary.doGenerate.mockResolvedValue(result('nemotron'));
-    await vi.advanceTimersByTimeAsync(101);
-    expect((await request()).text).toBe('nemotron');
-    expect((await request()).text).toBe('nemotron');
-    expect(logs().at(-1)).toMatchObject({ selectedRole: 'primary', circuitState: 'CLOSED' });
-  });
+        status: 'success',
+        fallbackReason: 'http_404',
+        attempt: 2,
+      });
+      s.mockRejectedValue(httpError(404));
+      capture.log.mockClear();
+      expect(await invoke()).toBe('gemma');
+      expect(p).toHaveBeenCalledTimes(2);
+      expect(s).toHaveBeenCalledTimes(2);
+      expect(f).toHaveBeenCalledTimes(1);
+      expect(
+        logs()
+          .filter((e) => e.status !== 'stream_committed')
+          .map((e) => [e.selectedRole, e.status, e.attempt]),
+      ).toEqual([
+        ['primary', 'http_404', 1],
+        ['secondary', 'http_404', 2],
+        ['fallback', 'success', 3],
+      ]);
+    },
+  );
+
+  it.each(['generate', 'stream'] as const)(
+    'surfaces final-fallback 404 without looping in %s',
+    async (mode) => {
+      for (const m of [primary, secondary, fallback]) {
+        m.doGenerate.mockRejectedValue(httpError(404));
+        m.doStream.mockRejectedValue(httpError(404));
+      }
+      const router = createLLMRouter('test')!;
+      const pending =
+        mode === 'generate' ? router.model.doGenerate(options) : router.model.doStream(options);
+      await expect(pending).rejects.toMatchObject({
+        statusCode: 404,
+        cause: { selected: { reason: 'http_404', retryable: false } },
+      });
+      for (const m of [primary, secondary, fallback])
+        expect(mode === 'generate' ? m.doGenerate : m.doStream).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([503, 404])(
+    'keeps breakers independent through HTTP %i failures and recovery',
+    async (status) => {
+      vi.useFakeTimers();
+      vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
+      primary.doGenerate.mockRejectedValue(httpError(status));
+      expect((await request()).text).toBe('super');
+      expect((await request()).text).toBe('super');
+      expect(primary.doGenerate).toHaveBeenCalledTimes(1);
+      expect(fallback.doGenerate).not.toHaveBeenCalled();
+      expect(logs().at(-1)).toMatchObject({
+        selectedRole: 'secondary',
+        circuitState: 'CLOSED',
+        fallbackReason: 'circuit_open',
+      });
+      secondary.doGenerate.mockRejectedValueOnce(httpError(status));
+      expect((await request()).text).toBe('gemma');
+      expect((await request()).text).toBe('gemma');
+      expect(secondary.doGenerate).toHaveBeenCalledTimes(3);
+      expect(logs()).toContainEqual(
+        expect.objectContaining({
+          selectedRole: 'secondary',
+          status: 'circuit_open',
+          circuitState: 'OPEN',
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(101);
+      // Ultra's failed probe must not prevent Super's successful probe.
+      expect((await request()).text).toBe('super');
+      expect((await request()).text).toBe('super');
+      expect(primary.doGenerate).toHaveBeenCalledTimes(2);
+      expect(logs().at(-1)).toMatchObject({ selectedRole: 'secondary', circuitState: 'CLOSED' });
+      primary.doGenerate.mockResolvedValue(result('nemotron'));
+      await vi.advanceTimersByTimeAsync(101);
+      expect((await request()).text).toBe('nemotron');
+      expect((await request()).text).toBe('nemotron');
+      expect(logs().at(-1)).toMatchObject({ selectedRole: 'primary', circuitState: 'CLOSED' });
+    },
+  );
 
   it('admits only one secondary half-open probe and reopens on probe failure', async () => {
     vi.useFakeTimers();
@@ -880,7 +944,7 @@ describe('optional secondary tier', () => {
       for (const mode of ['generate', 'stream'] as const) {
         const p = mode === 'generate' ? primary.doGenerate : primary.doStream;
         const s = mode === 'generate' ? secondary.doGenerate : secondary.doStream;
-        if (role === 'secondary') p.mockRejectedValue(networkError());
+        if (role === 'secondary') p.mockRejectedValue(httpError(404));
         const active = role === 'primary' ? p : s;
         active.mockImplementation(() => new Promise(() => {}));
         const controller = new AbortController();
@@ -940,23 +1004,39 @@ describe('optional secondary tier', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('never switches away from secondary after stream commitment', async () => {
-    primary.doStream.mockRejectedValue(networkError());
-    secondary.doStream.mockResolvedValue(
-      partsStream([
-        { type: 'text-start', id: 's' },
-        { type: 'error', error: networkError() },
-      ]),
-    );
-    const response = await createLLMRouter('test')!.model.doStream(options);
-    const reader = response.stream.getReader();
-    expect((await reader.read()).value).toMatchObject({ type: 'text-start' });
-    expect((await reader.read()).value).toMatchObject({ type: 'error' });
-    expect(fallback.doStream).not.toHaveBeenCalled();
-  });
+  it.each([503, 404])(
+    'never switches after secondary stream commitment on HTTP %i',
+    async (status) => {
+      primary.doStream.mockRejectedValue(networkError());
+      secondary.doStream.mockResolvedValue(
+        partsStream([
+          { type: 'text-start', id: 's' },
+          { type: 'error', error: httpError(status) },
+        ]),
+      );
+      const response = await createLLMRouter('test')!.model.doStream(options);
+      const reader = response.stream.getReader();
+      expect((await reader.read()).value).toMatchObject({ type: 'text-start' });
+      expect((await reader.read()).value).toMatchObject({ type: 'error' });
+      expect(fallback.doStream).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('classification and configuration', () => {
+  it('keeps generic 404 classification terminal outside router attempts', () => {
+    expect(classifyRouterError(httpError(404))).toEqual({
+      reason: 'http_404',
+      retryable: false,
+      statusCode: 404,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    expect(classifyRouterError(httpError(404), controller.signal)).toEqual({
+      reason: 'caller_abort',
+      retryable: false,
+    });
+  });
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'])(
     'classifies nested %s',
     (code) => {

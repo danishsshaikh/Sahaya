@@ -478,10 +478,16 @@ export function createLLMRouter(
     const sdkReason: unknown = options.abortSignal?.reason;
     const sdkTimeout = sdkReason instanceof Error && sdkReason.name === 'TimeoutError';
     const cancelled = callerSignal?.aborted || (options.abortSignal?.aborted && !sdkTimeout);
-    const failure = classifyRouterError(
+    const classified = classifyRouterError(
       options.abortSignal?.aborted ? sdkReason : error,
       cancelled ? (callerSignal?.aborted ? callerSignal : options.abortSignal) : undefined,
     );
+    // A missing upstream model/endpoint can be bypassed by another LLM tier.
+    // Keep generic HTTP classification and final-fallback 404s terminal.
+    const failure =
+      (selected === 'primary' || selected === 'secondary') && classified.reason === 'http_404'
+        ? { ...classified, retryable: true }
+        : classified;
     failed(failure);
     report(failure.reason, start, timeoutBudgetMs);
     if (cancelled) throw callerSignal?.aborted ? callerSignal.reason : options.abortSignal?.reason;
