@@ -146,6 +146,70 @@ describe('server-backed narration storage', () => {
     );
   });
 
+  it('keeps complete Teaching Voice text and allocated audio paired for consecutive actions', async () => {
+    const { generateTTSForScene } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    const texts = [
+      'Tools are executable actions the model can invoke, including sending emails, running code, calling external APIs, updating databases, and triggering complete automated workflows.',
+      'Unlike resources, tools have side effects. They change state.',
+    ];
+    const scene = {
+      id: 'scene-test',
+      stageId: 'stage-test',
+      order: 0,
+      actions: texts.map((text, index) => ({ id: `speech-${index}`, type: 'speech', text })),
+    } as import('@/lib/types/stage').Scene;
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mocks.settingsState.mockReturnValue({ ...mocks.settingsState(), parallelSceneConcurrency: 4 });
+    mocks.resolveAgentVoiceOptions.mockClear();
+    mocks.poolPut.mockResolvedValueOnce('ast_first').mockResolvedValueOnce('ast_second');
+    let active = 0;
+    let maxActive = 0;
+    mockFetch.mockImplementation(async (_url, init) => {
+      maxActive = Math.max(maxActive, ++active);
+      await Promise.resolve();
+      active--;
+      return {
+        ...ttsResponse(),
+        json: async () => ({
+          success: true,
+          format: 'wav',
+          base64: btoa(JSON.parse(init.body).text),
+        }),
+      };
+    });
+    try {
+      await expect(generateTTSForScene(scene, 'English')).resolves.toMatchObject({ success: true });
+      expect(maxActive).toBe(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      for (let index = 0; index < texts.length; index++) {
+        expect(JSON.parse(mockFetch.mock.calls[index][1].body)).toMatchObject({
+          text: texts[index],
+          teacherVoiceProfileId: 'vcp_test',
+          ttsLanguageCode: 'en',
+        });
+        expect(await (mocks.poolPut.mock.calls[index][0] as Blob).text()).toBe(texts[index]);
+      }
+      const snapshot = JSON.parse(JSON.stringify(scene));
+      expect(snapshot.actions).toEqual(
+        texts.map((text, index) => ({
+          id: `speech-${index}`,
+          type: 'speech',
+          text,
+          audioId: index === 0 ? 'ast_first' : 'ast_second',
+        })),
+      );
+      expect(mocks.resolveAgentVoiceOptions).not.toHaveBeenCalled();
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
   // Regeneration forks. Replacing bytes behind a live id needs proof that no
   // other document holds it, and that proof is unavailable once references can
   // leave this browser: `proveExclusiveAssetOwnership` refuses unconditionally

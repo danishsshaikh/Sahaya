@@ -67,10 +67,11 @@ export class AudioPlayer {
   }
 
   private stopAudioElement(): void {
-    if (this.audio) {
-      this.audio.pause();
-      this.audio.currentTime = 0;
-      this.audio = null;
+    const audio = this.audio;
+    this.audio = null;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
     }
     // Stop or replacement before natural end must not leak the fetched
     // narration: the element is dropped here, so its URL is released with it.
@@ -100,6 +101,9 @@ export class AudioPlayer {
     const requestToken = ++this.requestToken;
     // A new play supersedes any in-flight legacy fetch of the previous one.
     this.abortLegacyFetch();
+    // Retire the old element before resolving new bytes: queued events from
+    // it must not complete the replacement action while that action loads.
+    this.stopAudioElement();
     try {
       let blob = await resolveBytes(audioId);
       if (requestToken !== this.requestToken) return false;
@@ -137,26 +141,27 @@ export class AudioPlayer {
         return false;
       }
 
-      // Stop current playback
-      this.stopAudioElement();
-      if (requestToken !== this.requestToken) return false;
-
       // Create audio element
-      this.audio = new Audio();
+      const audio = new Audio();
+      this.audio = audio;
 
       // Set audio source
       const blobUrl = blob ? URL.createObjectURL(blob) : undefined;
       this.blobUrl = blobUrl ?? null;
-      this.audio.src = blobUrl ?? (directUrl as string);
-      if (this.muted) this.audio.volume = 0;
-      else this.audio.volume = this.volume;
+      audio.src = blobUrl ?? (directUrl as string);
+      if (this.muted) audio.volume = 0;
+      else audio.volume = this.volume;
 
       // Apply playback rate
-      this.audio.defaultPlaybackRate = this.playbackRate;
-      this.audio.playbackRate = this.playbackRate;
+      audio.defaultPlaybackRate = this.playbackRate;
+      audio.playbackRate = this.playbackRate;
 
       // Set ended callback
-      this.audio.addEventListener('ended', () => {
+      audio.addEventListener('ended', () => {
+        // Completion belongs to this element, not whichever action installed
+        // the latest callback. Clear ownership before advancing (exactly once).
+        if (this.audio !== audio) return;
+        this.audio = null;
         this.releaseBlobUrl(blobUrl);
         this.onEndedCallback?.();
       });
@@ -165,7 +170,7 @@ export class AudioPlayer {
       // load) the 'ended' listener never fires, so revoke the blob URL here to
       // avoid leaking it for the lifetime of the document.
       try {
-        await this.audio.play();
+        await audio.play();
       } catch (playError) {
         this.releaseBlobUrl(blobUrl);
         throw playError;
@@ -175,7 +180,7 @@ export class AudioPlayer {
         return false;
       }
       // Re-apply after play() — some browsers reset during load
-      this.audio.playbackRate = this.playbackRate;
+      audio.playbackRate = this.playbackRate;
       return true;
     } catch (error) {
       log.error('Failed to play audio:', error);
@@ -202,9 +207,7 @@ export class AudioPlayer {
     // settle: the play was superseded and its result is unwanted.
     this.abortLegacyFetch();
     this.stopAudioElement();
-    // Note: onEndedCallback intentionally NOT cleared here because play()
-    // calls stop() internally — clearing would break the callback chain.
-    // Stale callbacks are harmless: engine mode check prevents processNext().
+    // Keep the callback registration; retired elements cannot invoke it.
   }
 
   /**
