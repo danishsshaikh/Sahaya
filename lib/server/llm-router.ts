@@ -33,7 +33,12 @@ export interface LLMRoutingPolicy {
   requestId?: string;
   onRouteEvent?: (event: LLMRouteTelemetry) => void;
   /** Server-owned budget shared by simulation HTML generation and its language repair. */
-  simulationBudget?: { startedAtMs: number; deadlineMs: number };
+  simulationBudget?: {
+    startedAtMs: number;
+    deadlineMs: number;
+    totalBudgetMs?: number;
+    upstreamAttemptBudgetMs?: number;
+  };
 }
 
 interface Endpoint {
@@ -357,7 +362,8 @@ export function createLLMRouter(
   }
   const simulationDeadline = policy.simulationBudget
     ? Math.min(
-        policy.simulationBudget.startedAtMs + config.totalMs,
+        policy.simulationBudget.startedAtMs +
+          (policy.simulationBudget.totalBudgetMs ?? config.totalMs),
         policy.simulationBudget.deadlineMs,
       )
     : undefined;
@@ -366,8 +372,9 @@ export function createLLMRouter(
   if (!Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
     throw new RouterError({ reason: 'timeout', retryable: true });
   }
-  // Full HTML/CSS/JS needs sustained generation time. Upstream attempts share
-  // at most one third; the final tier can use all remaining time, not the
+  // Full HTML/CSS/JS needs sustained generation time. Simulation callers may
+  // provide explicit upstream probe budgets; otherwise upstream attempts share
+  // at most one third. The final tier can use all remaining time, not the
   // lightweight role cap. No request or repair can extend the scene deadline.
   const fallbackReserveMs = Math.ceil((totalTimeoutMs * 2) / 3);
   const roles: Role[] = config.secondary
@@ -555,10 +562,15 @@ export function createLLMRouter(
           policy.simulationBudget && !committed
             ? selected === 'fallback'
               ? remainingMs
-              : Math.min(
-                  roleTimeoutMs(config, selected),
-                  Math.floor(Math.max(0, remainingMs - fallbackReserveMs) / pendingUpstream),
-                )
+              : policy.simulationBudget.upstreamAttemptBudgetMs
+                ? Math.min(
+                    roleTimeoutMs(config, selected),
+                    policy.simulationBudget.upstreamAttemptBudgetMs,
+                  )
+                : Math.min(
+                    roleTimeoutMs(config, selected),
+                    Math.floor(Math.max(0, remainingMs - fallbackReserveMs) / pendingUpstream),
+                  )
             : roleTimeoutMs(config, selected);
         const timeoutMs = attemptBudgetMs(deadline, start, roleBudgetMs);
         const scope = budget(options.abortSignal, start + timeoutMs);

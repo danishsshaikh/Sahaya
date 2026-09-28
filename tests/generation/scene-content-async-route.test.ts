@@ -222,8 +222,69 @@ describe('scene-content async simulation route', () => {
     expect(first).toBe(repair);
     expect(first.startedAtMs).toBeGreaterThanOrEqual(beforeRequest);
     expect(first.deadlineMs - first.startedAtMs).toBeLessThanOrEqual(290000);
+    expect(first.totalBudgetMs).toBe(290000);
+    expect(first.upstreamAttemptBudgetMs).toBe(30000);
     const { readSceneContentJob } = await import('@/lib/server/scene-content-jobs');
     expect(readSceneContentJob(jobId, 'owner-a')?.status).toBe('completed');
+  });
+
+  test('caps simulation output tokens without applying the cap to other scene types', async () => {
+    mocks.resolveModelFromRequest.mockResolvedValueOnce({
+      model: { provider: 'test.chat', modelId: 'nemotron' },
+      modelInfo: { outputWindow: 128000, capabilities: {} },
+      modelString: 'test:nemotron',
+      thinkingConfig: undefined,
+    });
+    mocks.callLLM.mockResolvedValueOnce({ text: simulationHtml() });
+
+    const { POST } = await import('@/app/api/generate/scene-content/route');
+    await POST(
+      mockRequest(
+        sceneContentBody({
+          outline: { ...simulationOutline, id: 'arbitrary-simulation-outline' },
+          allOutlines: [{ ...simulationOutline, id: 'arbitrary-simulation-outline' }],
+        }),
+      ),
+    );
+    await mocks.afterCallbacks[0]();
+
+    expect(mocks.callLLM.mock.calls[0][0]).toMatchObject({ maxOutputTokens: 12000 });
+    expect(mocks.callLLM.mock.calls[0][4].simulationBudget).toMatchObject({
+      totalBudgetMs: 290000,
+      upstreamAttemptBudgetMs: 30000,
+    });
+
+    mocks.resolveModelFromRequest.mockResolvedValueOnce({
+      model: { provider: 'test.chat', modelId: 'nemotron' },
+      modelInfo: { outputWindow: 128000, capabilities: {} },
+      modelString: 'test:nemotron',
+      thinkingConfig: undefined,
+    });
+    const quizOutline: SceneOutline = {
+      ...simulationOutline,
+      id: 'outline-quiz-large-window',
+      type: 'quiz',
+      widgetType: undefined,
+      quizConfig: { questionCount: 1, difficulty: 'medium', questionTypes: ['single'] },
+    };
+    mocks.callLLM.mockResolvedValueOnce({
+      text: JSON.stringify([
+        {
+          type: 'single',
+          question: 'Which traversal visits the root first?',
+          options: ['Preorder', 'Inorder'],
+          correctAnswer: 'A',
+        },
+      ]),
+    });
+
+    const quiz = await POST(
+      mockRequest(sceneContentBody({ outline: quizOutline, allOutlines: [quizOutline] })),
+    );
+
+    expect(quiz.status).toBe(200);
+    expect(mocks.callLLM.mock.calls[1][0]).toMatchObject({ maxOutputTokens: 128000 });
+    expect(mocks.callLLM.mock.calls[1][4]).not.toHaveProperty('simulationBudget');
   });
 
   test('does not apply simulation allocation to other interactive widgets', async () => {

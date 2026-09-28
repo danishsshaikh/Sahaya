@@ -50,6 +50,10 @@ import {
 
 const log = createLogger('Scene Content API');
 const SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
+const SIMULATION_HOSTING_MARGIN_MS = 10_000;
+const SIMULATION_TOTAL_BUDGET_MS = 290_000;
+const SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS = 30_000;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS = 12_000;
 
 export const maxDuration = 300;
 
@@ -70,6 +74,33 @@ const VISION_RESOLUTION_BUDGET_MS = 15_000;
  * names the fuse). A resolved candidate resets the streak.
  */
 const MAX_CONSECUTIVE_UNRESOLVABLE_VISION_IMAGES = 3;
+
+function positiveEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+    log.warn(`Invalid ${name}; using default ${fallback}.`);
+    return fallback;
+  }
+  return value;
+}
+
+function isSimulationOutline(outline: SceneOutline): boolean {
+  return outline.type === 'interactive' && outline.widgetType === 'simulation';
+}
+
+function maxOutputTokensForScene(
+  outline: SceneOutline,
+  outputWindow: number | undefined,
+): number | undefined {
+  if (!isSimulationOutline(outline)) return outputWindow;
+  const simulationCap = positiveEnvInt(
+    'SCENE_CONTENT_SIMULATION_MAX_OUTPUT_TOKENS',
+    DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS,
+  );
+  return Math.min(outputWindow ?? simulationCap, simulationCap);
+}
 
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
@@ -133,12 +164,23 @@ export async function POST(req: NextRequest) {
     const timingCollector = createGenerationTimingCollector();
     let simulationBudget: LLMRoutingPolicy['simulationBudget'];
     const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
-      if (effectiveOutline.type === 'interactive' && effectiveOutline.widgetType === 'simulation') {
-        // Keep language repair within the same LLM budget, with 10 seconds
-        // left for validation/job completion before the route hosting limit.
+      if (isSimulationOutline(effectiveOutline)) {
+        const simulationTotalBudgetMs = positiveEnvInt(
+          'SCENE_CONTENT_SIMULATION_TOTAL_BUDGET_MS',
+          SIMULATION_TOTAL_BUDGET_MS,
+        );
+        const simulationUpstreamAttemptBudgetMs = positiveEnvInt(
+          'SCENE_CONTENT_SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS',
+          SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS,
+        );
+        // Simulation HTML is expensive, but the useful local fallback should
+        // receive most of the bounded scene budget. Upstream tiers get short
+        // probes; generation and any repair share the same absolute deadline.
         simulationBudget ??= {
           startedAtMs: Date.now(),
-          deadlineMs: startedAt + maxDuration * 1000 - 10_000,
+          deadlineMs: startedAt + maxDuration * 1000 - SIMULATION_HOSTING_MARGIN_MS,
+          totalBudgetMs: simulationTotalBudgetMs,
+          upstreamAttemptBudgetMs: simulationUpstreamAttemptBudgetMs,
         };
       }
       const routingPolicy = {
@@ -182,7 +224,7 @@ export async function POST(req: NextRequest) {
               content: buildVisionUserContent(userPrompt, resolvedImages),
             },
           ],
-          maxOutputTokens: modelInfo?.outputWindow,
+          maxOutputTokens: maxOutputTokensForScene(effectiveOutline, modelInfo?.outputWindow),
           maxRetries: 0,
         });
         return result.text;
@@ -191,7 +233,7 @@ export async function POST(req: NextRequest) {
         model: languageModel,
         system: systemPrompt,
         prompt: userPrompt,
-        maxOutputTokens: modelInfo?.outputWindow,
+        maxOutputTokens: maxOutputTokensForScene(effectiveOutline, modelInfo?.outputWindow),
         maxRetries: 0,
       });
       return result.text;
@@ -415,7 +457,7 @@ export async function POST(req: NextRequest) {
       return { content, effectiveOutline };
     };
 
-    if (effectiveOutline.type === 'interactive' && effectiveOutline.widgetType === 'simulation') {
+    if (isSimulationOutline(effectiveOutline)) {
       const user = await requireSessionUser(req);
       if (user instanceof Response) return user;
 

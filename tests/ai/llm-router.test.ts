@@ -143,11 +143,73 @@ describe('simulation fallback allocation', () => {
     );
   });
 
-  const simulationPolicy = () => ({
+  const legacySimulationPolicy = () => ({
     simulationBudget: { startedAtMs: Date.now(), deadlineMs: Date.now() + 290000 },
   });
 
-  it('reproduces the generic 270s failure, but completes heavy fallback within that same total', async () => {
+  const simulationPolicy = () => ({
+    simulationBudget: {
+      startedAtMs: Date.now(),
+      deadlineMs: Date.now() + 290000,
+      totalBudgetMs: 290000,
+      upstreamAttemptBudgetMs: 30000,
+    },
+  });
+
+  it('documents the previous 45/45/180 policy timing out a slower valid fallback', async () => {
+    fallback.doGenerate.mockImplementation(
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve(result('late simulation HTML')), 210000)),
+    );
+
+    const routed = callLLM(
+      { model: original, prompt: 'generate a complete simulation', maxRetries: 0 },
+      'scene-content',
+      undefined,
+      undefined,
+      legacySimulationPolicy(),
+    );
+    const failed = expect(routed).rejects.toThrow('LLM provider failed (timeout)');
+    await vi.advanceTimersByTimeAsync(270000);
+    await failed;
+
+    expect(logs().map((event) => [event.selectedRole, event.timeoutBudgetMs])).toEqual([
+      ['primary', 45000],
+      ['secondary', 45000],
+      ['fallback', 180000],
+    ]);
+  });
+
+  it('keeps the existing 130s fallback success case within the new bounded policy', async () => {
+    fallback.doGenerate.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(result('simulation HTML')), 130000)),
+    );
+
+    const routed = callLLM(
+      { model: original, prompt: 'generate a complete simulation', maxRetries: 0 },
+      'scene-content',
+      undefined,
+      undefined,
+      simulationPolicy(),
+    );
+    const completed = routed.then(
+      (value) => ({ text: value.text }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(290000);
+    expect(await completed).toEqual({ text: 'simulation HTML' });
+    expect(logs().map((event) => [event.selectedRole, event.timeoutBudgetMs])).toEqual([
+      ['primary', 30000],
+      ['secondary', 30000],
+      ['fallback', 230000],
+    ]);
+  });
+
+  it('lets a slower-but-valid fallback complete without exceeding the scene deadline', async () => {
+    fallback.doGenerate.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(result('simulation HTML')), 210000)),
+    );
+
     const ordinary = createLLMRouter('scene-content')!.model.doGenerate(options);
     const failed = expect(ordinary).rejects.toThrow('LLM provider failed (timeout)');
     await vi.advanceTimersByTimeAsync(270000);
@@ -167,12 +229,12 @@ describe('simulation fallback allocation', () => {
       (value) => ({ text: value.text }),
       (error: unknown) => ({ error }),
     );
-    await vi.advanceTimersByTimeAsync(270000);
+    await vi.advanceTimersByTimeAsync(290000);
     expect(await completed).toEqual({ text: 'simulation HTML' });
     expect(logs().map((event) => [event.selectedRole, event.timeoutBudgetMs])).toEqual([
-      ['primary', 45000],
-      ['secondary', 45000],
-      ['fallback', 180000],
+      ['primary', 30000],
+      ['secondary', 30000],
+      ['fallback', 230000],
     ]);
     expect(logs().at(-1)).toMatchObject({ status: 'success', circuitState: 'OPEN' });
   });
@@ -182,7 +244,7 @@ describe('simulation fallback allocation', () => {
     const router = createLLMRouter('scene-content', simulationPolicy())!;
     const pending = router.model.doGenerate(options);
     const failed = expect(pending).rejects.toThrow('LLM provider failed (timeout)');
-    await vi.advanceTimersByTimeAsync(270000);
+    await vi.advanceTimersByTimeAsync(290000);
     await failed;
     expect(primary.doGenerate).toHaveBeenCalledTimes(1);
     expect(secondary.doGenerate).toHaveBeenCalledTimes(1);
@@ -196,9 +258,9 @@ describe('simulation fallback allocation', () => {
     await createLLMRouter('scene-content', policy)!.model.doGenerate(options);
     await vi.advanceTimersByTimeAsync(240000);
     const repair = createLLMRouter('scene-content', policy)!;
-    expect(repair.totalTimeoutMs).toBe(30000);
+    expect(repair.totalTimeoutMs).toBe(50000);
     const failed = expect(repair.model.doGenerate(options)).rejects.toThrow('timeout');
-    await vi.advanceTimersByTimeAsync(30000);
+    await vi.advanceTimersByTimeAsync(50000);
     await failed;
     expect(() => createLLMRouter('scene-content', policy)).toThrow('timeout');
   });
@@ -213,7 +275,7 @@ describe('simulation fallback allocation', () => {
     await pending;
     expect(primary.doGenerate).toHaveBeenCalledTimes(1);
     expect(secondary.doGenerate).toHaveBeenCalledTimes(1);
-    expect(logs().at(-1)).toMatchObject({ selectedRole: 'fallback', timeoutBudgetMs: 270000 });
+    expect(logs().at(-1)).toMatchObject({ selectedRole: 'fallback', timeoutBudgetMs: 290000 });
     primary.doGenerate.mockResolvedValueOnce(result('recovered'));
     await createLLMRouter('scene-content', simulationPolicy())!.model.doGenerate(options);
     expect(logs().at(-1)).toMatchObject({ selectedRole: 'primary', circuitState: 'CLOSED' });
@@ -265,7 +327,7 @@ describe('simulation fallback allocation', () => {
       effectiveOutline: outline,
     }));
     expect(readSceneContentJob(later.id, 'test-owner')?.status).toBe('generating');
-    await vi.advanceTimersByTimeAsync(270000);
+    await vi.advanceTimersByTimeAsync(290000);
     await run;
     expect(readSceneContentJob(later.id, 'test-owner')).toMatchObject({
       status: 'failed',
