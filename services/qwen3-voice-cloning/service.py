@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 MODEL_ID = os.getenv("QWEN3_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 DEVICE = os.getenv("QWEN3_TTS_DEVICE", "cuda:0")
+REFERENCE_TAIL_SILENCE_SECONDS = 0.35
 app = FastAPI(title="Sahaya Qwen3 Teaching Voice")
 log = logging.getLogger("sahaya.qwen3_voice_cloning")
 
@@ -258,16 +261,50 @@ def load_runtime() -> Runtime:
 
 
 def generate_audio(active: Runtime, profile: VoiceProfile, text: str) -> tuple[Any, int]:
+    reference_audio = prepare_reference_audio_for_icl(active, profile.reference_audio)
     wavs, sample_rate = active.model.generate_voice_clone(
         text=text,
         language="English",
-        ref_audio=str(profile.reference_audio),
+        ref_audio=str(reference_audio),
         ref_text=profile.reference_text,
         x_vector_only_mode=False,
     )
     if len(wavs) != 1:
         raise ValueError("expected one generated waveform")
     return wavs[0], int(sample_rate)
+
+
+def prepare_reference_audio_for_icl(active: Runtime, reference: Path) -> Path:
+    """Add an explicit silence boundary after the reference utterance.
+
+    Qwen full-ICL cloning conditions on both the transcript and the reference
+    waveform. Enrollment recordings can end immediately after the last spoken
+    token, which makes the target generation behave like a continuation of that
+    tail. We keep the transcript exact and only give the model a real acoustic
+    boundary before the target text starts.
+    """
+    stat = reference.stat()
+    cache_root = Path(tempfile.gettempdir()) / "sahaya-qwen3-reference-boundaries"
+    key = hashlib.sha256(
+        f"{reference}:{stat.st_mtime_ns}:{stat.st_size}:{REFERENCE_TAIL_SILENCE_SECONDS}".encode(),
+    ).hexdigest()[:24]
+    prepared = cache_root / f"{key}.wav"
+    if prepared.exists():
+        return prepared
+
+    audio, sample_rate = active.soundfile.read(str(reference), dtype="float32", always_2d=True)
+    audio = active.numpy.asarray(audio, dtype="float32")
+    if audio.ndim != 2 or audio.shape[0] == 0 or audio.shape[1] == 0:
+        raise ValueError("reference audio must be nonempty")
+    silence_frames = max(1, int(round(sample_rate * REFERENCE_TAIL_SILENCE_SECONDS)))
+    tail = active.numpy.zeros((silence_frames, audio.shape[1]), dtype="float32")
+    bounded = active.numpy.concatenate([audio, tail], axis=0)
+
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tmp = prepared.with_suffix(".tmp.wav")
+    active.soundfile.write(str(tmp), bounded, sample_rate, format="WAV", subtype="PCM_16")
+    tmp.replace(prepared)
+    return prepared
 
 
 if __name__ == "__main__":
