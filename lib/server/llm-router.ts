@@ -32,6 +32,8 @@ export interface LLMRoutingPolicy {
   externalAllowed?: boolean;
   requestId?: string;
   onRouteEvent?: (event: LLMRouteTelemetry) => void;
+  /** Server-owned budget shared by simulation HTML generation and its language repair. */
+  simulationBudget?: { startedAtMs: number; deadlineMs: number };
 }
 
 interface Endpoint {
@@ -353,6 +355,21 @@ export function createLLMRouter(
       throw new Error('Local-only routing requires LLM_ROUTER_ENABLED.');
     return undefined;
   }
+  const simulationDeadline = policy.simulationBudget
+    ? Math.min(
+        policy.simulationBudget.startedAtMs + config.totalMs,
+        policy.simulationBudget.deadlineMs,
+      )
+    : undefined;
+  const totalTimeoutMs =
+    simulationDeadline === undefined ? config.totalMs : Math.floor(simulationDeadline - Date.now());
+  if (!Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
+    throw new RouterError({ reason: 'timeout', retryable: true });
+  }
+  // Full HTML/CSS/JS needs sustained generation time. Upstream attempts share
+  // at most one third; the final tier can use all remaining time, not the
+  // lightweight role cap. No request or repair can extend the scene deadline.
+  const fallbackReserveMs = Math.ceil((totalTimeoutMs * 2) / 3);
   const roles: Role[] = config.secondary
     ? ['primary', 'secondary', 'fallback']
     : ['primary', 'fallback'];
@@ -369,7 +386,7 @@ export function createLLMRouter(
   const requestId = policy.requestId ?? randomUUID();
   let selected: Role | undefined;
   let committed = false;
-  let deadline: number | undefined;
+  let deadline: number | undefined = simulationDeadline;
   let firstFailure: Failure | undefined;
   let fallbackReason: string | undefined;
   let epoch = b.epoch;
@@ -527,7 +544,23 @@ export function createLLMRouter(
       for (;;) {
         attempt += 1;
         const start = Date.now();
-        const timeoutMs = attemptBudgetMs(deadline, start, roleTimeoutMs(config, selected));
+        const remainingMs = deadline - start;
+        const pendingUpstream = roles
+          .slice(roles.indexOf(selected))
+          .filter(
+            (role) =>
+              role !== 'fallback' && (policy.externalAllowed !== false || endpointFor(role).local),
+          ).length;
+        const roleBudgetMs =
+          policy.simulationBudget && !committed
+            ? selected === 'fallback'
+              ? remainingMs
+              : Math.min(
+                  roleTimeoutMs(config, selected),
+                  Math.floor(Math.max(0, remainingMs - fallbackReserveMs) / pendingUpstream),
+                )
+            : roleTimeoutMs(config, selected);
+        const timeoutMs = attemptBudgetMs(deadline, start, roleBudgetMs);
         const scope = budget(options.abortSignal, start + timeoutMs);
         try {
           const target = (models[selected] ??= buildModel(endpointFor(selected)));
@@ -646,5 +679,5 @@ export function createLLMRouter(
       }
     },
   };
-  return { model, usageMeta: meta, totalTimeoutMs: config.totalMs };
+  return { model, usageMeta: meta, totalTimeoutMs };
 }

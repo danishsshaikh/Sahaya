@@ -5,6 +5,7 @@ import type { SceneOutline } from '@/lib/types/generation';
 const mocks = vi.hoisted(() => ({
   afterCallbacks: [] as Array<() => Promise<void> | void>,
   callLLM: vi.fn(),
+  resolveVisionImagesForPrompt: vi.fn(),
   resolveModelFromRequest: vi.fn(),
   requireSessionUser: vi.fn(),
 }));
@@ -27,6 +28,10 @@ vi.mock('@/lib/server/resolve-model', () => ({
   resolveModelFromRequest: mocks.resolveModelFromRequest,
 }));
 
+vi.mock('@/lib/persistence/resolve-vision-images', () => ({
+  resolveVisionImagesForPrompt: mocks.resolveVisionImagesForPrompt,
+}));
+
 vi.mock('@/lib/auth/server', () => ({
   requireSessionUser: mocks.requireSessionUser,
 }));
@@ -47,6 +52,8 @@ describe('scene-content async simulation route', () => {
     vi.resetModules();
     mocks.afterCallbacks.length = 0;
     mocks.callLLM.mockReset();
+    mocks.resolveVisionImagesForPrompt.mockReset();
+    mocks.resolveVisionImagesForPrompt.mockResolvedValue([]);
     mocks.resolveModelFromRequest.mockReset();
     mocks.requireSessionUser.mockReset();
     mocks.requireSessionUser.mockResolvedValue({ id: 'owner-a' });
@@ -197,6 +204,70 @@ describe('scene-content async simulation route', () => {
     );
     expect(request.prompt).toContain('Requested output language: English (en-US)');
     expect(request.prompt).toContain('Teach in English.');
+  });
+
+  test('shares one simulation budget across generation and English language repair', async () => {
+    mocks.callLLM
+      .mockResolvedValueOnce({ text: simulationHtml().replace('<main>', '<main>\u7ee7\u7eed ') })
+      .mockResolvedValueOnce({ text: simulationHtml() });
+    const beforeRequest = Date.now();
+    const { POST } = await import('@/app/api/generate/scene-content/route');
+    const response = await POST(mockRequest(sceneContentBody()));
+    const { jobId } = await response.json();
+    await mocks.afterCallbacks[0]();
+
+    expect(mocks.callLLM).toHaveBeenCalledTimes(2);
+    const first = mocks.callLLM.mock.calls[0][4].simulationBudget;
+    const repair = mocks.callLLM.mock.calls[1][4].simulationBudget;
+    expect(first).toBe(repair);
+    expect(first.startedAtMs).toBeGreaterThanOrEqual(beforeRequest);
+    expect(first.deadlineMs - first.startedAtMs).toBeLessThanOrEqual(290000);
+    const { readSceneContentJob } = await import('@/lib/server/scene-content-jobs');
+    expect(readSceneContentJob(jobId, 'owner-a')?.status).toBe('completed');
+  });
+
+  test('does not apply simulation allocation to other interactive widgets', async () => {
+    const diagram = { ...simulationOutline, widgetType: 'diagram' };
+    mocks.callLLM.mockResolvedValueOnce({
+      text: simulationHtml().replace('"type":"simulation"', '"type":"diagram"'),
+    });
+    const { POST } = await import('@/app/api/generate/scene-content/route');
+    const response = await POST(
+      mockRequest(sceneContentBody({ outline: diagram, allOutlines: [diagram] })),
+    );
+    expect(response.status).toBe(200);
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM.mock.calls[0][4]).not.toHaveProperty('simulationBudget');
+    expect(mocks.afterCallbacks).toHaveLength(0);
+  });
+
+  test('does not apply simulation allocation to quiz scenes', async () => {
+    const quizOutline: SceneOutline = {
+      ...simulationOutline,
+      id: 'outline-quiz',
+      type: 'quiz',
+      widgetType: undefined,
+      quizConfig: { questionCount: 1, difficulty: 'medium', questionTypes: ['single'] },
+    };
+    mocks.callLLM.mockResolvedValueOnce({
+      text: JSON.stringify([
+        {
+          type: 'single',
+          question: 'Which traversal visits the root first?',
+          options: ['Preorder', 'Inorder'],
+          correctAnswer: 'A',
+        },
+      ]),
+    });
+    const { POST } = await import('@/app/api/generate/scene-content/route');
+    const response = await POST(
+      mockRequest(sceneContentBody({ outline: quizOutline, allOutlines: [quizOutline] })),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM.mock.calls[0][4]).not.toHaveProperty('simulationBudget');
+    expect(mocks.afterCallbacks).toHaveLength(0);
   });
 
   test("does not expose another user's simulation job status", async () => {

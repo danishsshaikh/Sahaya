@@ -25,6 +25,7 @@ import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { llmApiError } from '@/lib/server/llm-error-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import type { LLMRoutingPolicy } from '@/lib/server/llm-router';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
 import { MAX_VISION_IMAGES } from '@/lib/constants/generation';
 import { sortDocumentImagesForVision } from '@/lib/document/bundle';
@@ -130,10 +131,22 @@ export async function POST(req: NextRequest) {
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, stage);
     const timingCollector = createGenerationTimingCollector();
-    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) =>
-      shouldCollectLLMRouteTiming()
-        ? callLLM(params, 'scene-content', undefined, thinkingConfig, timingCollector.routingPolicy)
-        : callLLM(params, 'scene-content', undefined, thinkingConfig);
+    let simulationBudget: LLMRoutingPolicy['simulationBudget'];
+    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
+      if (effectiveOutline.type === 'interactive' && effectiveOutline.widgetType === 'simulation') {
+        // Keep language repair within the same LLM budget, with 10 seconds
+        // left for validation/job completion before the route hosting limit.
+        simulationBudget ??= {
+          startedAtMs: Date.now(),
+          deadlineMs: startedAt + maxDuration * 1000 - 10_000,
+        };
+      }
+      const routingPolicy = {
+        ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
+        ...(simulationBudget ? { simulationBudget } : {}),
+      };
+      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
+    };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
 

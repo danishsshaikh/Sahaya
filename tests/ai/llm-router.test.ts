@@ -4,6 +4,13 @@ import { z } from 'zod';
 import { callLLM, streamLLM } from '@/lib/ai/llm';
 import { classifyRouterError, createLLMRouter } from '@/lib/server/llm-router';
 import { getModel } from '@/lib/ai/providers';
+import {
+  clearSceneContentJobsForTests,
+  createOrReuseSceneContentJob,
+  readSceneContentJob,
+  runSceneContentJob,
+} from '@/lib/server/scene-content-jobs';
+import type { SceneOutline } from '@/lib/types/generation';
 
 vi.mock('@/lib/ai/providers', async (original) => ({
   ...(await original<typeof import('@/lib/ai/providers')>()),
@@ -11,7 +18,9 @@ vi.mock('@/lib/ai/providers', async (original) => ({
 }));
 const capture = vi.hoisted(() => ({ usage: vi.fn(), log: vi.fn() }));
 vi.mock('@/lib/server/usage-storage', () => ({ recordUsage: capture.usage }));
-vi.mock('@/lib/logger', () => ({ createLogger: () => ({ info: capture.log, warn: capture.log }) }));
+vi.mock('@/lib/logger', () => ({
+  createLogger: () => ({ info: capture.log, warn: capture.log, error: capture.log }),
+}));
 
 type Model = Extract<LanguageModel, { specificationVersion: 'v3' }>;
 type Generation = Awaited<ReturnType<Model['doGenerate']>>;
@@ -115,6 +124,159 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('simulation fallback allocation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubEnv('LLM_ROUTER_SECONDARY_MODEL', 'nvidia:super');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_TIMEOUT_MS', '90000');
+    vi.stubEnv('LLM_ROUTER_SECONDARY_TIMEOUT_MS', '60000');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_TIMEOUT_MS', '120000');
+    vi.stubEnv('LLM_ROUTER_TOTAL_TIMEOUT_MS', '270000');
+    vi.stubEnv('LLM_ROUTER_CIRCUIT_FAILURE_THRESHOLD', '1');
+    vi.stubEnv('LLM_ROUTER_CIRCUIT_COOLDOWN_MS', '30000');
+    primary.doGenerate.mockImplementation(() => new Promise(() => {}));
+    secondary.doGenerate.mockImplementation(() => new Promise(() => {}));
+    fallback.doGenerate.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(result('simulation HTML')), 150000)),
+    );
+  });
+
+  const simulationPolicy = () => ({
+    simulationBudget: { startedAtMs: Date.now(), deadlineMs: Date.now() + 290000 },
+  });
+
+  it('reproduces the generic 270s failure, but completes heavy fallback within that same total', async () => {
+    const ordinary = createLLMRouter('scene-content')!.model.doGenerate(options);
+    const failed = expect(ordinary).rejects.toThrow('LLM provider failed (timeout)');
+    await vi.advanceTimersByTimeAsync(270000);
+    await failed;
+    expect(logs().map((event) => event.timeoutBudgetMs)).toEqual([90000, 60000, 120000]);
+
+    delete (globalThis as { __sahayaLlmCircuits?: unknown }).__sahayaLlmCircuits;
+    capture.log.mockClear();
+    const routed = callLLM(
+      { model: original, prompt: 'generate a complete simulation', maxRetries: 0 },
+      'scene-content',
+      undefined,
+      undefined,
+      simulationPolicy(),
+    );
+    const completed = routed.then(
+      (value) => ({ text: value.text }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(270000);
+    expect(await completed).toEqual({ text: 'simulation HTML' });
+    expect(logs().map((event) => [event.selectedRole, event.timeoutBudgetMs])).toEqual([
+      ['primary', 45000],
+      ['secondary', 45000],
+      ['fallback', 180000],
+    ]);
+    expect(logs().at(-1)).toMatchObject({ status: 'success', circuitState: 'OPEN' });
+  });
+
+  it('still fails by the total deadline when every transport ignores cancellation', async () => {
+    fallback.doGenerate.mockImplementation(() => new Promise(() => {}));
+    const router = createLLMRouter('scene-content', simulationPolicy())!;
+    const pending = router.model.doGenerate(options);
+    const failed = expect(pending).rejects.toThrow('LLM provider failed (timeout)');
+    await vi.advanceTimersByTimeAsync(270000);
+    await failed;
+    expect(primary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(secondary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(fallback.doGenerate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not reset the scene budget for a language repair call', async () => {
+    const policy = simulationPolicy();
+    primary.doGenerate.mockResolvedValueOnce(result('needs language repair'));
+    await createLLMRouter('scene-content', policy)!.model.doGenerate(options);
+    await vi.advanceTimersByTimeAsync(240000);
+    const repair = createLLMRouter('scene-content', policy)!;
+    expect(repair.totalTimeoutMs).toBe(30000);
+    const failed = expect(repair.model.doGenerate(options)).rejects.toThrow('timeout');
+    await vi.advanceTimersByTimeAsync(30000);
+    await failed;
+    expect(() => createLLMRouter('scene-content', policy)).toThrow('timeout');
+  });
+
+  it('skips open upstream circuits, gives fallback the remaining total, and later recovers', async () => {
+    primary.doGenerate.mockRejectedValueOnce(httpError(503));
+    secondary.doGenerate.mockRejectedValueOnce(httpError(503));
+    fallback.doGenerate.mockResolvedValueOnce(result('first'));
+    await createLLMRouter('scene-content', simulationPolicy())!.model.doGenerate(options);
+    const pending = createLLMRouter('scene-content', simulationPolicy())!.model.doGenerate(options);
+    await vi.advanceTimersByTimeAsync(150000);
+    await pending;
+    expect(primary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(secondary.doGenerate).toHaveBeenCalledTimes(1);
+    expect(logs().at(-1)).toMatchObject({ selectedRole: 'fallback', timeoutBudgetMs: 270000 });
+    primary.doGenerate.mockResolvedValueOnce(result('recovered'));
+    await createLLMRouter('scene-content', simulationPolicy())!.model.doGenerate(options);
+    expect(logs().at(-1)).toMatchObject({ selectedRole: 'primary', circuitState: 'CLOSED' });
+  });
+
+  it('respects the hosting deadline and caller cancellation without invoking fallback', async () => {
+    const policy = simulationPolicy();
+    policy.simulationBudget.deadlineMs = Date.now() + 90000;
+    const controller = new AbortController();
+    const router = createLLMRouter('scene-content', policy, controller.signal)!;
+    expect(router.totalTimeoutMs).toBe(90000);
+    const pending = router.model.doGenerate({ ...options, abortSignal: controller.signal });
+    const aborted = expect(pending).rejects.toThrow('cancelled');
+    controller.abort(new Error('cancelled'));
+    await aborted;
+    expect(secondary.doGenerate).not.toHaveBeenCalled();
+    expect(fallback.doGenerate).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds a failed simulation job without corrupting previously completed scenes', async () => {
+    clearSceneContentJobsForTests();
+    const outline: SceneOutline = {
+      id: 'simulation-fixture',
+      type: 'interactive',
+      title: 'Simulation',
+      description: 'Test workload',
+      keyPoints: [],
+      order: 1,
+      widgetType: 'simulation',
+    };
+    const job = (key: string) =>
+      createOrReuseSceneContentJob({
+        ownerUserId: 'test-owner',
+        dedupeKey: key,
+        stageId: 'test-stage',
+        outlineTitle: key,
+      }).job;
+    const earlier = job('earlier');
+    await runSceneContentJob(earlier.id, async () => ({
+      content: 'already complete',
+      effectiveOutline: outline,
+    }));
+    fallback.doGenerate.mockImplementation(() => new Promise(() => {}));
+    const later = job('heavy');
+    const router = createLLMRouter('scene-content', simulationPolicy())!;
+    const run = runSceneContentJob(later.id, async () => ({
+      content: await router.model.doGenerate(options),
+      effectiveOutline: outline,
+    }));
+    expect(readSceneContentJob(later.id, 'test-owner')?.status).toBe('generating');
+    await vi.advanceTimersByTimeAsync(270000);
+    await run;
+    expect(readSceneContentJob(later.id, 'test-owner')).toMatchObject({
+      status: 'failed',
+      error: 'LLM provider failed (timeout).',
+    });
+    expect(readSceneContentJob(earlier.id, 'test-owner')).toMatchObject({
+      status: 'completed',
+      result: { content: 'already complete' },
+    });
+    clearSceneContentJobsForTests();
+  });
 });
 
 describe('central routed generation', () => {
