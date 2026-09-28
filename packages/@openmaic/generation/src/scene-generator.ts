@@ -1432,7 +1432,20 @@ export async function generateWidgetContent(
   log.info(`Generating ${widgetType} widget for: ${outline.title}`);
   const response = await aiCall(prompts.system, prompts.user);
   const htmlResult = extractHtml(response);
-  const html = htmlResult.html;
+  const html =
+    htmlResult.html ??
+    (widgetType === 'simulation'
+      ? await repairMalformedSimulationHtml({
+          response,
+          htmlResult,
+          outline,
+          widgetType,
+          aiCall,
+          languageDirective,
+          targetLanguage: options.targetLanguage,
+          logger: log,
+        })
+      : undefined);
 
   if (!html) {
     log.error(`Failed to extract HTML from ${widgetType} response for: ${outline.title}`, {
@@ -1550,6 +1563,77 @@ function extractWidgetConfigJson(html: string): string | undefined {
     }
   }
   return undefined;
+}
+
+async function repairMalformedSimulationHtml({
+  response,
+  htmlResult,
+  outline,
+  widgetType,
+  aiCall,
+  languageDirective,
+  targetLanguage,
+  logger,
+}: {
+  response: string;
+  htmlResult: HtmlExtractionResult;
+  outline: SceneOutline;
+  widgetType: WidgetType;
+  aiCall: AICallFn;
+  languageDirective?: string;
+  targetLanguage?: string;
+  logger?: GenerationLogger;
+}): Promise<string | null> {
+  const log = logger ?? noopGenerationLogger;
+  log.warn(`Simulation HTML repair attempted: ${outline.title}`, {
+    sceneType: outline.type,
+    widgetType,
+    failureCategory: htmlResult.diagnostics.failureCategory,
+    repairAttempted: true,
+  });
+
+  const repairResponse = await aiCall(
+    [
+      'You repair generated simulation HTML without changing behavior.',
+      'Return exactly one complete HTML document and nothing else.',
+      'Preserve CSS, JavaScript logic, IDs, element relationships, widget config, and educational meaning.',
+      'Use English for all user-facing natural-language UI strings.',
+      'Do not add explanations or markdown fences.',
+    ].join('\n'),
+    [
+      `Simulation title: ${outline.title}`,
+      `Requested output language: ${describeRequestedSimulationLanguage(languageDirective, targetLanguage)}`,
+      languageDirective ? `Language directive: ${languageDirective}` : '',
+      `Extraction failure: ${htmlResult.diagnostics.failureCategory ?? 'UNKNOWN_HTML_FAILURE'}`,
+      '',
+      'Repair the malformed simulation below into one complete HTML document.',
+      '',
+      response,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+  const repairedHtmlResult = extractHtml(repairResponse);
+  if (!repairedHtmlResult.html) {
+    log.error(`Simulation HTML repair produced invalid HTML: ${outline.title}`, {
+      sceneType: outline.type,
+      widgetType,
+      failureCategory: repairedHtmlResult.diagnostics.failureCategory,
+      repairSucceeded: false,
+      responsePreview: repairResponse.slice(0, 120),
+    });
+    return null;
+  }
+
+  log.info(`Simulation HTML repair passed: ${outline.title}`, {
+    sceneType: outline.type,
+    widgetType,
+    originalFailureCategory: htmlResult.diagnostics.failureCategory,
+    repairSucceeded: true,
+  });
+
+  return repairedHtmlResult.html;
 }
 
 export function validateSimulationOutputLanguage(

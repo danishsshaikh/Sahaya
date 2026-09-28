@@ -499,7 +499,7 @@ export function TeachingVoiceCard({
             ))}
           </select>
           <p className="text-xs leading-snug text-muted-foreground">
-            The reference recording fixes this voice's language. Record another voice to change it.
+            The reference recording fixes this voice&apos;s language. Record another voice to change it.
           </p>
         </div>
 

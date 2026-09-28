@@ -34,6 +34,8 @@ export const VOICE_AUDIO_PROCESSING_CONFIG = {
   outputLoudnessTarget: -18,
   outputPeakCeiling: -2,
   outputLimiterLevel: 0.95,
+  generatedSilenceThresholdDb: -60,
+  generatedTrailingSilenceSeconds: 0.18,
   // Conservative denoising only. Stronger cleanup can damage speaker identity
   // and does not guarantee accent or speaker-similarity improvements.
   referenceDenoiseNoiseFloorDb: -28,
@@ -50,10 +52,13 @@ const REFERENCE_PREPROCESSING_FILTER = [
 ].join(',');
 
 const GENERATED_AUDIO_MASTERING_FILTER = [
-  `silenceremove=start_periods=1:start_duration=0.2:start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.silenceThresholdDb}dB`,
-  'areverse',
-  `silenceremove=start_periods=1:start_duration=0.2:start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.silenceThresholdDb}dB`,
-  'areverse',
+  [
+    'silenceremove=start_periods=1:start_duration=0.2',
+    `start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    'stop_periods=-1:stop_duration=0.2',
+    `stop_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    `stop_silence=${VOICE_AUDIO_PROCESSING_CONFIG.generatedTrailingSilenceSeconds}`,
+  ].join(':'),
   `loudnorm=I=${VOICE_AUDIO_PROCESSING_CONFIG.outputLoudnessTarget}:TP=${VOICE_AUDIO_PROCESSING_CONFIG.outputPeakCeiling}:LRA=11`,
   `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
 ].join(',');

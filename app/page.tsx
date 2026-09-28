@@ -101,6 +101,7 @@ import {
   readLastWorkspaceSessionId,
   workspaceResumeHref,
 } from '@/lib/workbench/workspace-session-memory';
+import { resolveGenerationTeachingVoiceProfileId } from '@/lib/voice-cloning/selection-client';
 
 const log = createLogger('Home');
 
@@ -614,6 +615,12 @@ function HomePage() {
     // Flip the generating UI state before material bytes are copied locally.
     setPreparingGenerate(true);
     try {
+      const teacherVoiceProfileId = voiceCloningEnabled
+        ? await resolveGenerationTeachingVoiceProfileId(form.teacherVoiceProfileId)
+        : undefined;
+      if (teacherVoiceProfileId && teacherVoiceProfileId !== form.teacherVoiceProfileId) {
+        setForm((prev) => ({ ...prev, teacherVoiceProfileId }));
+      }
       const userProfile = useUserProfileStore.getState();
       const requirements: UserRequirements = {
         requirement: form.requirement,
@@ -681,7 +688,7 @@ function HomePage() {
         pdfProviderConfig,
         sceneOutlines: null,
         currentStep: 'generating' as const,
-        teacherVoiceProfileId: form.teacherVoiceProfileId,
+        teacherVoiceProfileId,
       };
       sessionStorage.setItem('generationSession', JSON.stringify(sessionState));
 
