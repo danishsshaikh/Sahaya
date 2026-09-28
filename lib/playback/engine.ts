@@ -52,6 +52,7 @@ import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PlaybackEngine');
+export const AUTO_NARRATION_GAP_MS = 1000;
 
 /**
  * If more than 30% of characters are CJK, treat the text as Chinese.
@@ -85,6 +86,7 @@ export class PlaybackEngine {
   // Internal state
   private currentTrigger: TriggerEvent | null = null;
   private triggerDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoNarrationGapTimer: ReturnType<typeof setTimeout> | null = null;
   // Reading-time timer for speech actions without pre-generated audio (TTS disabled)
   private speechTimer: ReturnType<typeof setTimeout> | null = null;
   private speechTimerStart: number = 0; // Date.now() when timer was scheduled
@@ -228,6 +230,10 @@ export class PlaybackEngine {
         clearTimeout(this.triggerDelayTimer);
         this.triggerDelayTimer = null;
       }
+      if (this.autoNarrationGapTimer) {
+        clearTimeout(this.autoNarrationGapTimer);
+        this.autoNarrationGapTimer = null;
+      }
       if (this.speechTimer) {
         // Save remaining time so resume() can reschedule
         this.speechTimerRemaining = Math.max(
@@ -289,11 +295,7 @@ export class PlaybackEngine {
         // Audio is paused — resume it; TTS onend will call processNext
         const generation = this.playbackGeneration;
         this.audioPlayer.onEnded(() => {
-          if (!this.isCurrentGeneration(generation)) return;
-          this.callbacks.onSpeechEnd?.();
-          if (this.mode === 'playing') {
-            this.processNext(generation);
-          }
+          this.completeGeneratedSpeech(generation);
         });
         this.audioPlayer.resume();
       } else if (this.speechTimerRemaining > 0) {
@@ -326,6 +328,10 @@ export class PlaybackEngine {
     if (this.triggerDelayTimer) {
       clearTimeout(this.triggerDelayTimer);
       this.triggerDelayTimer = null;
+    }
+    if (this.autoNarrationGapTimer) {
+      clearTimeout(this.autoNarrationGapTimer);
+      this.autoNarrationGapTimer = null;
     }
     if (this.speechTimer) {
       clearTimeout(this.speechTimer);
@@ -506,6 +512,10 @@ export class PlaybackEngine {
     this.actionEngine.clearEffects();
     useCanvasStore.getState().pauseVideo();
 
+    if (this.autoNarrationGapTimer) {
+      clearTimeout(this.autoNarrationGapTimer);
+      this.autoNarrationGapTimer = null;
+    }
     if (this.triggerDelayTimer) {
       clearTimeout(this.triggerDelayTimer);
       this.triggerDelayTimer = null;
@@ -531,6 +541,19 @@ export class PlaybackEngine {
     }
     this.savedSceneIndex = null;
     this.savedActionIndex = null;
+  }
+
+  private completeGeneratedSpeech(generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.callbacks.onSpeechEnd?.();
+    if (this.mode !== 'playing') return;
+    if (this.autoNarrationGapTimer) clearTimeout(this.autoNarrationGapTimer);
+    this.autoNarrationGapTimer = setTimeout(() => {
+      this.autoNarrationGapTimer = null;
+      if (this.mode === 'playing' && this.isCurrentGeneration(generation)) {
+        this.processNext(generation);
+      }
+    }, AUTO_NARRATION_GAP_MS);
   }
 
   /**
@@ -588,11 +611,7 @@ export class PlaybackEngine {
 
         // onEnded → processNext; if paused, resume() will call processNext
         this.audioPlayer.onEnded(() => {
-          if (!this.isCurrentGeneration(generation)) return;
-          this.callbacks.onSpeechEnd?.();
-          if (this.mode === 'playing') {
-            this.processNext(generation);
-          }
+          this.completeGeneratedSpeech(generation);
         });
 
         // Estimated reading time when no pre-generated audio (TTS disabled).

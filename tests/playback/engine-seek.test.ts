@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PlaybackEngine } from '@/lib/playback/engine';
+import { AUTO_NARRATION_GAP_MS, PlaybackEngine } from '@/lib/playback/engine';
 import {
   canJumpWithinReconstructablePrefix,
   getActionLineProgress,
@@ -167,7 +167,8 @@ describe('PlaybackEngine action-boundary seek compatibility', () => {
 
 describe('generated narration completion ownership', () => {
   const text =
-    'Tools are executable actions the model can invoke, including sending emails, running code, calling external APIs, updating databases, and triggering complete automated workflows.';
+    'Today we are going to understand how vectors are represented using magnitude and direction in two-dimensional space.';
+  const nextText = 'Next, we will break each vector into horizontal and vertical components.';
 
   class AudioElement extends EventTarget {
     static instances: AudioElement[] = [];
@@ -215,12 +216,7 @@ describe('generated narration completion ownership', () => {
     const onSpeechStart = vi.fn();
     const onComplete = vi.fn();
     const engine = new PlaybackEngine(
-      [
-        scene([
-          speech('one', text, 'ast_one'),
-          speech('two', 'The next complete sentence.', 'ast_two'),
-        ]),
-      ],
+      [scene([speech('one', text, 'ast_one'), speech('two', nextText, 'ast_two')])],
       fakeActionEngine(),
       player,
       { onSpeechStart, onComplete, getPlaybackSpeed: () => speed },
@@ -240,28 +236,33 @@ describe('generated narration completion ownership', () => {
       expect(AudioElement.instances[0].playbackRate).toBe(speed);
       expect(AudioElement.instances[0].pause).not.toHaveBeenCalled();
       AudioElement.instances[0].end();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS - 1);
+      expect(onSpeechStart).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
       expect(onSpeechStart).toHaveBeenCalledTimes(2);
       expect(onComplete).not.toHaveBeenCalled();
       AudioElement.instances[1].end();
+      await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
       expect(onComplete).toHaveBeenCalledTimes(1);
       expect(player.hasActiveAudio()).toBe(false);
     },
   );
 
   it('ignores an old clip completion while the next sentence is still playing', async () => {
-    const { engine, onComplete } = setup();
+    const { engine, onSpeechStart, onComplete } = setup();
     engine.start();
     await vi.advanceTimersByTimeAsync(0);
     const oldAudio = AudioElement.instances[0];
     await engine.jumpToAction(1, { autoplay: true });
     await vi.advanceTimersByTimeAsync(0);
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
     const currentAudio = AudioElement.instances[1];
     currentAudio.currentTime = 15; // The final words have not played yet.
     oldAudio.end(); // A queued completion from the superseded element.
     expect(onComplete).not.toHaveBeenCalled();
     expect(currentAudio.pause).not.toHaveBeenCalled();
     currentAudio.end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
@@ -274,7 +275,9 @@ describe('generated narration completion ownership', () => {
     await vi.advanceTimersByTimeAsync(0);
     first.dispatchEvent(new Event('ended'));
     expect(onComplete).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
@@ -295,6 +298,7 @@ describe('generated narration completion ownership', () => {
     resolveBytes(new Blob(['second complete WAV']));
     await vi.advanceTimersByTimeAsync(0);
     AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
@@ -310,8 +314,42 @@ describe('generated narration completion ownership', () => {
     expect(first.currentTime).toBe(12);
     expect(AudioElement.instances).toHaveLength(1);
     first.end();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a pending narration gap when the user jumps manually', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    AudioElement.instances[0].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS / 2);
+
+    await engine.jumpToAction(1, { autoplay: true });
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    expect(onComplete).not.toHaveBeenCalled();
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('pause during generated audio does not duplicate completion or leave a delayed advance', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    engine.pause();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS * 2);
+    expect(onSpeechStart).toHaveBeenCalledTimes(1);
+    engine.resume();
+    AudioElement.instances[0].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
