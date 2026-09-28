@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
 
 import type { AssetCollectorSchedule } from '@/lib/persistence/asset-collector-schedule';
 
@@ -298,5 +299,13 @@ describe('instrumentation registration', () => {
     await register();
 
     expect(startAssetCollectorSchedule).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a literal process.once call to the Edge analyzer', () => {
+    const source = readFileSync('instrumentation.ts', 'utf8');
+
+    expect(source).not.toContain('process.once(');
+    expect(source).toContain("processOnce.call(process, 'SIGTERM'");
+    expect(source).toContain("processOnce.call(process, 'SIGINT'");
   });
 });
