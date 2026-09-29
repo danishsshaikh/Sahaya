@@ -30,7 +30,11 @@ import { Stage } from '@/components/stage';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
-import { claimStageSceneLoadToken, isCurrentStageSceneLoadToken } from '@/lib/store/stage';
+import {
+  claimStageSceneLoadToken,
+  hasSceneForOutline,
+  isCurrentStageSceneLoadToken,
+} from '@/lib/store/stage';
 import { loadImageMapping } from '@/lib/utils/image-storage';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
@@ -317,8 +321,8 @@ export function ClassroomSurface({
     // editing: deleting a slide leaves its outline orphaned, but that must not
     // be treated as an interrupted generation and regenerated. Only resume
     // when generation has not completed.
-    const completedOrders = new Set(scenes.map((s) => s.order));
-    const hasPending = !generationComplete && outlines.some((o) => !completedOrders.has(o.order));
+    const hasPending =
+      !generationComplete && outlines.some((outline) => !hasSceneForOutline(scenes, outline));
 
     if (hasPending && stage) {
       generationStartedRef.current = true;
@@ -377,8 +381,9 @@ export function ClassroomSurface({
       // Resume media only for outlines that still have a scene. On a finished
       // deck the user may have deleted a slide, leaving an orphaned outline;
       // generating its media would waste API calls on a slide that is gone.
-      const materializedOrders = new Set(scenes.map((s) => s.order));
-      const materializedOutlines = outlines.filter((o) => materializedOrders.has(o.order));
+      const materializedOutlines = outlines.filter((outline) =>
+        hasSceneForOutline(scenes, outline),
+      );
       generateMediaForOutlines(materializedOutlines, stage.id).catch((err) => {
         log.warn('[Classroom] Media generation resume error:', err);
       });

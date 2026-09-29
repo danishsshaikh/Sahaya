@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useRef } from 'react';
-import { useStageStore } from '@/lib/store/stage';
+import { hasSceneForOutline, pendingOutlinesForGeneration, useStageStore } from '@/lib/store/stage';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -894,12 +894,17 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       store.getState().setGenerationStatus('generating');
 
       // Determine pending outlines
-      const completedOrders = new Set(scenes.map((s) => s.order));
-      const pending = outlines
-        .filter((o) => !completedOrders.has(o.order))
-        .sort((a, b) => a.order - b.order);
+      const pending = pendingOutlinesForGeneration({
+        outlines,
+        scenes,
+        generatingOutlines: state.generatingOutlines,
+      });
 
       if (pending.length === 0) {
+        if (state.generatingOutlines.length > 0) {
+          generatingRef.current = false;
+          return;
+        }
         store.getState().setGenerationStatus('completed');
         store.getState().setGeneratingOutlines([]);
         store.getState().setGenerationComplete(true);
@@ -908,7 +913,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         return;
       }
 
-      store.getState().setGeneratingOutlines(pending);
+      store.getState().setGeneratingOutlines([...state.generatingOutlines, ...pending]);
 
       // Launch media generation in parallel — does not block content/action generation.
       // Under server-backed persistence, abort whatever the ref held first:
@@ -1030,6 +1035,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               pausedByFailureOrAbort = true;
               break;
             }
+            if (hasSceneForOutline(store.getState().scenes, outline)) {
+              removeGeneratingOutline(outline.id);
+              continue;
+            }
             store.getState().addFailedOutline(outline);
             options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
             if (contentPromises) {
@@ -1092,6 +1101,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                   pausedByFailureOrAbort = true;
                   break;
                 }
+                if (hasSceneForOutline(store.getState().scenes, outline)) {
+                  removeGeneratingOutline(outline.id);
+                  continue;
+                }
                 store.getState().addFailedOutline(outline);
                 options.onSceneFailed?.(outline, ttsResult.error || 'TTS generation failed');
                 store.getState().setGenerationStatus('paused');
@@ -1115,6 +1128,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
               pausedByFailureOrAbort = true;
               break;
+            }
+            if (hasSceneForOutline(store.getState().scenes, outline)) {
+              removeGeneratingOutline(outline.id);
+              continue;
             }
             store.getState().addFailedOutline(outline);
             options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
@@ -1171,6 +1188,12 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       const outline = state.failedOutlines.find((o) => o.id === outlineId);
       const params = lastParamsRef.current;
       if (!outline || !state.stage || !params) return;
+      if (state.generatingOutlines.some((candidate) => candidate.id === outlineId)) return;
+      if (hasSceneForOutline(state.scenes, outline)) {
+        store.getState().retryFailedOutline(outlineId);
+        store.getState().markGenerationCompleteIfDone();
+        return;
+      }
       // A whole-outline retry runs content, actions and narration on the
       // operator's keys. The surfaces already withhold the affordance when
       // generation is not permitted; refusing here keeps the precondition and
@@ -1228,6 +1251,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         );
 
         if (!contentResult.success || !contentResult.content) {
+          if (hasSceneForOutline(store.getState().scenes, outline)) {
+            removeGeneratingOutline();
+            store.getState().markGenerationCompleteIfDone();
+            return;
+          }
           store.getState().addFailedOutline(outline);
           return;
         }
@@ -1256,6 +1284,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         );
 
         if (!actionsResult.success || !actionsResult.scene) {
+          if (hasSceneForOutline(store.getState().scenes, outline)) {
+            removeGeneratingOutline();
+            store.getState().markGenerationCompleteIfDone();
+            return;
+          }
           store.getState().addFailedOutline(outline);
           return;
         }
@@ -1278,6 +1311,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             signal,
           );
           if (!ttsResult.success) {
+            if (hasSceneForOutline(store.getState().scenes, outline)) {
+              removeGeneratingOutline();
+              store.getState().markGenerationCompleteIfDone();
+              return;
+            }
             store.getState().addFailedOutline(outline);
             return;
           }
@@ -1303,6 +1341,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         }
       } catch (err) {
         if (!isAbortError(err)) {
+          if (hasSceneForOutline(store.getState().scenes, outline)) {
+            removeGeneratingOutline();
+            store.getState().markGenerationCompleteIfDone();
+            return;
+          }
           store.getState().addFailedOutline(outline);
         }
       }

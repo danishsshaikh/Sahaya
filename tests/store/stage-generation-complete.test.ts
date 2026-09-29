@@ -5,12 +5,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // observe persistence without a real IndexedDB. Spies go through vi.hoisted
 // so they exist before the hoisted vi.mock factories run.
 const {
+  emptyStageAssetRefs,
   hydratePBLScenesFromRuntimeMock,
   loadStageDataMock,
   saveStageDataMock,
   stageOutlinesGet,
   stageOutlinesPut,
 } = vi.hoisted(() => ({
+  emptyStageAssetRefs: () => ({
+    imageSrc: new Set<string>(),
+    slideAudioSrc: new Set<string>(),
+    videoSrc: new Set<string>(),
+    videoMediaRef: new Set<string>(),
+    poster: new Set<string>(),
+    backgroundImage: new Set<string>(),
+    stageWhiteboard: new Set<string>(),
+    sceneWhiteboard: new Set<string>(),
+    speechAudioId: new Set<string>(),
+    videoManifestKey: new Set<string>(),
+    mediaRow: new Set<string>(),
+    audioRow: new Set<string>(),
+    mediaOrphans: new Set<string>(),
+    audioOrphans: new Set<string>(),
+    referenced: new Set<string>(),
+    document: new Set<string>(),
+    all: new Set<string>(),
+    poolOwned: new Set<string>(),
+    referenceCounts: new Map<string, number>(),
+  }),
   hydratePBLScenesFromRuntimeMock: vi.fn(),
   loadStageDataMock: vi.fn(),
   saveStageDataMock: vi.fn().mockResolvedValue(undefined),
@@ -50,9 +72,13 @@ vi.mock('@/lib/utils/database', () => ({
     stageFolders: { delete: vi.fn().mockResolvedValue(undefined) },
   },
 }));
+vi.mock('@/lib/media/collect-stage-asset-refs', () => ({
+  collectStageAssetRefs: emptyStageAssetRefs,
+}));
 
 import {
   claimStageSceneLoadToken,
+  pendingOutlinesForGeneration,
   useStageStore,
   type StageSceneLoadToken,
 } from '@/lib/store/stage';
@@ -65,9 +91,10 @@ function makeStage(id = 'stage-1'): Stage {
   return { id, name: 'Test stage', createdAt: 1, updatedAt: 1 };
 }
 
-function makeSlideScene(id: string, order: number, stageId = 'stage-1'): Scene {
+function makeSlideScene(id: string, order: number, stageId = 'stage-1', outlineId?: string): Scene {
   return {
     id,
+    outlineId,
     stageId,
     type: 'slide',
     title: id,
@@ -815,5 +842,99 @@ describe('generationComplete', () => {
     await vi.waitFor(() => expect(stageOutlinesPut).toHaveBeenCalled());
     const healed = stageOutlinesPut.mock.calls.at(-1)![0] as { generationComplete?: boolean };
     expect(healed.generationComplete).toBe(true);
+  });
+});
+
+describe('scene generation outline reconciliation', () => {
+  it('coalesces pending work when the same arbitrary outline id is already generating', () => {
+    const outlineA = { ...makeOutline(1), id: '7wT_jwFO' };
+    const outlineB = { ...makeOutline(2), id: 'outline-next' };
+
+    const pending = pendingOutlinesForGeneration({
+      outlines: [outlineA, outlineB],
+      scenes: [],
+      generatingOutlines: [outlineA],
+    });
+
+    expect(pending.map((outline) => outline.id)).toEqual(['outline-next']);
+  });
+
+  it('commits a generated scene under its originating arbitrary outline id', () => {
+    const outline = { ...makeOutline(3), id: '7wT_jwFO' };
+    useStageStore.setState({
+      stage: makeStage(),
+      outlines: [outline],
+      generatingOutlines: [outline],
+      failedOutlines: [outline],
+    });
+
+    useStageStore.getState().addScene(makeSlideScene('scene-random', 3, 'stage-1', outline.id));
+
+    expect(useStageStore.getState().scenes.map((scene) => scene.outlineId)).toEqual(['7wT_jwFO']);
+    expect(useStageStore.getState().generatingOutlines).toEqual([]);
+    expect(useStageStore.getState().failedOutlines).toEqual([]);
+  });
+
+  it('upserts duplicate completions for the same outline instead of appending another scene', () => {
+    const outline = { ...makeOutline(2), id: '7wT_jwFO' };
+    useStageStore.setState({
+      stage: makeStage(),
+      outlines: [outline],
+      scenes: [makeSlideScene('first-scene-id', 2, 'stage-1', outline.id)],
+    });
+
+    useStageStore.getState().addScene(makeSlideScene('retry-scene-id', 2, 'stage-1', outline.id));
+
+    expect(useStageStore.getState().scenes.map((scene) => scene.id)).toEqual(['retry-scene-id']);
+  });
+
+  it('keeps scene order stable when later outlines complete first', () => {
+    const outline3 = makeOutline(3);
+    const outline4 = makeOutline(4);
+    useStageStore.setState({
+      stage: makeStage(),
+      outlines: [makeOutline(1), makeOutline(2), outline3, outline4],
+      scenes: [
+        makeSlideScene('scene-1', 1, 'stage-1', 'outline-1'),
+        makeSlideScene('scene-2', 2, 'stage-1', 'outline-2'),
+      ],
+      generatingOutlines: [outline3, outline4],
+    });
+
+    useStageStore.getState().addScene(makeSlideScene('scene-4', 4, 'stage-1', outline4.id));
+    useStageStore.getState().addScene(makeSlideScene('scene-3', 3, 'stage-1', outline3.id));
+
+    expect(useStageStore.getState().scenes.map((scene) => scene.order)).toEqual([1, 2, 3, 4]);
+    expect(useStageStore.getState().generatingOutlines).toEqual([]);
+  });
+
+  it('ignores a stale failure after the matching scene has already succeeded', () => {
+    const outline = makeOutline(1);
+    useStageStore.setState({
+      stage: makeStage(),
+      outlines: [outline],
+      scenes: [makeSlideScene('scene-1', 1, 'stage-1', outline.id)],
+    });
+
+    useStageStore.getState().addFailedOutline(outline);
+
+    expect(useStageStore.getState().failedOutlines).toEqual([]);
+  });
+
+  it('allows a failed outline to retry and replace the failed placeholder with a scene', () => {
+    const outline = makeOutline(1);
+    useStageStore.setState({
+      stage: makeStage(),
+      outlines: [outline],
+      generatingOutlines: [outline],
+    });
+
+    useStageStore.getState().addFailedOutline(outline);
+    useStageStore.getState().retryFailedOutline(outline.id);
+    useStageStore.getState().addScene(makeSlideScene('retried-scene', 1, 'stage-1', outline.id));
+
+    expect(useStageStore.getState().failedOutlines).toEqual([]);
+    expect(useStageStore.getState().generatingOutlines).toEqual([]);
+    expect(useStageStore.getState().scenes.map((scene) => scene.id)).toEqual(['retried-scene']);
   });
 });
