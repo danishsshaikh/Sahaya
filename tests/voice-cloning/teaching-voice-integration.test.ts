@@ -13,6 +13,7 @@ import {
 import {
   resolveVoiceProfileProvider,
   toPublicVoiceProfile,
+  TeachingVoiceProviderOperationError,
   VoiceProviderProfileNotFoundError,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
@@ -142,6 +143,35 @@ describe('isolated Teaching Voice adapters', () => {
       referenceText: ' Exact transcript. ',
       language: 'en',
     });
+  });
+
+  it('classifies rejected Qwen profile registration with safe provider metadata', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        Response.json({ detail: 'reference must be a readable, nonempty WAV' }, { status: 400 }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new Qwen3VoiceCloningProvider();
+
+    await expect(
+      provider.createProfile({
+        profileId: 'vcp_example',
+        referenceAudioKey: '/shared/reference.wav',
+        referenceText: 'Exact transcript.',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({
+      name: 'TeachingVoiceProviderOperationError',
+      metadata: {
+        provider: 'qwen3',
+        endpoint: '/profiles',
+        operation: 'provider_registration',
+        providerStatus: 400,
+        providerContentType: 'application/json',
+        providerDetail: 'reference must be a readable, nonempty WAV',
+      },
+    } satisfies Partial<TeachingVoiceProviderOperationError>);
   });
 
   it('never folds reference-tail words into the Qwen target narration payload', async () => {

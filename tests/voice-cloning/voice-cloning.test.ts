@@ -22,6 +22,7 @@ import {
   toPublicVoiceProfile,
   validateVoiceGenerationSettings,
   voiceGenerationPresetForSettings,
+  TeachingVoiceProviderOperationError,
   VoiceProviderProfileNotFoundError,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
@@ -832,8 +833,14 @@ describe('voice profile model preview API', () => {
     expect(completed.profile.draftPreview.preview.base64).toBe(
       Buffer.from([1, 2, 9]).toString('base64'),
     );
+    expect(writeReferenceAudio).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      new Uint8Array([9, 9]),
+    );
     expect(createProfile).toHaveBeenCalledWith(
       expect.objectContaining({
+        profileId: 'vcp_new',
         language: 'en',
         referenceAudioKey: '/private/reference.wav',
         referenceText: VOICE_ENROLLMENT_PARAGRAPH,
@@ -845,6 +852,20 @@ describe('voice profile model preview API', () => {
       }),
     );
     expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(new Uint8Array([1, 2]), 'wav');
+    expect(
+      writeVoiceProfile.mock.calls.filter(([profile]) => profile.status === 'preview-ready'),
+    ).toHaveLength(1);
+    expect(writeVoiceProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'vcp_new',
+        provider: 'qwen3',
+        languageId: 'en',
+        enrollmentAttemptId: 'attempt-voice-test',
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+        providerReferenceId: 'vcp_new',
+        status: 'preview-ready',
+      }),
+    );
   });
 
   it('rejects an enrollment transcript that differs from the displayed approved phrase', async () => {
@@ -1099,6 +1120,41 @@ describe('voice profile model preview API', () => {
     expect(completed).toMatchObject({ success: true, status: 'completed' });
   });
 
+  it('runs enrollment from materialized input after the initial request scope is gone', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/enrollment/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([4, 5, 6])], 'scoped.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/enrollment', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    formData.delete('recording');
+    formData.set('referenceText', 'mutated after response');
+
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile();
+    expect(completed).toMatchObject({ success: true, status: 'completed' });
+    expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bytes: new Uint8Array([4, 5, 6]),
+        mimeType: 'audio/webm',
+        fileName: 'scoped.webm',
+      }),
+    );
+    expect(createProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+      }),
+    );
+  });
+
   it('returns a completed profile when the client reconnects after completion', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
     const formData = enrollmentForm();
@@ -1146,11 +1202,104 @@ describe('voice profile model preview API', () => {
     expect(failed).toMatchObject({
       success: true,
       status: 'failed',
+      phase: 'provider_registration',
+      failedPhase: 'provider_registration',
       error: 'provider unreachable',
     });
     expect(writeVoiceProfile).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'vcp_new', status: 'failed' }),
+      expect.objectContaining({
+        id: 'vcp_new',
+        status: 'failed',
+        failurePhase: 'provider_registration',
+      }),
     );
+  });
+
+  it('classifies provider registration rejection before any preview call', async () => {
+    createProfile.mockRejectedValueOnce(
+      new TeachingVoiceProviderOperationError(
+        'Teaching Voice service rejected the request or failed to generate audio.',
+        502,
+        {
+          provider: 'qwen3',
+          endpoint: '/profiles',
+          operation: 'provider_registration',
+          providerStatus: 400,
+          providerContentType: 'application/json',
+          providerDetail: 'reference must be a readable, nonempty WAV',
+        },
+      ),
+    );
+    const { POST } = await import('@/app/api/voice-cloning/enrollment/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/enrollment', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+
+    const failed = await completedEnrollmentProfile();
+    expect(failed).toMatchObject({
+      success: true,
+      status: 'failed',
+      phase: 'provider_registration',
+      failedPhase: 'provider_registration',
+      error: 'Teaching Voice service rejected the request or failed to generate audio.',
+    });
+    expect(createProfile).toHaveBeenCalledTimes(1);
+    expect(generatePreview).not.toHaveBeenCalled();
+  });
+
+  it('classifies preview synthesis failure after successful provider registration', async () => {
+    generatePreview.mockRejectedValueOnce(
+      new TeachingVoiceProviderOperationError(
+        'Teaching Voice service rejected the request or failed to generate audio.',
+        502,
+        {
+          provider: 'qwen3',
+          endpoint: '/synthesize',
+          operation: 'preview_generation',
+          providerStatus: 500,
+          providerContentType: 'application/json',
+          providerDetail: 'voice synthesis or WAV serialization failed',
+        },
+      ),
+    );
+    const { POST } = await import('@/app/api/voice-cloning/enrollment/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/enrollment', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+
+    const failed = await completedEnrollmentProfile();
+    expect(failed).toMatchObject({
+      success: true,
+      status: 'failed',
+      phase: 'preview_generation',
+      failedPhase: 'preview_generation',
+      error: 'Teaching Voice service rejected the request or failed to generate audio.',
+    });
+    expect(createProfile).toHaveBeenCalledTimes(1);
+    expect(generatePreview).toHaveBeenCalledTimes(1);
+    expect(masterGeneratedVoiceAudio).not.toHaveBeenCalled();
   });
 
   it('recovers a profile created before the client receives the response', async () => {
