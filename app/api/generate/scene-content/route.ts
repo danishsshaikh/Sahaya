@@ -387,6 +387,20 @@ export async function POST(req: NextRequest) {
       log.info(
         `Generating content: "${effectiveOutline.title}" (${effectiveOutline.type}) [model=${modelString}]`,
       );
+      log.info('[SceneGenerationTrace]', {
+        event: isSimulationOutline(effectiveOutline)
+          ? 'simulation-generation-start'
+          : 'scene-content-start',
+        stageId,
+        requestId: timingCollector.requestId,
+        outlineId: effectiveOutline.id,
+        sceneIndex: effectiveOutline.order,
+        sceneType: effectiveOutline.type,
+        title: effectiveOutline.title,
+        model: modelString,
+        phase: 'content',
+        status: 'started',
+      });
 
       const content = await generateSceneContent(effectiveOutline, aiCall, {
         assignedImages,
@@ -431,6 +445,21 @@ export async function POST(req: NextRequest) {
         log.error(
           `Failed to generate content for: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,
         );
+        log.info('[SceneGenerationTrace]', {
+          event: isSimulationOutline(effectiveOutline)
+            ? 'simulation-generation-failed'
+            : 'scene-content-failed',
+          stageId,
+          requestId: timingCollector.requestId,
+          outlineId: effectiveOutline.id,
+          sceneIndex: effectiveOutline.order,
+          sceneType: effectiveOutline.type,
+          title: effectiveOutline.title,
+          model: modelString,
+          phase: 'content',
+          durationMs: Date.now() - phaseStartedAt,
+          status: 'failed',
+        });
         return { content: null, effectiveOutline };
       }
 
@@ -453,6 +482,21 @@ export async function POST(req: NextRequest) {
       log.info(
         `Content generated successfully: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,
       );
+      log.info('[SceneGenerationTrace]', {
+        event: isSimulationOutline(effectiveOutline)
+          ? 'simulation-generation-complete'
+          : 'scene-content-complete',
+        stageId,
+        requestId: timingCollector.requestId,
+        outlineId: effectiveOutline.id,
+        sceneIndex: effectiveOutline.order,
+        sceneType: effectiveOutline.type,
+        title: effectiveOutline.title,
+        model: modelString,
+        phase: 'content',
+        durationMs: Date.now() - phaseStartedAt,
+        status: 'completed',
+      });
 
       return { content, effectiveOutline };
     };

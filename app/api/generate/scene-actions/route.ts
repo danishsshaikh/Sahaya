@@ -172,6 +172,19 @@ export async function POST(req: NextRequest) {
     log.info(`Generating actions: "${outline.title}" (${outline.type}) [model=${modelString}]`);
     phaseStartedAt = Date.now();
     routeEventStart = collector.events.length;
+    log.info('[SceneGenerationTrace]', {
+      event: 'scene-actions-start',
+      stageId,
+      requestId: collector.requestId,
+      outlineId: outline.id,
+      sceneIndex: outline.order,
+      totalScenes: allOutlines.length,
+      sceneType: outline.type,
+      title: outline.title,
+      model: modelString,
+      phase: 'actions',
+      status: 'started',
+    });
 
     const generationContent = (
       'type' in content && content.type === 'pbl' ? normalizeLegacyPBLContent(content) : content
@@ -206,6 +219,21 @@ export async function POST(req: NextRequest) {
     );
 
     log.info(`Generated ${actions.length} actions for: "${outline.title}"`);
+    log.info('[SceneGenerationTrace]', {
+      event: 'scene-actions-complete',
+      stageId,
+      requestId: collector.requestId,
+      outlineId: outline.id,
+      sceneIndex: outline.order,
+      totalScenes: allOutlines.length,
+      sceneType: outline.type,
+      title: outline.title,
+      model: modelString,
+      phase: 'actions',
+      durationMs: Date.now() - phaseStartedAt,
+      status: 'completed',
+      actionCount: actions.length,
+    });
 
     // ── Build complete scene ──
     const scene = buildCompleteScene(outline, generationContent, actions, stageId);
@@ -247,6 +275,17 @@ export async function POST(req: NextRequest) {
       `Scene actions generation failed [scene="${outlineTitle ?? 'unknown'}", model=${resolvedModelString ?? 'unknown'}]:`,
       error,
     );
+    log.info('[SceneGenerationTrace]', {
+      event: 'scene-actions-failed',
+      stageId: stageIdForTiming,
+      requestId: timingCollector?.requestId,
+      outlineId: outlineIdForTiming,
+      sceneType: sceneTypeForTiming,
+      model: resolvedModelString,
+      phase: 'actions',
+      durationMs: Date.now() - phaseStartedAt,
+      status: 'failed',
+    });
     return llmApiError(error);
   }
 }

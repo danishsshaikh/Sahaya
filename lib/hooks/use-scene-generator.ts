@@ -52,6 +52,12 @@ const log = createLogger('SceneGenerator');
 const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
 
+type SceneGenerationPhase = 'content' | 'actions' | 'narration';
+
+function traceSceneGeneration(event: string, details: Record<string, unknown>) {
+  log.info('[SceneGenerationTrace]', { event, ...details });
+}
+
 type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed';
 
 interface SceneContentResult {
@@ -431,7 +437,7 @@ export async function generateAndStoreTTS(
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
   const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
-    ? resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage
+    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage)
     : undefined;
   // A generated roster's explicit voice binding is the course voice source of truth.
   // Global settings remain the fallback for classrooms without a binding.
@@ -839,7 +845,7 @@ export async function generateTTSForScene(
 export interface UseSceneGeneratorOptions {
   onSceneGenerated?: (scene: Scene, index: number) => void;
   onSceneFailed?: (outline: SceneOutline, error: string) => void;
-  onPhaseChange?: (phase: 'content' | 'actions', outline: SceneOutline) => void;
+  onPhaseChange?: (phase: SceneGenerationPhase, outline: SceneOutline) => void;
   onComplete?: () => void;
 }
 
@@ -886,6 +892,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       const state = store.getState();
       const { outlines, scenes, stage } = state;
       const startEpoch = state.generationEpoch;
+      const generationStartedAt = Date.now();
+      const generationRunId = `${stage?.id ?? 'unknown'}:${startEpoch}:${generationStartedAt}`;
       if (!stage || outlines.length === 0) {
         generatingRef.current = false;
         return;
@@ -903,12 +911,35 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         store.getState().setGenerationStatus('completed');
         store.getState().setGeneratingOutlines([]);
         store.getState().setGenerationComplete(true);
+        traceSceneGeneration('lesson-generation-complete', {
+          stageId: stage.id,
+          generationRunId,
+          totalScenes: outlines.length,
+          status: 'completed',
+        });
         options.onComplete?.();
         generatingRef.current = false;
         return;
       }
 
       store.getState().setGeneratingOutlines(pending);
+      traceSceneGeneration('lesson-generation-start', {
+        stageId: stage.id,
+        generationRunId,
+        pendingCount: pending.length,
+        totalScenes: outlines.length,
+      });
+      for (const outline of pending) {
+        traceSceneGeneration('scene-queued', {
+          stageId: stage.id,
+          generationRunId,
+          outlineId: outline.id,
+          sceneIndex: outline.order,
+          totalScenes: outlines.length,
+          sceneType: outline.type,
+          title: outline.title,
+        });
+      }
 
       // Launch media generation in parallel — does not block content/action generation.
       // Under server-backed persistence, abort whatever the ref held first:
@@ -1010,11 +1041,30 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           }
 
           store.getState().setCurrentGeneratingOrder(outline.order);
+          const sceneStartedAt = Date.now();
+          traceSceneGeneration('scene-generation-start', {
+            stageId: stage.id,
+            generationRunId,
+            outlineId: outline.id,
+            sceneIndex: outline.order,
+            totalScenes: outlines.length,
+            sceneType: outline.type,
+            title: outline.title,
+          });
 
           // Step 1: content — await this outline's pre-warmed fetch (parallel),
           // which usually resolved while the previous scene's actions/TTS ran; or
           // fetch it now (serial).
           let contentResult: SceneContentResult;
+          const contentStartedAt = Date.now();
+          traceSceneGeneration('scene-content-start', {
+            stageId: stage.id,
+            generationRunId,
+            outlineId: outline.id,
+            sceneIndex: outline.order,
+            totalScenes: outlines.length,
+            sceneType: outline.type,
+          });
           if (contentPromises) {
             contentResult = (await contentPromises.get(outline.id)) ?? {
               success: false,
@@ -1026,6 +1076,16 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           }
 
           if (!contentResult.success || !contentResult.content) {
+            traceSceneGeneration('scene-content-failed', {
+              stageId: stage.id,
+              generationRunId,
+              outlineId: outline.id,
+              sceneIndex: outline.order,
+              durationMs: Date.now() - contentStartedAt,
+              status: 'failed',
+              errorCode: contentResult.errorCode,
+              statusCode: contentResult.statusCode,
+            });
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
               pausedByFailureOrAbort = true;
               break;
@@ -1050,9 +1110,26 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             pausedByFailureOrAbort = true;
             break;
           }
+          traceSceneGeneration('scene-content-complete', {
+            stageId: stage.id,
+            generationRunId,
+            outlineId: outline.id,
+            sceneIndex: outline.order,
+            durationMs: Date.now() - contentStartedAt,
+            status: 'completed',
+          });
 
           // Step 2: Generate actions + assemble scene
           options.onPhaseChange?.('actions', outline);
+          const actionsStartedAt = Date.now();
+          traceSceneGeneration('scene-actions-start', {
+            stageId: stage.id,
+            generationRunId,
+            outlineId: outline.id,
+            sceneIndex: outline.order,
+            totalScenes: outlines.length,
+            sceneType: outline.type,
+          });
           const actionsResult = await fetchSceneActions(
             {
               outline: contentResult.effectiveOutline || outline,
@@ -1068,6 +1145,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           );
 
           if (actionsResult.success && actionsResult.scene) {
+            traceSceneGeneration('scene-actions-complete', {
+              stageId: stage.id,
+              generationRunId,
+              outlineId: outline.id,
+              sceneId: actionsResult.scene.id,
+              sceneIndex: outline.order,
+              durationMs: Date.now() - actionsStartedAt,
+              status: 'completed',
+            });
             const scene = actionsResult.scene;
             const settings = useSettingsStore.getState();
             const teacherVoiceProfileId = store.getState().stage?.teacherVoiceProfileId;
@@ -1082,12 +1168,31 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                   settings.ttsProvidersConfig?.[settings.ttsProviderId],
                 ))
             ) {
+              options.onPhaseChange?.('narration', outline);
+              const narrationStartedAt = Date.now();
+              traceSceneGeneration('narration-batch-start', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                sceneId: scene.id,
+                sceneIndex: outline.order,
+                provider: teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId,
+              });
               const ttsResult = await generateTTSForScene(
                 scene,
                 params.languageDirective || params.stageInfo.language,
                 signal,
               );
               if (!ttsResult.success) {
+                traceSceneGeneration('narration-item-failed', {
+                  stageId: stage.id,
+                  generationRunId,
+                  outlineId: outline.id,
+                  sceneId: scene.id,
+                  sceneIndex: outline.order,
+                  durationMs: Date.now() - narrationStartedAt,
+                  status: 'failed',
+                });
                 if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
                   pausedByFailureOrAbort = true;
                   break;
@@ -1098,6 +1203,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 pausedByFailureOrAbort = true;
                 break;
               }
+              traceSceneGeneration('narration-batch-complete', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                sceneId: scene.id,
+                sceneIndex: outline.order,
+                durationMs: Date.now() - narrationStartedAt,
+                status: 'completed',
+              });
             }
 
             // Epoch changed — stage switched, discard this scene
@@ -1109,9 +1223,39 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
             removeGeneratingOutline(outline.id);
             useStageStore.getState().addScene(scene);
+            traceSceneGeneration('scene-complete', {
+              stageId: stage.id,
+              generationRunId,
+              outlineId: outline.id,
+              sceneId: scene.id,
+              sceneIndex: outline.order,
+              totalScenes: outlines.length,
+              durationMs: Date.now() - sceneStartedAt,
+              status: 'completed',
+            });
+            const nextOutline = pending.find((candidate) => candidate.order > outline.order);
+            if (nextOutline) {
+              traceSceneGeneration('next-scene-dispatch', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: nextOutline.id,
+                sceneIndex: nextOutline.order,
+                totalScenes: outlines.length,
+              });
+            }
             options.onSceneGenerated?.(scene, outline.order);
             previousSpeeches = actionsResult.previousSpeeches || [];
           } else {
+            traceSceneGeneration('scene-actions-failed', {
+              stageId: stage.id,
+              generationRunId,
+              outlineId: outline.id,
+              sceneIndex: outline.order,
+              durationMs: Date.now() - actionsStartedAt,
+              status: 'failed',
+              errorCode: actionsResult.errorCode,
+              statusCode: actionsResult.statusCode,
+            });
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
               pausedByFailureOrAbort = true;
               break;
@@ -1129,10 +1273,22 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             // Parallel content phase left some outlines failed but kept going;
             // surface them for retry instead of signalling a clean completion.
             store.getState().setGenerationStatus('paused');
+            traceSceneGeneration('generation-paused', {
+              stageId: stage.id,
+              generationRunId,
+              status: 'paused',
+            });
           } else {
             store.getState().setGenerationStatus('completed');
             store.getState().setGeneratingOutlines([]);
             store.getState().setGenerationComplete(true);
+            traceSceneGeneration('lesson-generation-complete', {
+              stageId: stage.id,
+              generationRunId,
+              totalScenes: outlines.length,
+              totalGenerationElapsedMs: Date.now() - generationStartedAt,
+              status: 'completed',
+            });
             options.onComplete?.();
           }
         }
@@ -1141,6 +1297,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         if (isAbortError(err)) {
           log.info('Generation aborted');
           store.getState().setGenerationStatus('paused');
+          traceSceneGeneration('generation-aborted', {
+            stageId: stage.id,
+            generationRunId,
+            status: 'aborted',
+          });
         } else {
           throw err;
         }

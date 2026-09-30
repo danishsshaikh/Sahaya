@@ -1,6 +1,7 @@
 'use client';
 
 import { Stage } from '@/components/stage';
+import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -36,8 +37,21 @@ import {
   runClassroomLoad,
 } from '@/lib/classroom/load-classroom';
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
+import type { LessonGenerationPhase } from '@/lib/generation/progress';
+import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
+import type { SceneOutline } from '@/lib/types/generation';
 
 const log = createLogger('Classroom');
+
+type ClassroomGenerationProgress = {
+  sceneIndex: number;
+  totalScenes: number;
+  phase: LessonGenerationPhase;
+  sceneType?: SceneOutline['type'];
+  sceneStartedAt: number;
+  completedSceneDurationsMs: number[];
+  etaLabel: string;
+};
 
 export default function ClassroomDetailPage() {
   const params = useParams();
@@ -47,6 +61,9 @@ export default function ClassroomDetailPage() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<ClassroomGenerationProgress | null>(
+    null,
+  );
   // Not a boolean on purpose: `false` would say "this is a stranger's course",
   // which is neither what an unanswered sidecar nor a 404 means. Held in the
   // shared permission store rather than in local state, so the retry
@@ -58,9 +75,64 @@ export default function ClassroomDetailPage() {
   const mayGenerate = mayStartOwnerGeneration(isServerBackedMediaPersistence(), ownership);
 
   const generationStartedRef = useRef(false);
+  const sceneStartedAtRef = useRef<Record<number, number>>({});
+  const completedSceneDurationsRef = useRef<number[]>([]);
+
+  const updateGenerationProgress = useCallback(
+    (phase: LessonGenerationPhase, outline: SceneOutline) => {
+      const startedAt = sceneStartedAtRef.current[outline.order] ?? Date.now();
+      sceneStartedAtRef.current[outline.order] = startedAt;
+      const totalScenes = Math.max(useStageStore.getState().outlines.length, outline.order);
+      const completedSceneDurationsMs = [...completedSceneDurationsRef.current];
+      setGenerationProgress({
+        sceneIndex: outline.order,
+        totalScenes,
+        phase,
+        sceneType: outline.type,
+        sceneStartedAt: startedAt,
+        completedSceneDurationsMs,
+        etaLabel: lessonGenerationEtaLabel({
+          completedSceneDurationsMs,
+          currentSceneElapsedMs: Date.now() - startedAt,
+          sceneIndex: outline.order,
+          totalScenes,
+        }),
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'phase-changed',
+        stageId: classroomId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        totalScenes,
+        phase,
+        elapsedMs: Date.now() - startedAt,
+      });
+    },
+    [classroomId],
+  );
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
+    onPhaseChange: updateGenerationProgress,
+    onSceneGenerated: (_scene, index) => {
+      const startedAt = sceneStartedAtRef.current[index] ?? Date.now();
+      completedSceneDurationsRef.current = [
+        ...completedSceneDurationsRef.current,
+        Date.now() - startedAt,
+      ];
+      delete sceneStartedAtRef.current[index];
+      console.info('[SceneProgressTrace]', {
+        event: 'scene-complete',
+        stageId: classroomId,
+        sceneIndex: index,
+        elapsedMs: Date.now() - startedAt,
+      });
+    },
     onComplete: () => {
+      setGenerationProgress(null);
+      console.info('[SceneProgressTrace]', {
+        event: 'generation-ui-complete',
+        stageId: classroomId,
+      });
       log.info('[Classroom] All scenes generated');
     },
   });
@@ -168,11 +240,14 @@ export default function ClassroomDetailPage() {
     /* eslint-disable react-hooks/set-state-in-effect -- Course switch must hide stale Stage before async load */
     setLoading(true);
     setError(null);
+    setGenerationProgress(null);
     /* eslint-enable react-hooks/set-state-in-effect */
     // Ownership belongs to the departing course; the new one must re-earn it
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
+    sceneStartedAtRef.current = {};
+    completedSceneDurationsRef.current = [];
 
     // Clear previous classroom's media tasks to prevent cross-classroom contamination.
     // Placeholder IDs (gen_img_1, gen_vid_1) are NOT globally unique across stages,
@@ -318,7 +393,20 @@ export default function ClassroomDetailPage() {
               </div>
             </div>
           ) : (
-            <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
+            <div className="relative min-h-0 flex-1">
+              <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
+              {generationProgress ? (
+                <div className="pointer-events-none absolute left-1/2 top-4 z-30 w-full -translate-x-1/2 px-4">
+                  <LessonGenerationProgress
+                    sceneIndex={generationProgress.sceneIndex}
+                    totalScenes={generationProgress.totalScenes}
+                    phase={generationProgress.phase}
+                    sceneType={generationProgress.sceneType}
+                    etaLabel={generationProgress.etaLabel}
+                  />
+                </div>
+              ) : null}
+            </div>
           )}
         </div>
       </MediaStageProvider>

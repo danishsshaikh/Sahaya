@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { OutlinesEditor } from '@/components/generation/outlines-editor';
+import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 import { cn } from '@/lib/utils';
 import { useStageStore } from '@/lib/store/stage';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -59,6 +60,8 @@ import type {
 } from '@/lib/types/generation';
 import { AgentRevealModal } from '@/components/agent/agent-reveal-modal';
 import { createLogger } from '@/lib/logger';
+import type { LessonGenerationPhase } from '@/lib/generation/progress';
+import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
 import {
   type GenerationSessionState,
   ALL_STEPS,
@@ -104,6 +107,17 @@ type SceneGenerationFailure = {
   statusCode?: number;
 };
 
+type PreviewGenerationProgress = {
+  stageId?: string;
+  sceneIndex: number;
+  totalScenes: number;
+  phase: LessonGenerationPhase;
+  sceneType?: SceneOutline['type'];
+  sceneStartedAt: number;
+  completedSceneDurationsMs: number[];
+  etaLabel: string;
+};
+
 function GenerationPreviewContent() {
   const router = useRouter();
   const { t } = useI18n();
@@ -123,6 +137,9 @@ function GenerationPreviewContent() {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isComplete] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [generationProgress, setGenerationProgress] = useState<PreviewGenerationProgress | null>(
+    null,
+  );
   const [streamingOutlines, setStreamingOutlines] = useState<SceneOutline[] | null>(null);
   const [isOutlineStreaming, setIsOutlineStreaming] = useState(false);
   const [truncationWarnings, setTruncationWarnings] = useState<string[]>([]);
@@ -145,6 +162,33 @@ function GenerationPreviewContent() {
   const agentRevealResolveRef = useRef<(() => void) | null>(null);
   const reviewOutlineEnabled = useSettingsStore((s) => s.reviewOutlineEnabled);
   const setReviewOutlineEnabled = useSettingsStore((s) => s.setReviewOutlineEnabled);
+
+  const updateGenerationProgress = (
+    event: string,
+    next: Omit<PreviewGenerationProgress, 'completedSceneDurationsMs' | 'etaLabel'> & {
+      completedSceneDurationsMs?: number[];
+    },
+  ) => {
+    const progress = {
+      ...next,
+      completedSceneDurationsMs: next.completedSceneDurationsMs ?? [],
+      etaLabel: lessonGenerationEtaLabel({
+        completedSceneDurationsMs: next.completedSceneDurationsMs ?? [],
+        currentSceneElapsedMs: Date.now() - next.sceneStartedAt,
+        sceneIndex: next.sceneIndex,
+        totalScenes: next.totalScenes,
+      }),
+    };
+    setGenerationProgress(progress);
+    console.info('[SceneProgressTrace]', {
+      event,
+      stageId: progress.stageId,
+      sceneIndex: progress.sceneIndex,
+      totalScenes: progress.totalScenes,
+      phase: progress.phase,
+      elapsedMs: Date.now() - progress.sceneStartedAt,
+    });
+  };
 
   // Compute active steps based on session state
   const activeSteps = getActiveSteps(session);
@@ -558,6 +602,13 @@ function GenerationPreviewContent() {
       const outlineStepIdx = activeSteps.findIndex((s) => s.id === 'outline');
       setCurrentStepIndex(outlineStepIdx >= 0 ? outlineStepIdx : 0);
       if (!outlines || outlines.length === 0) {
+        updateGenerationProgress('generation-ui-start', {
+          stageId,
+          sceneIndex: 1,
+          totalScenes: 1,
+          phase: 'outline',
+          sceneStartedAt: Date.now(),
+        });
         log.debug('=== Generating outlines (SSE) ===');
         setStreamingOutlines([]);
         setIsOutlineStreaming(true);
@@ -681,6 +732,14 @@ function GenerationPreviewContent() {
         courseTitle = outlineResult.courseTitle;
         const effectiveTaskEngineMode = outlineResult.taskEngineMode;
         setIsOutlineStreaming(false);
+        updateGenerationProgress('phase-changed', {
+          stageId,
+          sceneIndex: 1,
+          totalScenes: Math.max(1, outlines.length),
+          phase: 'finalizing',
+          sceneType: outlines[0]?.type,
+          sceneStartedAt: Date.now(),
+        });
 
         // Mid-stream review intent (sticky ref) overrides the auto-continue timer.
         const userOpenedReviewEarly = outlineReviewIntentRef.current;
@@ -741,7 +800,9 @@ function GenerationPreviewContent() {
         const response = await fetch(`/api/voice-cloning/profile?${query}`);
         const result = await response.json();
         if (!response.ok || !result.profile) {
-          throw new Error(result.error || 'Select a Teaching Voice matching the narration language.');
+          throw new Error(
+            result.error || 'Select a Teaching Voice matching the narration language.',
+          );
         }
       }
 
@@ -991,6 +1052,15 @@ function GenerationPreviewContent() {
       store.setGeneratingOutlines(outlines);
 
       const firstOutline = outlines[0];
+      const firstSceneStartedAt = Date.now();
+      updateGenerationProgress('current-scene-changed', {
+        stageId: stage.id,
+        sceneIndex: 1,
+        totalScenes: outlines.length,
+        phase: 'content',
+        sceneType: firstOutline.type,
+        sceneStartedAt: firstSceneStartedAt,
+      });
 
       // Step 2: Generate content (currentStepIndex is already 2)
       const contentData = await fetchSceneContent(
@@ -1012,10 +1082,26 @@ function GenerationPreviewContent() {
       if (!contentData.success || !contentData.content) {
         throw new Error(sceneGenerationErrorMessage(contentData));
       }
+      console.info('[SceneProgressTrace]', {
+        event: 'phase-changed',
+        stageId: stage.id,
+        sceneIndex: 1,
+        totalScenes: outlines.length,
+        phase: 'actions',
+        elapsedMs: Date.now() - firstSceneStartedAt,
+      });
 
       // Generate actions (activate actions step indicator)
       const actionsStepIdx = activeSteps.findIndex((s) => s.id === 'actions');
       setCurrentStepIndex(actionsStepIdx >= 0 ? actionsStepIdx : currentStepIndex + 1);
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              phase: 'actions',
+            }
+          : current,
+      );
 
       const data = await fetchSceneActions(
         {
@@ -1047,6 +1133,14 @@ function GenerationPreviewContent() {
             settings.ttsProvidersConfig?.[settings.ttsProviderId],
           ))
       ) {
+        updateGenerationProgress('phase-changed', {
+          stageId: stage.id,
+          sceneIndex: 1,
+          totalScenes: outlines.length,
+          phase: 'narration',
+          sceneType: firstOutline.type,
+          sceneStartedAt: firstSceneStartedAt,
+        });
         const ttsResult = await generateTTSForScene(
           firstScene,
           languageDirective,
@@ -1059,6 +1153,15 @@ function GenerationPreviewContent() {
       // Add scene to store and navigate
       store.addScene(firstScene);
       store.setCurrentSceneId(firstScene.id);
+      updateGenerationProgress('scene-complete', {
+        stageId: stage.id,
+        sceneIndex: 1,
+        totalScenes: outlines.length,
+        phase: 'finalizing',
+        sceneType: firstOutline.type,
+        sceneStartedAt: firstSceneStartedAt,
+        completedSceneDurationsMs: [Date.now() - firstSceneStartedAt],
+      });
 
       // Set remaining outlines as skeleton placeholders
       const remaining = outlines.filter((o) => o.order !== firstScene.order);
@@ -1450,6 +1553,15 @@ function GenerationPreviewContent() {
                           ? t('generation.classroomReady')
                           : statusMessage || t(activeStepText.description)}
                     </p>
+                    {!error && !isComplete && generationProgress ? (
+                      <LessonGenerationProgress
+                        sceneIndex={generationProgress.sceneIndex}
+                        totalScenes={generationProgress.totalScenes}
+                        phase={generationProgress.phase}
+                        sceneType={generationProgress.sceneType}
+                        etaLabel={generationProgress.etaLabel}
+                      />
+                    ) : null}
                   </motion.div>
                 </AnimatePresence>
 

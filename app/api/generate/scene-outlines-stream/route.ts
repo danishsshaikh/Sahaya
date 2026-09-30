@@ -455,6 +455,21 @@ export async function POST(req: NextRequest) {
     log.info(
       `Generating outlines: "${requirements.requirement.substring(0, 50)}" [model=${modelString}]`,
     );
+    const outlineGenerationStartedAt = Date.now();
+    const outlineRequestId = `outline:${outlineGenerationStartedAt}`;
+    log.info('[SceneGenerationTrace]', {
+      event: 'outline-generation-start',
+      requestId: outlineRequestId,
+      model: modelString,
+      phase: 'outline',
+      status: 'started',
+    });
+    log.info('[SceneGenerationTrace]', {
+      event: 'outline-generation-model-selected',
+      requestId: outlineRequestId,
+      model: modelString,
+      phase: 'outline',
+    });
 
     // Create SSE stream with heartbeat to prevent connection timeout
     const encoder = new TextEncoder();
@@ -667,6 +682,15 @@ export async function POST(req: NextRequest) {
           if (parsedOutlines.length > 0) {
             // Replace sequential gen_img_N/gen_vid_N with globally unique IDs
             const uniquifiedOutlines = uniquifyMediaElementIds(parsedOutlines);
+            log.info('[SceneGenerationTrace]', {
+              event: 'outline-generation-complete',
+              requestId: outlineRequestId,
+              model: modelString,
+              phase: 'outline',
+              totalScenes: uniquifiedOutlines.length,
+              durationMs: Date.now() - outlineGenerationStartedAt,
+              status: 'completed',
+            });
             // Send done event with all outlines
             const doneEvent = JSON.stringify({
               type: 'done',
@@ -681,6 +705,14 @@ export async function POST(req: NextRequest) {
             log.error(
               `Outline generation failed after ${MAX_STREAM_RETRIES + 1} attempts: ${lastError}`,
             );
+            log.info('[SceneGenerationTrace]', {
+              event: 'outline-generation-failed',
+              requestId: outlineRequestId,
+              model: modelString,
+              phase: 'outline',
+              durationMs: Date.now() - outlineGenerationStartedAt,
+              status: 'failed',
+            });
             const errorEvent = JSON.stringify({
               type: 'error',
               error: lastError || 'Failed to generate outlines',
@@ -688,6 +720,14 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode(`data: ${errorEvent}\n\n`));
           }
         } catch (error) {
+          log.info('[SceneGenerationTrace]', {
+            event: 'outline-generation-failed',
+            requestId: outlineRequestId,
+            model: modelString,
+            phase: 'outline',
+            durationMs: Date.now() - outlineGenerationStartedAt,
+            status: 'failed',
+          });
           const errorEvent = JSON.stringify({
             type: 'error',
             error: error instanceof Error ? error.message : String(error),

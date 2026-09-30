@@ -15,9 +15,147 @@ import {
   resolveVoiceProfileProvider,
   resolveVoiceProfileModelVariant,
   TeachingVoiceError,
+  TeachingVoiceProviderOperationError,
 } from '@/lib/voice-cloning/types';
 
 const log = createLogger('VoiceCloningSynthesis');
+
+const TEACHING_VOICE_SYNTHESIS_QUEUE_PROVIDERS = new Set(['qwen3']);
+const DEFAULT_BUSY_RETRY_BASE_MS = 3000;
+const DEFAULT_BUSY_RETRY_MAX_RETRIES = 4;
+const MAX_BUSY_RETRY_DELAY_MS = 30000;
+
+const synthesisQueueTails = new Map<string, Promise<void>>();
+
+function traceTeachingVoiceSynthesis(event: string, extra: Record<string, unknown>) {
+  log.info('[TeachingVoiceSynthesis]', { event, ...extra });
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function busyRetryConfig() {
+  return {
+    baseDelayMs: parsePositiveInteger(
+      process.env.TEACHING_VOICE_BUSY_RETRY_BASE_MS,
+      DEFAULT_BUSY_RETRY_BASE_MS,
+    ),
+    maxRetries: parsePositiveInteger(
+      process.env.TEACHING_VOICE_BUSY_MAX_RETRIES,
+      DEFAULT_BUSY_RETRY_MAX_RETRIES,
+    ),
+  };
+}
+
+function busyRetryDelayMs(attempt: number): number {
+  const { baseDelayMs } = busyRetryConfig();
+  return Math.min(baseDelayMs * 2 ** Math.max(0, attempt - 1), MAX_BUSY_RETRY_DELAY_MS);
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isProviderBusyError(error: unknown): error is TeachingVoiceProviderOperationError {
+  return (
+    error instanceof TeachingVoiceProviderOperationError &&
+    error.metadata.operation === 'synthesis' &&
+    error.metadata.providerStatus === 429
+  );
+}
+
+function isProviderTimeoutError(error: unknown): boolean {
+  return (
+    error instanceof TeachingVoiceProviderOperationError &&
+    error.metadata.operation === 'synthesis' &&
+    /timed out/i.test(error.message)
+  );
+}
+
+async function runSerializedSynthesis<T>(
+  queueKey: string,
+  metadata: Record<string, unknown>,
+  operation: (waitMs: number) => Promise<T>,
+): Promise<T> {
+  const previous = synthesisQueueTails.get(queueKey) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => undefined).then(() => gate);
+  synthesisQueueTails.set(queueKey, tail);
+  const queuedAt = Date.now();
+
+  traceTeachingVoiceSynthesis('queued', { queueKey, ...metadata });
+  await previous.catch(() => undefined);
+  const waitMs = Date.now() - queuedAt;
+  traceTeachingVoiceSynthesis('queue-wait-complete', { queueKey, waitMs, ...metadata });
+
+  try {
+    return await operation(waitMs);
+  } finally {
+    release();
+    if (synthesisQueueTails.get(queueKey) === tail) {
+      synthesisQueueTails.delete(queueKey);
+    }
+  }
+}
+
+async function synthesizeWithBusyRetry<T>(
+  metadata: Record<string, unknown>,
+  operation: (attempt: number) => Promise<T>,
+): Promise<T> {
+  const { maxRetries } = busyRetryConfig();
+  let attempt = 1;
+
+  while (true) {
+    const attemptStartedAt = Date.now();
+    traceTeachingVoiceSynthesis('attempt-start', { attempt, ...metadata });
+    try {
+      const result = await operation(attempt);
+      traceTeachingVoiceSynthesis('completed', {
+        attempt,
+        durationMs: Date.now() - attemptStartedAt,
+        ...metadata,
+      });
+      return result;
+    } catch (error) {
+      const durationMs = Date.now() - attemptStartedAt;
+      if (isProviderBusyError(error) && attempt <= maxRetries) {
+        const retryDelayMs = busyRetryDelayMs(attempt);
+        traceTeachingVoiceSynthesis('provider-busy', {
+          attempt,
+          durationMs,
+          retryDelayMs,
+          ...metadata,
+        });
+        traceTeachingVoiceSynthesis('retry-scheduled', {
+          attempt,
+          nextAttempt: attempt + 1,
+          retryDelayMs,
+          ...metadata,
+        });
+        await sleep(retryDelayMs);
+        attempt += 1;
+        continue;
+      }
+
+      traceTeachingVoiceSynthesis(isProviderTimeoutError(error) ? 'timeout' : 'failed', {
+        attempt,
+        durationMs,
+        busyRetryExhausted: isProviderBusyError(error),
+        ...metadata,
+      });
+      throw error;
+    }
+  }
+}
+
+export function clearTeachingVoiceSynthesisQueueForTests() {
+  synthesisQueueTails.clear();
+}
 
 export async function synthesizeFacultyVoice(input: {
   profileId: string;
@@ -40,23 +178,44 @@ export async function synthesizeFacultyVoice(input: {
   }
   const language = validateTeachingVoiceLanguage(profile, input.language);
   const providerId = resolveVoiceProfileProvider(profile);
-  const settings = providerId === 'chatterbox' ? {
-    modelVariant: resolveVoiceProfileModelVariant(profile),
-    generationSettings: resolveVoiceProfileGenerationSettings(profile),
-  } : {};
+  const settings =
+    providerId === 'chatterbox'
+      ? {
+          modelVariant: resolveVoiceProfileModelVariant(profile),
+          generationSettings: resolveVoiceProfileGenerationSettings(profile),
+        }
+      : {};
   const provider = getVoiceCloningProvider(providerId);
   const synthesize = async (providerReferenceId: string) => {
-    const result = await provider.synthesize({
-      providerReferenceId,
-      text: input.text,
+    const metadata = {
+      profileId: profile.id,
+      provider: providerId,
+      textLength: input.text.length,
       language,
-      ...settings,
+    };
+    const run = () =>
+      synthesizeWithBusyRetry(metadata, () =>
+        provider.synthesize({
+          providerReferenceId,
+          text: input.text,
+          language,
+          ...settings,
+        }),
+      );
+    const result = TEACHING_VOICE_SYNTHESIS_QUEUE_PROVIDERS.has(providerId)
+      ? await runSerializedSynthesis(`synthesis:${providerId}`, metadata, run)
+      : await run();
+    const masteringStartedAt = Date.now();
+    traceTeachingVoiceSynthesis('mastering-start', {
+      ...metadata,
     });
     const mastered = await masterGeneratedVoiceAudio(result.audio, result.format);
-    log.info('voice output mastering completed', {
+    traceTeachingVoiceSynthesis('mastering-complete', {
       profileId: profile.id,
+      provider: providerId,
       operation: 'synthesize',
       format: mastered.format,
+      durationMs: Date.now() - masteringStartedAt,
     });
     return mastered;
   };
