@@ -31,8 +31,10 @@ import {
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
   TeachingVoiceError,
+  TeachingVoiceProviderOperationError,
   resolveVoiceProfileProvider,
   toPublicVoiceProfile,
+  type TeachingVoiceProviderOperation,
   type VoiceConfiguration,
   type VoicePreview,
   type VoiceProfile,
@@ -47,6 +49,8 @@ export type VoiceEnrollmentJobPhase =
   | 'quality_check'
   | 'preprocessing'
   | 'provider_registration'
+  | 'preview_generation'
+  | 'mastering'
   | 'finalizing'
   | 'completed'
   | 'failed';
@@ -65,6 +69,7 @@ export interface VoiceEnrollmentJob {
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
+  failedPhase?: VoiceEnrollmentJobPhase;
 }
 
 export interface VoiceEnrollmentStartResult {
@@ -74,6 +79,7 @@ export interface VoiceEnrollmentStartResult {
   pollIntervalMs: number;
   profile?: ReturnType<typeof toPublicVoiceProfile>;
   error?: string;
+  failedPhase?: VoiceEnrollmentJobPhase;
 }
 
 interface VoiceEnrollmentInput {
@@ -149,6 +155,49 @@ function safeEnrollmentError(error: unknown): string {
   return message.replace(/\s+/g, ' ').trim().slice(0, 300) || 'Voice enrollment failed';
 }
 
+function operationToEnrollmentPhase(
+  operation: TeachingVoiceProviderOperation,
+): VoiceEnrollmentJobPhase {
+  if (operation === 'provider_registration') return 'provider_registration';
+  if (operation === 'preview_generation' || operation === 'synthesis') return 'preview_generation';
+  return 'finalizing';
+}
+
+function failedEnrollmentPhase(
+  error: unknown,
+  fallback: VoiceEnrollmentJobPhase,
+): VoiceEnrollmentJobPhase {
+  if (error instanceof TeachingVoiceProviderOperationError) {
+    return operationToEnrollmentPhase(error.metadata.operation);
+  }
+  return fallback;
+}
+
+function isVoiceEnrollmentJobPhase(value: unknown): value is VoiceEnrollmentJobPhase {
+  return (
+    value === 'queued' ||
+    value === 'quality_check' ||
+    value === 'preprocessing' ||
+    value === 'provider_registration' ||
+    value === 'preview_generation' ||
+    value === 'mastering' ||
+    value === 'finalizing' ||
+    value === 'completed' ||
+    value === 'failed'
+  );
+}
+
+function providerErrorLogFields(error: unknown) {
+  if (!(error instanceof TeachingVoiceProviderOperationError)) return {};
+  return {
+    providerEndpoint: error.metadata.endpoint,
+    providerOperation: error.metadata.operation,
+    providerStatus: error.metadata.providerStatus,
+    providerContentType: error.metadata.providerContentType,
+    providerDetail: error.metadata.providerDetail,
+  };
+}
+
 function voicePreviewFromAudio(audio: Uint8Array, format: string): VoicePreview {
   return {
     format,
@@ -160,6 +209,10 @@ function voicePreviewFromAudio(audio: Uint8Array, format: string): VoicePreview 
 export async function generateVariantPreview(
   profile: VoiceProfile,
   config: VoiceConfiguration,
+  options: {
+    onPhase?: (phase: VoiceEnrollmentJobPhase) => void;
+    attemptId?: string;
+  } = {},
 ): Promise<{ providerReferenceId: string; preview: VoicePreview }> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new Error('Voice profile reference audio not found');
@@ -167,6 +220,7 @@ export async function generateVariantPreview(
   const providerId = resolveVoiceProfileProvider(profile);
   validateTeachingVoiceLanguage(profile, config.languageId);
   const provider = getVoiceCloningProvider(providerId);
+  options.onPhase?.('provider_registration');
   const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
     referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
@@ -175,6 +229,15 @@ export async function generateVariantPreview(
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
   });
+  log.info('voice provider registration completed', {
+    attemptId: options.attemptId,
+    profileId: profile.id,
+    operation: 'enroll',
+    phase: 'provider_registration',
+    provider: providerId,
+    language: config.languageId,
+  });
+  options.onPhase?.('preview_generation');
   const preview = await provider.generatePreview({
     providerReferenceId,
     text: getVoicePreviewText(config.languageId, providerId),
@@ -182,10 +245,24 @@ export async function generateVariantPreview(
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
   });
+  log.info('voice preview generation completed', {
+    attemptId: options.attemptId,
+    profileId: profile.id,
+    operation: 'enroll',
+    phase: 'preview_generation',
+    provider: providerId,
+    language: config.languageId,
+    format: preview.format,
+  });
+  options.onPhase?.('mastering');
   const mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format);
   log.info('voice output mastering completed', {
+    attemptId: options.attemptId,
     profileId: profile.id,
     operation: 'preview',
+    phase: 'mastering',
+    provider: providerId,
+    language: config.languageId,
     format: mastered.format,
   });
   return {
@@ -240,6 +317,7 @@ function enrollmentResult(
     pollIntervalMs: VOICE_ENROLLMENT_POLL_INTERVAL_MS,
     ...(profile !== undefined ? { profile: toPublicVoiceProfile(profile) } : {}),
     ...(job.error ? { error: job.error } : {}),
+    ...(job.failedPhase ? { failedPhase: job.failedPhase } : {}),
   };
 }
 
@@ -261,6 +339,9 @@ export async function readVoiceEnrollmentStatus(
       : profile.status === 'preview-ready' || profile.status === 'ready'
         ? 'completed'
         : 'running';
+  const failedPhase = isVoiceEnrollmentJobPhase(profile.failurePhase)
+    ? profile.failurePhase
+    : undefined;
   return {
     attemptId,
     status,
@@ -273,14 +354,17 @@ export async function readVoiceEnrollmentStatus(
     pollIntervalMs: VOICE_ENROLLMENT_POLL_INTERVAL_MS,
     profile: toPublicVoiceProfile(profile),
     ...(profile.failureReason ? { error: profile.failureReason } : {}),
+    ...(failedPhase ? { failedPhase } : {}),
   };
 }
 
 async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<VoiceProfile> {
   const startedAt = nowMs();
   let profile: VoiceProfile | null = null;
+  let currentPhase: VoiceEnrollmentJobPhase = 'queued';
   try {
-    updateJob(input.attemptId, { phase: 'quality_check' });
+    currentPhase = 'quality_check';
+    updateJob(input.attemptId, { phase: currentPhase });
     log.info('voice enrollment quality check started', {
       attemptId: input.attemptId,
       operation: 'enroll',
@@ -304,7 +388,8 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       qualityWarnings: normalizedReference.qualityDecision.warnings,
     });
 
-    updateJob(input.attemptId, { phase: 'preprocessing' });
+    currentPhase = 'preprocessing';
+    updateJob(input.attemptId, { phase: currentPhase });
     const existingAttemptProfile = await findVoiceProfileByEnrollmentAttempt(
       input.ownerUserId,
       input.attemptId,
@@ -367,10 +452,16 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       qualityDecision: normalizedReference.qualityDecision.severity,
     });
 
-    updateJob(input.attemptId, { phase: 'provider_registration' });
     const config: VoiceConfiguration = { languageId: input.languageId };
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config);
-    updateJob(input.attemptId, { phase: 'finalizing' });
+    const { providerReferenceId, preview } = await generateVariantPreview(profile, config, {
+      attemptId: input.attemptId,
+      onPhase: (phase) => {
+        currentPhase = phase;
+        updateJob(input.attemptId, { phase });
+      },
+    });
+    currentPhase = 'finalizing';
+    updateJob(input.attemptId, { phase: currentPhase });
     profile = {
       ...profile,
       providerReferenceId,
@@ -393,12 +484,14 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
     return profile;
   } catch (error) {
     const message = safeEnrollmentError(error);
+    const phase = failedEnrollmentPhase(error, currentPhase);
     if (profile) {
       await writeVoiceProfile({
         ...profile,
         status: 'failed',
         updatedAt: new Date().toISOString(),
         failureReason: message,
+        failurePhase: phase,
       }).catch(() => undefined);
     }
     if (isVoiceRecordingQualityError(error)) {
@@ -425,10 +518,12 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
         attemptId: input.attemptId,
         operation: 'enroll',
         status: 'failed',
+        phase,
         language: input.languageId,
         provider: input.providerId,
         error: message,
         profileId: profile?.id,
+        ...providerErrorLogFields(error),
       });
     }
     throw error;
@@ -468,10 +563,12 @@ export function runVoiceEnrollmentJob(input: VoiceEnrollmentInput): Promise<void
       const completedAt = nowMs();
       const latest = jobs.get(input.attemptId);
       if (!latest) return;
+      const phase = failedEnrollmentPhase(error, latest.phase);
       jobs.set(input.attemptId, {
         ...latest,
         status: 'failed',
-        phase: 'failed',
+        phase,
+        failedPhase: phase,
         error: safeEnrollmentError(error),
         updatedAt: completedAt,
         completedAt,
@@ -491,7 +588,7 @@ async function readEnrollmentRecording(formData: FormData): Promise<IncomingVoic
     throw new Error('Missing recording');
   }
   return {
-    bytes: new Uint8Array(await value.arrayBuffer()),
+    bytes: new Uint8Array(await value.arrayBuffer()).slice(),
     mimeType: value.type,
     fileName: value.name,
   };

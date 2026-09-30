@@ -92,6 +92,7 @@ export interface VoiceProfile {
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
   failureReason?: string;
+  failurePhase?: string;
 }
 
 export interface PublicVoiceProfile {
@@ -159,6 +160,31 @@ export class TeachingVoiceError extends Error {
   ) {
     super(message);
     this.name = 'TeachingVoiceError';
+  }
+}
+
+export type TeachingVoiceProviderOperation =
+  | 'provider_registration'
+  | 'preview_generation'
+  | 'synthesis'
+  | 'profile_deletion'
+  | 'health_check';
+
+export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
+  constructor(
+    message: string,
+    status: number,
+    readonly metadata: {
+      provider: 'qwen3' | 'indicf5';
+      endpoint: string;
+      operation: TeachingVoiceProviderOperation;
+      providerStatus?: number;
+      providerContentType?: string;
+      providerDetail?: string;
+    },
+  ) {
+    super(message, status);
+    this.name = 'TeachingVoiceProviderOperationError';
   }
 }
 

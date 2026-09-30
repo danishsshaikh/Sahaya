@@ -14,6 +14,8 @@ function disabled() {
   return apiError('PROVIDER_DISABLED', 404, 'Voice cloning is disabled');
 }
 
+export const maxDuration = 960;
+
 export async function POST(req: NextRequest) {
   if (!isVoiceCloningServerEnabled()) return disabled();
   const user = await requireSessionUser(req);
