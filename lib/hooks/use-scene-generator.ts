@@ -431,7 +431,7 @@ export async function generateAndStoreTTS(
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
   const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
-    ? resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage
+    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage)
     : undefined;
   // A generated roster's explicit voice binding is the course voice source of truth.
   // Global settings remain the fallback for classrooms without a binding.
@@ -873,10 +873,40 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       if (generatingRef.current) return;
       generatingRef.current = true;
       abortRef.current = false;
-      const removeGeneratingOutline = (outlineId: string) => {
+      const dispatchedOutlineIds = new Set<string>();
+      const traceLifecycle = (
+        event: 'dispatch' | 'completion' | 'failure' | 'abort' | 'already-in-flight',
+        outline: Pick<SceneOutline, 'id' | 'order' | 'title'>,
+        extra?: Record<string, unknown>,
+      ) => {
+        log.info('[SceneLifecycleTrace]', {
+          event,
+          outlineId: outline.id,
+          order: outline.order,
+          title: outline.title,
+          ...extra,
+        });
+      };
+      const markGeneratingOutline = (outline: SceneOutline): boolean => {
         const current = store.getState().generatingOutlines;
-        if (!current.some((o) => o.id === outlineId)) return;
+        if (current.some((o) => o.id === outline.id)) {
+          traceLifecycle('already-in-flight', outline);
+          return false;
+        }
+        dispatchedOutlineIds.add(outline.id);
+        store.getState().setGeneratingOutlines([...current, outline]);
+        traceLifecycle('dispatch', outline);
+        return true;
+      };
+      const removeGeneratingOutline = (
+        outlineId: string,
+        reason: 'completion' | 'failure' | 'abort' = 'completion',
+      ) => {
+        const current = store.getState().generatingOutlines;
+        const outline = current.find((o) => o.id === outlineId);
+        if (!outline) return;
         store.getState().setGeneratingOutlines(current.filter((o) => o.id !== outlineId));
+        traceLifecycle(reason, outline);
       };
 
       // Create a new AbortController for this generation run
@@ -902,6 +932,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       if (pending.length === 0) {
         if (state.generatingOutlines.length > 0) {
+          for (const outline of state.generatingOutlines) {
+            traceLifecycle('already-in-flight', outline);
+          }
           generatingRef.current = false;
           return;
         }
@@ -912,8 +945,6 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         generatingRef.current = false;
         return;
       }
-
-      store.getState().setGeneratingOutlines([...state.generatingOutlines, ...pending]);
 
       // Launch media generation in parallel — does not block content/action generation.
       // Under server-backed persistence, abort whatever the ref held first:
@@ -962,8 +993,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       // threading and the pause-on-failure UX. With parallelism off this is exactly
       // the original one-at-a-time loop.
       try {
-        const fetchContent = (outline: SceneOutline) =>
-          fetchSceneContent(
+        const fetchContent = async (outline: SceneOutline): Promise<SceneContentResult> => {
+          if (!markGeneratingOutline(outline)) {
+            return {
+              success: false,
+              error: 'Scene generation is already in flight',
+              errorCode: 'SCENE_ALREADY_IN_FLIGHT',
+            };
+          }
+          return fetchSceneContent(
             {
               outline,
               allOutlines: outlines,
@@ -976,6 +1014,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             },
             signal,
           );
+        };
 
         // Pre-warm content fetches (<= parallelConcurrency in flight), keyed by
         // outline id. Each promise resolves to a result and never rejects, so an
@@ -1031,7 +1070,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           }
 
           if (!contentResult.success || !contentResult.content) {
+            if (contentResult.errorCode === 'SCENE_ALREADY_IN_FLIGHT') {
+              continue;
+            }
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
+              removeGeneratingOutline(outline.id, 'abort');
               pausedByFailureOrAbort = true;
               break;
             }
@@ -1041,11 +1084,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             }
             store.getState().addFailedOutline(outline);
             options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
+            removeGeneratingOutline(outline.id, 'failure');
             if (contentPromises) {
               // Parallel: surface the failure but keep going with the other scenes
               // (their content is already in flight).
               hadContentFailure = true;
-              removeGeneratingOutline(outline.id);
               continue;
             }
             // Serial: pause the batch (unchanged behaviour).
@@ -1055,6 +1098,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           }
 
           if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
+            removeGeneratingOutline(outline.id, 'abort');
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
             break;
@@ -1098,6 +1142,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               );
               if (!ttsResult.success) {
                 if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
+                  removeGeneratingOutline(outline.id, 'abort');
                   pausedByFailureOrAbort = true;
                   break;
                 }
@@ -1107,6 +1152,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 }
                 store.getState().addFailedOutline(outline);
                 options.onSceneFailed?.(outline, ttsResult.error || 'TTS generation failed');
+                removeGeneratingOutline(outline.id, 'failure');
                 store.getState().setGenerationStatus('paused');
                 pausedByFailureOrAbort = true;
                 break;
@@ -1116,6 +1162,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             // Epoch changed — stage switched, discard this scene
             if (store.getState().generationEpoch !== startEpoch) {
               await removeFreshTtsAllocations(speechAllocationIds(scene));
+              removeGeneratingOutline(outline.id, 'abort');
               pausedByFailureOrAbort = true;
               break;
             }
@@ -1126,6 +1173,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             previousSpeeches = actionsResult.previousSpeeches || [];
           } else {
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
+              removeGeneratingOutline(outline.id, 'abort');
               pausedByFailureOrAbort = true;
               break;
             }
@@ -1135,6 +1183,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             }
             store.getState().addFailedOutline(outline);
             options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
+            removeGeneratingOutline(outline.id, 'failure');
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
             break;
@@ -1158,10 +1207,21 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         if (isAbortError(err)) {
           log.info('Generation aborted');
           store.getState().setGenerationStatus('paused');
+          for (const outlineId of dispatchedOutlineIds) {
+            removeGeneratingOutline(outlineId, 'abort');
+          }
         } else {
+          for (const outlineId of dispatchedOutlineIds) {
+            removeGeneratingOutline(outlineId, 'failure');
+          }
           throw err;
         }
       } finally {
+        if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
+          for (const outlineId of dispatchedOutlineIds) {
+            removeGeneratingOutline(outlineId, 'abort');
+          }
+        }
         generatingRef.current = false;
         fetchAbortRef.current = null;
       }
