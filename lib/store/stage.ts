@@ -1112,13 +1112,13 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
           chatSnapshot: data.chatSnapshot ?? { sessions: [], restoreMarker: undefined },
           outlines,
           generationComplete,
-          // Compute generatingOutlines from persisted outlines minus completed
-          // scenes. Once generation is complete the deck is frozen for editing,
-          // so an orphaned outline (e.g. from a deleted slide) must NOT surface
-          // as a pending placeholder or drive resume regeneration.
-          generatingOutlines: generationComplete
-            ? []
-            : outlines.filter((outline) => !hasSceneForOutline(migrated, outline)),
+          // `generatingOutlines` is live, in-flight UI state only. Persisted
+          // incomplete outlines are pending, not already dispatched; the
+          // generator decides which pending outline to mark in-flight when it
+          // actually starts that outline's request. Hydrating every incomplete
+          // outline here deadlocks resume because pendingOutlinesForGeneration
+          // correctly excludes active in-flight ids.
+          generatingOutlines: [],
           // `mode` is transient UI state, not persisted with the stage.
           // Reset to 'playback' on every load so SPA navigation between
           // classrooms doesn't carry Pro-mode state across — e.g. user
