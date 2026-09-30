@@ -39,6 +39,7 @@ import {
   type VoiceGenerationSettings,
   type VoiceSettingsPreset,
 } from '@/lib/voice-cloning/types';
+import { readVoiceApiResponse, voiceFetchError } from '@/lib/voice-cloning/api-client';
 
 interface TeachingVoiceCardProps {
   selectedProfileId?: string;
@@ -59,6 +60,20 @@ type ApiProfileResponse = {
   details?: string;
 };
 
+type VoiceEnrollmentResponse = ApiProfileResponse & {
+  attemptId?: string;
+  status?: 'queued' | 'running' | 'completed' | 'failed';
+  phase?:
+    | 'queued'
+    | 'quality_check'
+    | 'preprocessing'
+    | 'provider_registration'
+    | 'finalizing'
+    | 'completed'
+    | 'failed';
+  pollIntervalMs?: number;
+};
+
 type SetupStep = 'record' | 'preview' | 'review';
 type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
 
@@ -68,6 +83,26 @@ const BUSY_LABELS: Record<BusyPhase, string> = {
   generating: 'Generating your voice preview...',
   finishing: 'Finishing audio...',
 };
+
+const ENROLLMENT_ATTEMPT_STORAGE_PREFIX = 'sahaya.teachingVoice.enrollmentAttempt';
+
+function enrollmentStorageKey(language: string): string {
+  return `${ENROLLMENT_ATTEMPT_STORAGE_PREFIX}.${language}`;
+}
+
+function createEnrollmentAttemptId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `voice_${Date.now()}_${Math.random().toString(36).slice(2)}`
+  );
+}
+
+function busyPhaseForEnrollmentPhase(phase?: VoiceEnrollmentResponse['phase']): BusyPhase {
+  if (phase === 'quality_check') return 'checking';
+  if (phase === 'preprocessing') return 'preparing';
+  if (phase === 'finalizing' || phase === 'completed') return 'finishing';
+  return 'generating';
+}
 
 const MODEL_OPTIONS: Array<{
   value: ChatterboxModelVariant;
@@ -144,15 +179,18 @@ function normalizeProfileLanguageId(profile: PublicVoiceProfile | null): string 
 function profileConfiguration(profile: PublicVoiceProfile): VoiceConfiguration {
   return {
     languageId: normalizeProfileLanguageId(profile),
-    ...(resolveVoiceProfileProvider(profile) === 'chatterbox' ? {
-      modelVariant: profile.modelVariant,
-      generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
-    } : {}),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
+      ? {
+          modelVariant: profile.modelVariant,
+          generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
+        }
+      : {}),
   };
 }
 
 function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
-  if (left.modelVariant !== right.modelVariant || left.languageId !== right.languageId) return false;
+  if (left.modelVariant !== right.modelVariant || left.languageId !== right.languageId)
+    return false;
   const a = left.generationSettings;
   const b = right.generationSettings;
   if (!a || !b) return a === b;
@@ -209,6 +247,7 @@ export function TeachingVoiceCard({
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [enrollmentAttemptId, setEnrollmentAttemptId] = useState<string | null>(null);
   const [recordingRequiresRetry, setRecordingRequiresRetry] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -216,6 +255,7 @@ export function TeachingVoiceCard({
   const candidateAudioRef = useRef<HTMLAudioElement | null>(null);
   const enrollmentRequestInFlightRef = useRef(false);
   const previewRequestInFlightRef = useRef(false);
+  const enrollmentPollTokenRef = useRef(0);
   const busyTimersRef = useRef<number[]>([]);
   const selectedProfileIdRef = useRef(selectedProfileId);
   const onSelectedProfileIdChangeRef = useRef(onSelectedProfileIdChange);
@@ -225,10 +265,12 @@ export function TeachingVoiceCard({
   const isChatterboxProfile = !!profile && resolveVoiceProfileProvider(profile) === 'chatterbox';
   const draftConfiguration: VoiceConfiguration = {
     languageId: draftLanguageId,
-    ...(isChatterboxProfile ? {
-      modelVariant: draftModelVariant,
-      generationSettings: draftGenerationSettings,
-    } : {}),
+    ...(isChatterboxProfile
+      ? {
+          modelVariant: draftModelVariant,
+          generationSettings: draftGenerationSettings,
+        }
+      : {}),
   };
   const draftPreset = voiceGenerationPresetForSettings(draftGenerationSettings);
   const draftPresetDescription =
@@ -277,6 +319,7 @@ export function TeachingVoiceCard({
 
   useEffect(
     () => () => {
+      enrollmentPollTokenRef.current += 1;
       if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
       busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     },
@@ -293,9 +336,7 @@ export function TeachingVoiceCard({
     setProfileLoading(true);
     fetch(`/api/voice-cloning/profile?language=${encodeURIComponent(enrollmentLanguage)}`)
       .then(async (res) => {
-        const data = await res.json() as ApiProfileResponse;
-        if (!res.ok) throw new Error(data.error || 'Could not load Teaching Voice.');
-        return data;
+        return readVoiceApiResponse<ApiProfileResponse>(res);
       })
       .then((data: ApiProfileResponse | null) => {
         if (cancelled) return;
@@ -306,9 +347,13 @@ export function TeachingVoiceCard({
           setCustomizeOpen(false);
         }
         if (next?.draftPreview) {
-          setDraftModelVariant(next.draftPreview.config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+          setDraftModelVariant(
+            next.draftPreview.config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT,
+          );
           setDraftLanguageId(next.draftPreview.config.languageId);
-          setDraftGenerationSettings(next.draftPreview.config.generationSettings ?? cloneRecommendedSettings());
+          setDraftGenerationSettings(
+            next.draftPreview.config.generationSettings ?? cloneRecommendedSettings(),
+          );
         } else if (next) {
           const config = profileConfiguration(next);
           setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
@@ -320,7 +365,8 @@ export function TeachingVoiceCard({
         }
       })
       .catch(() => {
-        if (!cancelled) setError('Could not load Teaching Voice. Try again before selecting a voice.');
+        if (!cancelled)
+          setError('Could not load Teaching Voice. Try again before selecting a voice.');
       })
       .finally(() => {
         if (!cancelled) setProfileLoading(false);
@@ -355,6 +401,11 @@ export function TeachingVoiceCard({
   };
 
   const clearCandidateRecording = () => {
+    enrollmentPollTokenRef.current += 1;
+    if (enrollmentAttemptId) {
+      window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
+      setEnrollmentAttemptId(null);
+    }
     busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     busyTimersRef.current = [];
     replaceRecording({});
@@ -385,6 +436,90 @@ export function TeachingVoiceCard({
     setBusyPhase(null);
     setBusyStartedAt(null);
   };
+
+  const applyEnrollmentProfile = (next: PublicVoiceProfile) => {
+    setProfile(next);
+    setSetupStep('review');
+    setCustomizeOpen(false);
+    setRecordingRequiresRetry(false);
+    const config = next.draftPreview?.config ?? profileConfiguration(next);
+    setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+    setDraftLanguageId(config.languageId);
+    setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
+  };
+
+  const finishEnrollmentAttempt = (attemptId: string) => {
+    setEnrollmentAttemptId(null);
+    window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
+    if (enrollmentAttemptId === attemptId) setEnrollmentAttemptId(null);
+  };
+
+  const pollEnrollmentAttempt = async (attemptId: string) => {
+    const pollToken = ++enrollmentPollTokenRef.current;
+    enrollmentRequestInFlightRef.current = true;
+    setEnrollmentAttemptId(attemptId);
+    window.localStorage.setItem(enrollmentStorageKey(enrollmentLanguage), attemptId);
+    setSetupStep('preview');
+    if (!busy) startBusy('generating', [[14000, 'finishing']]);
+
+    try {
+      while (pollToken === enrollmentPollTokenRef.current) {
+        let data: VoiceEnrollmentResponse | null = null;
+        try {
+          const response = await fetch(
+            `/api/voice-cloning/enrollment/${encodeURIComponent(attemptId)}`,
+          );
+          data = await readVoiceApiResponse<VoiceEnrollmentResponse>(response);
+        } catch (error) {
+          const parsed = voiceFetchError(error);
+          setPreviewError(
+            parsed.kind === 'non-json' || parsed.kind === 'network'
+              ? 'Voice creation could not be confirmed. Checking enrollment status...'
+              : parsed.message,
+          );
+        }
+
+        if (pollToken !== enrollmentPollTokenRef.current) return;
+
+        if (data?.phase) setBusyPhase(busyPhaseForEnrollmentPhase(data.phase));
+        if (data?.status === 'completed' && data.profile) {
+          applyEnrollmentProfile(data.profile);
+          setPreviewError(null);
+          finishEnrollmentAttempt(attemptId);
+          return;
+        }
+        if (data?.status === 'failed') {
+          finishEnrollmentAttempt(attemptId);
+          setPreviewError(data.error || 'Voice enrollment failed. Please try again.');
+          return;
+        }
+
+        const delay = Math.max(1500, Math.min(data?.pollIntervalMs ?? 3000, 8000));
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+      }
+    } finally {
+      if (pollToken === enrollmentPollTokenRef.current) {
+        enrollmentRequestInFlightRef.current = false;
+        stopBusy();
+      }
+    }
+  };
+
+  useEffect(() => {
+    const storedAttemptId = window.localStorage.getItem(enrollmentStorageKey(enrollmentLanguage));
+    if (!storedAttemptId || profile?.status === 'preview-ready' || profile?.status === 'ready') {
+      return;
+    }
+    setOpen(true);
+    setPreviewError('Checking Teaching Voice enrollment status...');
+    void pollEnrollmentAttempt(storedAttemptId);
+    return () => {
+      enrollmentPollTokenRef.current += 1;
+    };
+    // The poller deliberately owns its own token lifecycle; re-enter only when
+    // the selected enrollment language changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrollmentLanguage]);
 
   const updateGenerationSetting = (key: keyof VoiceGenerationSettings, value: number) => {
     setDraftGenerationSettings((prev) => ({ ...prev, [key]: value }));
@@ -499,7 +634,8 @@ export function TeachingVoiceCard({
             ))}
           </select>
           <p className="text-xs leading-snug text-muted-foreground">
-            The reference recording fixes this voice&apos;s language. Record another voice to change it.
+            {"The reference recording fixes this voice's language."} Record another voice to change
+            it.
           </p>
         </div>
 
@@ -570,7 +706,8 @@ export function TeachingVoiceCard({
   );
 
   const startRecording = async () => {
-    if (busy || profileLoading || recordingPending || recorderRef.current || !enrollmentPhrase) return;
+    if (busy || profileLoading || recordingPending || recorderRef.current || !enrollmentPhrase)
+      return;
     clearCandidateRecording();
     if (!consented) {
       setEnrollmentError('Consent is required before recording.');
@@ -653,14 +790,18 @@ export function TeachingVoiceCard({
     startBusy('checking', [
       [900, 'preparing'],
       [2600, 'generating'],
-      [14000, 'finishing'],
     ]);
     setSetupStep('preview');
     setError(null);
     setEnrollmentError(null);
     setPreviewError(null);
+    const attemptId = enrollmentAttemptId ?? createEnrollmentAttemptId();
+    setEnrollmentAttemptId(attemptId);
+    window.localStorage.setItem(enrollmentStorageKey(enrollmentLanguage), attemptId);
+    let pollingStarted = false;
     try {
       const formData = new FormData();
+      formData.set('attemptId', attemptId);
       formData.set('consent', 'true');
       formData.set('displayName', 'My Teaching Voice');
       formData.set('language', enrollmentLanguage);
@@ -668,35 +809,41 @@ export function TeachingVoiceCard({
       formData.set('phraseId', enrollmentPhrase.id);
       formData.set('referenceText', enrollmentPhrase.text);
       formData.set('recording', recording.blob, 'teaching-voice.webm');
-      const response = await fetch('/api/voice-cloning/profile', {
+      const response = await fetch('/api/voice-cloning/enrollment', {
         method: 'POST',
         body: formData,
       });
-      const data = (await response.json()) as ApiProfileResponse;
-      if (!response.ok || !data.profile) {
-        const message = data.details || data.error || 'Voice enrollment failed.';
-        if (response.status === 400) {
-          setSetupStep('record');
-          setRecordingRequiresRetry(true);
-          setEnrollmentError(message);
-          return;
-        }
-        setPreviewError(message);
+      const data = await readVoiceApiResponse<VoiceEnrollmentResponse>(response);
+      if (data.status === 'completed' && data.profile) {
+        applyEnrollmentProfile(data.profile);
+        finishEnrollmentAttempt(attemptId);
         return;
       }
-      setProfile(data.profile);
-      setSetupStep('review');
-      setCustomizeOpen(false);
-      setRecordingRequiresRetry(false);
-      const config = data.profile.draftPreview?.config ?? profileConfiguration(data.profile);
-      setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
-      setDraftLanguageId(config.languageId);
-      setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
+      if (data.status === 'failed') {
+        setPreviewError(data.error || 'Voice enrollment failed.');
+        return;
+      }
+      pollingStarted = true;
+      await pollEnrollmentAttempt(data.attemptId || attemptId);
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : 'Voice enrollment failed.');
+      const parsed = voiceFetchError(err);
+      if (parsed.kind === 'http' && parsed.status !== undefined && parsed.status < 500) {
+        finishEnrollmentAttempt(attemptId);
+        setSetupStep('record');
+        setRecordingRequiresRetry(true);
+        setEnrollmentError(parsed.message);
+        return;
+      }
+      setPreviewError(
+        parsed.kind === 'non-json' || parsed.kind === 'network'
+          ? 'Voice creation could not be confirmed. Checking enrollment status...'
+          : parsed.message,
+      );
+      pollingStarted = true;
+      await pollEnrollmentAttempt(attemptId);
     } finally {
       enrollmentRequestInFlightRef.current = false;
-      stopBusy();
+      if (!pollingStarted) stopBusy();
     }
   };
 
@@ -717,10 +864,8 @@ export function TeachingVoiceCard({
           ...draftConfiguration,
         }),
       });
-      const data = (await response.json()) as ApiProfileResponse;
-      if (!response.ok || !data.profile) {
-        throw new Error(data.details || data.error || 'Could not accept preview.');
-      }
+      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
+      if (!data.profile) throw new Error('Could not accept preview.');
       setProfile(data.profile);
       setSetupStep('review');
       setCustomizeOpen(false);
@@ -754,10 +899,8 @@ export function TeachingVoiceCard({
           ...draftConfiguration,
         }),
       });
-      const data = (await response.json()) as ApiProfileResponse;
-      if (!response.ok || !data.profile) {
-        throw new Error(data.details || data.error || 'Could not generate preview.');
-      }
+      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
+      if (!data.profile) throw new Error('Could not generate preview.');
       setProfile(data.profile);
       setSetupStep('review');
     } catch (err) {
@@ -776,13 +919,20 @@ export function TeachingVoiceCard({
     try {
       const id = profileId ?? profile?.id;
       if (!id) return;
-      const response = await fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(id)}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Could not delete Teaching Voice');
+      const response = await fetch(
+        `/api/voice-cloning/profile?profileId=${encodeURIComponent(id)}`,
+        { method: 'DELETE' },
+      );
+      await readVoiceApiResponse(response);
       setProfile(null);
       setSetupStep('record');
       setCustomizeOpen(false);
       setEnrollmentError(null);
       setPreviewError(null);
+      if (enrollmentAttemptId) {
+        window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
+        setEnrollmentAttemptId(null);
+      }
       if (!profileId || selectedProfileId === profileId) {
         onSelectedProfileIdChange(undefined);
       }
@@ -800,10 +950,13 @@ export function TeachingVoiceCard({
     previewRequestInFlightRef.current = true;
     startBusy('finishing');
     try {
-      const response = await fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(profileId)}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) throw new Error('Could not delete Teaching Voice');
+      const response = await fetch(
+        `/api/voice-cloning/profile?profileId=${encodeURIComponent(profileId)}`,
+        {
+          method: 'DELETE',
+        },
+      );
+      await readVoiceApiResponse(response);
       clearCandidateRecording();
       setProfile(null);
       setCustomizeOpen(false);
@@ -849,7 +1002,7 @@ export function TeachingVoiceCard({
         </span>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        Keep this page open while the preview is prepared.
+        You can reconnect to this page while the voice is being prepared.
       </p>
     </div>
   );
@@ -864,7 +1017,9 @@ export function TeachingVoiceCard({
   return (
     <div className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <label htmlFor="teaching-voice-language" className="text-xs font-medium">Teaching Voice language</label>
+        <label htmlFor="teaching-voice-language" className="text-xs font-medium">
+          Teaching Voice language
+        </label>
         <select
           id="teaching-voice-language"
           value={enrollmentLanguage}
@@ -886,13 +1041,21 @@ export function TeachingVoiceCard({
             </option>
           ))}
           <optgroup label="Existing voices">
-            {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.filter((language) => language !== 'en' && language !== 'hi').map((language) => (
-              <option key={language} value={language}>{CHATTERBOX_LANGUAGE_LABELS[language]}</option>
+            {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.filter(
+              (language) => language !== 'en' && language !== 'hi',
+            ).map((language) => (
+              <option key={language} value={language}>
+                {CHATTERBOX_LANGUAGE_LABELS[language]}
+              </option>
             ))}
           </optgroup>
         </select>
       </div>
-      {error && !open && <p role="alert" className="mb-3 text-xs text-destructive">{error}</p>}
+      {error && !open && (
+        <p role="alert" className="mb-3 text-xs text-destructive">
+          {error}
+        </p>
+      )}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">My Teaching Voice</div>
@@ -922,7 +1085,13 @@ export function TeachingVoiceCard({
               {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use Voice'}
             </Button>
           )}
-          <Button type="button" size="sm" variant="outline" disabled={profileLoading} onClick={() => setOpen((v) => !v)}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={profileLoading}
+            onClick={() => setOpen((v) => !v)}
+          >
             <Volume2 className="size-4" />
             {readyProfile ? 'Manage Voice' : profile ? 'Continue Setup' : 'Create Voice'}
           </Button>
@@ -979,16 +1148,18 @@ export function TeachingVoiceCard({
                   <Check className="size-4" />
                   Use This Voice
                 </Button>
-                {isChatterboxProfile && <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setCustomizeOpen((value) => !value)}
-                  disabled={busy}
-                >
-                  <SlidersHorizontal className="size-4" />
-                  {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
-                </Button>}
+                {isChatterboxProfile && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setCustomizeOpen((value) => !value)}
+                    disabled={busy}
+                  >
+                    <SlidersHorizontal className="size-4" />
+                    {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
+                  </Button>
+                )}
                 <Button
                   type="button"
                   size="sm"
@@ -1044,16 +1215,18 @@ export function TeachingVoiceCard({
                       Generate Preview
                     </Button>
                   ))}
-                {isChatterboxProfile && <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setCustomizeOpen((value) => !value)}
-                  disabled={busy}
-                >
-                  <SlidersHorizontal className="size-4" />
-                  {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
-                </Button>}
+                {isChatterboxProfile && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setCustomizeOpen((value) => !value)}
+                    disabled={busy}
+                  >
+                    <SlidersHorizontal className="size-4" />
+                    {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
+                  </Button>
+                )}
                 <Button
                   type="button"
                   size="sm"
@@ -1131,7 +1304,8 @@ export function TeachingVoiceCard({
                   not rush.
                 </p>
                 <p className="mt-3 max-w-[70ch] text-sm leading-relaxed text-foreground">
-                  {enrollmentParagraph || 'New voice enrollment is available in English, Hindi and Marathi.'}
+                  {enrollmentParagraph ||
+                    'New voice enrollment is available in English, Hindi and Marathi.'}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
                   <span>Quiet room</span>
@@ -1161,7 +1335,13 @@ export function TeachingVoiceCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={!consented || busy || profileLoading || recordingPending || !enrollmentPhrase}
+                      disabled={
+                        !consented ||
+                        busy ||
+                        profileLoading ||
+                        recordingPending ||
+                        !enrollmentPhrase
+                      }
                       onClick={startRecording}
                       aria-label={
                         recording.blob

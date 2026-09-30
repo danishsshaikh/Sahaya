@@ -111,7 +111,8 @@ export async function findCurrentVoiceProfile(
     if (!entry.startsWith('vcp_')) continue;
     const profile = await readVoiceProfile(entry, ownerId).catch(() => null);
     if (
-      profile?.ownerId === ownerId && profile.status !== 'deleted' &&
+      profile?.ownerId === ownerId &&
+      profile.status !== 'deleted' &&
       (!readyOnly || profile.status === 'ready') &&
       (language === undefined ||
         resolveTeachingVoiceLanguage(resolveVoiceProfileLanguageId(profile)) === language)
@@ -121,6 +122,38 @@ export async function findCurrentVoiceProfile(
   }
   profiles.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return profiles[0] ?? null;
+}
+
+export async function findVoiceProfileByEnrollmentAttempt(
+  ownerId: string,
+  attemptId: string,
+): Promise<VoiceProfile | null> {
+  const root = path.join(
+    getVoiceCloningStorageDir(),
+    'users',
+    safeOwnerId(ownerId),
+    'voice-profiles',
+  );
+  let entries: string[];
+  try {
+    entries = await fs.readdir(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!entry.startsWith('vcp_')) continue;
+    const profile = await readVoiceProfile(entry, ownerId).catch(() => null);
+    if (
+      profile?.ownerId === ownerId &&
+      profile.status !== 'deleted' &&
+      profile.enrollmentAttemptId === attemptId
+    ) {
+      return profile;
+    }
+  }
+  return null;
 }
 
 export async function writeReferenceAudio(

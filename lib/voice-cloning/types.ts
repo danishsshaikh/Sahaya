@@ -85,6 +85,7 @@ export interface VoiceProfile {
   languageId?: string;
   generationSettings?: VoiceGenerationSettings;
   replacesProfileId?: string;
+  enrollmentAttemptId?: string;
   profileVersion: number;
   preview?: VoicePreview;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
@@ -152,7 +153,10 @@ export function resolveVoiceProfileProvider(profile: { provider?: string }): str
 }
 
 export class TeachingVoiceError extends Error {
-  constructor(message: string, readonly status = 400) {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
     super(message);
     this.name = 'TeachingVoiceError';
   }

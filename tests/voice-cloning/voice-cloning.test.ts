@@ -2,7 +2,11 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFeatureFlagBoolean } from '@/lib/config/feature-flags';
-import { VOICE_ENROLLMENT_PARAGRAPH, getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
+import {
+  VOICE_ENROLLMENT_PARAGRAPH,
+  getVoiceEnrollmentPhrases,
+  getVoicePreviewText,
+} from '@/lib/voice-cloning/phrases';
 import {
   MAX_RECORDING_DURATION_SECONDS,
   MIN_RECORDING_DURATION_SECONDS,
@@ -31,6 +35,19 @@ import {
 } from '@/lib/voice-cloning/audio-validation';
 
 const repoRoot = process.cwd();
+const nextServerMocks = vi.hoisted(() => ({
+  afterCallbacks: [] as Array<() => Promise<void> | void>,
+}));
+
+vi.mock('next/server', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('next/server')>();
+  return {
+    ...actual,
+    after: (callback: () => Promise<void> | void) => {
+      nextServerMocks.afterCallbacks.push(callback);
+    },
+  };
+});
 
 describe('voice cloning feature flag', () => {
   it('defaults false for unset or non-truthy values', () => {
@@ -133,7 +150,7 @@ describe('explicit cloned voice TTS routing', () => {
   const synthesizeFacultyVoice = vi.fn();
   const generateTTS = vi.fn();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     synthesizeFacultyVoice.mockReset();
     generateTTS.mockReset();
@@ -223,7 +240,7 @@ describe('faculty voice synthesis language resolution', () => {
   const referenceAudioExists = vi.fn();
   const writeVoiceProfile = vi.fn();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     synthesize.mockReset();
     createProfile.mockReset();
@@ -285,12 +302,14 @@ describe('faculty voice synthesis language resolution', () => {
     synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
     const { synthesizeFacultyVoice } = await import('@/lib/voice-cloning/synthesis');
 
-    await expect(synthesizeFacultyVoice({
-      profileId: 'vcp_ready',
-      ownerId: 'local-faculty',
-      text: 'Hello class',
-      language: 'Use clear beginner-friendly wording throughout.',
-    })).rejects.toThrow('unambiguous narration language');
+    await expect(
+      synthesizeFacultyVoice({
+        profileId: 'vcp_ready',
+        ownerId: 'local-faculty',
+        text: 'Hello class',
+        language: 'Use clear beginner-friendly wording throughout.',
+      }),
+    ).rejects.toThrow('unambiguous narration language');
     expect(synthesize).not.toHaveBeenCalled();
   });
 
@@ -601,6 +620,7 @@ describe('voice profile model preview API', () => {
   const writeVoiceProfile = vi.fn();
   const readVoiceProfile = vi.fn();
   const findCurrentVoiceProfile = vi.fn();
+  const findVoiceProfileByEnrollmentAttempt = vi.fn();
   const deleteVoiceProfileAssets = vi.fn();
   const writeReferenceAudio = vi.fn();
   const referenceAudioExists = vi.fn();
@@ -608,7 +628,7 @@ describe('voice profile model preview API', () => {
   const masterGeneratedVoiceAudio = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     createProfile.mockReset();
     deleteProfile.mockReset();
@@ -616,6 +636,7 @@ describe('voice profile model preview API', () => {
     writeVoiceProfile.mockReset();
     readVoiceProfile.mockReset();
     findCurrentVoiceProfile.mockReset();
+    findVoiceProfileByEnrollmentAttempt.mockReset();
     deleteVoiceProfileAssets.mockReset();
     writeReferenceAudio.mockReset();
     referenceAudioExists.mockReset();
@@ -628,6 +649,7 @@ describe('voice profile model preview API', () => {
     generatePreview.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
     writeVoiceProfile.mockResolvedValue(undefined);
     findCurrentVoiceProfile.mockResolvedValue(null);
+    findVoiceProfileByEnrollmentAttempt.mockResolvedValue(null);
     writeReferenceAudio.mockResolvedValue('/private/reference.wav');
     normalizeVoiceEnrollmentRecording.mockResolvedValue({
       referenceAudio: new Uint8Array([9, 9]),
@@ -668,6 +690,7 @@ describe('voice profile model preview API', () => {
       createVoiceProfileId,
       deleteVoiceProfileAssets,
       findCurrentVoiceProfile,
+      findVoiceProfileByEnrollmentAttempt,
       readVoiceProfile,
       referenceAudioExists,
       writeReferenceAudio,
@@ -689,6 +712,9 @@ describe('voice profile model preview API', () => {
         status: 'active',
       })),
     }));
+    const { clearVoiceEnrollmentJobsForTests } = await import('@/lib/server/voice-enrollment-jobs');
+    clearVoiceEnrollmentJobsForTests();
+    nextServerMocks.afterCallbacks.length = 0;
   });
 
   function readyProfile(modelVariant: 'v2' | 'v3' = 'v2'): VoiceProfile {
@@ -715,11 +741,38 @@ describe('voice profile model preview API', () => {
 
   function enrollmentForm(): FormData {
     const data = new FormData();
+    data.set('attemptId', 'attempt-voice-test');
     data.set('consent', 'true');
     data.set('languageId', 'en');
     data.set('phraseId', 'teaching-paragraph');
     data.set('referenceText', VOICE_ENROLLMENT_PARAGRAPH);
     return data;
+  }
+
+  async function runScheduledEnrollment() {
+    expect(nextServerMocks.afterCallbacks).toHaveLength(1);
+    await nextServerMocks.afterCallbacks[0]();
+  }
+
+  async function completedEnrollmentProfile(attemptId = 'attempt-voice-test') {
+    const { GET } = await import('@/app/api/voice-cloning/enrollment/[attemptId]/route');
+    const response = await GET(
+      new Request(`http://localhost/api/voice-cloning/enrollment/${attemptId}`) as never,
+      {
+        params: Promise.resolve({ attemptId }),
+      },
+    );
+    return response.json();
+  }
+
+  function createDeferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
   }
 
   it('creates new English profiles with Qwen and the exact approved transcript', async () => {
@@ -738,7 +791,21 @@ describe('voice profile model preview API', () => {
     );
     const data = await response.json();
 
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(202);
+    expect(data).toMatchObject({
+      success: true,
+      attemptId: 'attempt-voice-test',
+      status: 'queued',
+    });
+    expect(createProfile).not.toHaveBeenCalled();
+
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile();
+    expect(completed).toMatchObject({
+      success: true,
+      attemptId: 'attempt-voice-test',
+      status: 'completed',
+    });
     expect(createVoiceProfileId).toHaveBeenCalledTimes(1);
     expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledTimes(1);
     expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledWith(
@@ -747,19 +814,22 @@ describe('voice profile model preview API', () => {
         fileName: 'voice.webm',
       }),
     );
-    expect(data.profile.provider).toBe('qwen3');
-    expect(data.profile.modelVariant).toBeUndefined();
-    expect(data.profile.languageId).toBe('en');
-    expect(data.profile.generationSettings).toBeUndefined();
-    expect(data.profile.referenceText).toBeUndefined();
-    expect(writeVoiceProfile).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'qwen3', referenceText: VOICE_ENROLLMENT_PARAGRAPH,
-    }));
+    expect(completed.profile.provider).toBe('qwen3');
+    expect(completed.profile.modelVariant).toBeUndefined();
+    expect(completed.profile.languageId).toBe('en');
+    expect(completed.profile.generationSettings).toBeUndefined();
+    expect(completed.profile.referenceText).toBeUndefined();
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'qwen3',
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+      }),
+    );
     expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', 'en', true);
-    expect(data.profile.draftPreview.config).toEqual({
+    expect(completed.profile.draftPreview.config).toEqual({
       languageId: 'en',
     });
-    expect(data.profile.draftPreview.preview.base64).toBe(
+    expect(completed.profile.draftPreview.preview.base64).toBe(
       Buffer.from([1, 2, 9]).toString('base64'),
     );
     expect(createProfile).toHaveBeenCalledWith(
@@ -795,35 +865,64 @@ describe('voice profile model preview API', () => {
     expect(createProfile).not.toHaveBeenCalled();
   });
 
-  it.each(['hi', 'mr'])('enrolls %s with its approved transcript and Indic preview', async (language) => {
-    const { POST } = await import('@/app/api/voice-cloning/profile/route');
-    const form = enrollmentForm();
-    const phrase = getVoiceEnrollmentPhrases(language)[0];
-    form.set('languageId', language);
-    form.set('phraseId', phrase.id);
-    form.set('referenceText', phrase.text);
-    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.webm', { type: 'audio/webm' }));
-    const response = await POST(new Request('http://localhost/api/voice-cloning/profile', {
-      method: 'POST', body: form,
-    }) as never);
-    expect(response.status).toBe(201);
-    expect(writeVoiceProfile).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'indicf5', languageId: language, referenceText: phrase.text,
-    }));
-    expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', language, true);
-    expect(generatePreview).toHaveBeenCalledWith(expect.objectContaining({
-      language, text: getVoicePreviewText(language, 'indicf5'),
-    }));
-  });
+  it.each(['hi', 'mr'])(
+    'enrolls %s with its approved transcript and Indic preview',
+    async (language) => {
+      const { POST } = await import('@/app/api/voice-cloning/profile/route');
+      const form = enrollmentForm();
+      const phrase = getVoiceEnrollmentPhrases(language)[0];
+      form.set('attemptId', `attempt-${language}-voice-test`);
+      form.set('languageId', language);
+      form.set('phraseId', phrase.id);
+      form.set('referenceText', phrase.text);
+      form.set(
+        'recording',
+        new File([new Uint8Array([1, 2])], 'voice.webm', { type: 'audio/webm' }),
+      );
+      const response = await POST(
+        new Request('http://localhost/api/voice-cloning/profile', {
+          method: 'POST',
+          body: form,
+        }) as never,
+      );
+      expect(response.status).toBe(202);
+      await runScheduledEnrollment();
+      const completed = await completedEnrollmentProfile(`attempt-${language}-voice-test`);
+      expect(completed).toMatchObject({
+        success: true,
+        status: 'completed',
+        profile: { provider: 'indicf5', languageId: language },
+      });
+      expect(writeVoiceProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'indicf5',
+          languageId: language,
+          referenceText: phrase.text,
+        }),
+      );
+      expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', language, true);
+      expect(generatePreview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          language,
+          text: getVoicePreviewText(language, 'indicf5'),
+        }),
+      );
+    },
+  );
 
   it('rejects changing a recorded profile language through preview settings', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile());
     const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
-    const response = await PATCH(new Request('http://localhost/api/voice-cloning/profile', {
-      method: 'PATCH', body: JSON.stringify({
-        profileId: 'vcp_ready', action: 'preview-model', languageId: 'hi',
-      }),
-    }) as never);
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'preview-model',
+          languageId: 'hi',
+        }),
+      }) as never,
+    );
     expect(response.status).toBe(400);
     expect(generatePreview).not.toHaveBeenCalled();
     expect(writeVoiceProfile).not.toHaveBeenCalled();
@@ -878,9 +977,16 @@ describe('voice profile model preview API', () => {
     );
     const data = await response.json();
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(202);
     expect(data).toMatchObject({
-      success: false,
+      success: true,
+      status: 'queued',
+    });
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile();
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'failed',
       error: 'The recording is too quiet. Please try again a little closer to your microphone.',
     });
     expect(writeVoiceProfile).not.toHaveBeenCalled();
@@ -906,8 +1012,11 @@ describe('voice profile model preview API', () => {
     );
     const data = await response.json();
 
-    expect(response.status).toBe(201);
-    expect(data.profile.id).toBe('vcp_new');
+    expect(response.status).toBe(202);
+    expect(data).toMatchObject({ success: true, status: 'queued' });
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile();
+    expect(completed.profile.id).toBe('vcp_new');
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'vcp_new',
@@ -920,6 +1029,200 @@ describe('voice profile model preview API', () => {
     );
     expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
     expect(deleteProfile).not.toHaveBeenCalled();
+  });
+
+  it('reuses a running attempt when the client retries after an interrupted response', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const first = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    const second = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(nextServerMocks.afterCallbacks).toHaveLength(1);
+    await runScheduledEnrollment();
+    expect(createProfile).toHaveBeenCalledTimes(1);
+    expect(
+      writeVoiceProfile.mock.calls.filter(([profile]) => profile.status === 'preview-ready'),
+    ).toHaveLength(1);
+  });
+
+  it('starts a long enrollment without keeping the HTTP request open', async () => {
+    const deferred = createDeferred<{ providerReferenceId: string }>();
+    createProfile.mockImplementationOnce(({ profileId }) =>
+      deferred.promise.then(() => ({ providerReferenceId: profileId })),
+    );
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    const body = await response.json();
+    expect(response.status).toBe(202);
+    expect(body).toMatchObject({
+      success: true,
+      status: 'queued',
+      attemptId: 'attempt-voice-test',
+    });
+
+    const run = nextServerMocks.afterCallbacks[0]();
+    await Promise.resolve();
+    const running = await completedEnrollmentProfile();
+    expect(running).toMatchObject({ success: true, status: 'running' });
+
+    deferred.resolve({ providerReferenceId: 'vcp_new' });
+    await run;
+    const completed = await completedEnrollmentProfile();
+    expect(completed).toMatchObject({ success: true, status: 'completed' });
+  });
+
+  it('returns a completed profile when the client reconnects after completion', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    await runScheduledEnrollment();
+
+    const completed = await completedEnrollmentProfile();
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: { id: 'vcp_new', status: 'preview-ready' },
+    });
+    expect(createProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces genuine provider failures as failed enrollment status', async () => {
+    createProfile.mockRejectedValueOnce(new Error('provider unreachable'));
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+
+    const failed = await completedEnrollmentProfile();
+    expect(failed).toMatchObject({
+      success: true,
+      status: 'failed',
+      error: 'provider unreachable',
+    });
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'vcp_new', status: 'failed' }),
+    );
+  });
+
+  it('recovers a profile created before the client receives the response', async () => {
+    const completedProfile: VoiceProfile = {
+      ...readyProfile('v3'),
+      id: 'vcp_completed',
+      provider: 'qwen3',
+      modelVariant: undefined,
+      generationSettings: undefined,
+      enrollmentAttemptId: 'attempt-voice-test',
+      status: 'preview-ready',
+      draftPreview: {
+        config: { languageId: 'en' },
+        preview: { format: 'wav', base64: 'ready', createdAt: '2026-08-12T00:00:00.000Z' },
+      },
+    };
+    findVoiceProfileByEnrollmentAttempt.mockResolvedValue(completedProfile);
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const formData = enrollmentForm();
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: { id: 'vcp_completed', status: 'preview-ready' },
+    });
+    expect(nextServerMocks.afterCallbacks).toHaveLength(0);
+    expect(createProfile).not.toHaveBeenCalled();
+  });
+
+  it('delete then re-enroll starts an independent new attempt', async () => {
+    readVoiceProfile.mockResolvedValueOnce(readyProfile('v3'));
+    const { DELETE, POST } = await import('@/app/api/voice-cloning/profile/route');
+    const deleteUrl = new URL('http://localhost/api/voice-cloning/profile?profileId=vcp_ready');
+    const deleted = await DELETE(
+      Object.assign(new Request(deleteUrl), { nextUrl: deleteUrl }) as never,
+    );
+    expect(deleted.status).toBe(200);
+
+    const formData = enrollmentForm();
+    formData.set('attemptId', 'attempt-after-delete');
+    formData.set(
+      'recording',
+      new File([new Uint8Array([1, 2, 3, 4])], 'voice.webm', { type: 'audio/webm' }),
+    );
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: formData,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-after-delete');
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: { id: 'vcp_new' },
+    });
+    expect(deleteProfile).toHaveBeenCalledWith({ providerReferenceId: 'vcp_ready' });
   });
 
   it('previews V2 and V3 from the same persisted reference without re-recording', async () => {
