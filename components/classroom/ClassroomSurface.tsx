@@ -93,6 +93,7 @@ export function ClassroomSurface({
 }) {
   const { loadFromStorage } = useStageStore();
   const loadedClassroomId = useStageStore((s) => s.stage?.id ?? null);
+  const sceneCount = useStageStore((s) => s.scenes.length);
   const { t } = useI18n();
   // The retry loop below reads the message after async gaps, so it must see
   // the CURRENT translation (a locale switch may have happened since mount).
@@ -127,6 +128,7 @@ export function ClassroomSurface({
   const generationStartedRef = useRef(false);
   const sceneStartedAtRef = useRef<Record<number, number>>({});
   const completedSceneDurationsRef = useRef<number[]>([]);
+  const renderEnabledLoggedRef = useRef(false);
 
   const updateGenerationProgress = useCallback(
     (phase: LessonGenerationPhase, outline: SceneOutline) => {
@@ -176,12 +178,33 @@ export function ClassroomSurface({
         sceneIndex: index,
         elapsedMs: Date.now() - startedAt,
       });
+      if (index === 1) {
+        console.info('[SceneProgressTrace]', {
+          event: 'first-scene-ready',
+          stageId: classroomId,
+          sceneIndex: index,
+        });
+      }
     },
     onComplete: () => {
       setGenerationProgress(null);
       console.info('[SceneProgressTrace]', {
         event: 'generation-ui-complete',
         stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'progress-overlay-hidden',
+        stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'generation-complete',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'classroom-still-mounted-after-completion',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
       });
       log.info('[Classroom] All scenes generated');
     },
@@ -261,6 +284,7 @@ export function ClassroomSurface({
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
+    renderEnabledLoggedRef.current = false;
     sceneStartedAtRef.current = {};
     completedSceneDurationsRef.current = [];
 
@@ -346,6 +370,16 @@ export function ClassroomSurface({
       stop();
     };
   }, [classroomId, loadClassroom, stop, variant]);
+
+  useEffect(() => {
+    if (renderEnabledLoggedRef.current || loading || error || sceneCount === 0) return;
+    renderEnabledLoggedRef.current = true;
+    console.info('[SceneProgressTrace]', {
+      event: 'classroom-render-enabled',
+      stageId: classroomId,
+      sceneCount,
+    });
+  }, [classroomId, error, loading, sceneCount]);
 
   // Narration written before this application stored media server-side is a
   // derived key that only this browser can resolve. Both classroom surfaces
@@ -469,8 +503,8 @@ export function ClassroomSurface({
                 // axes explicitly: `h-full` alone leaves the width to shrink
                 // to content, and the classroom chrome (which layers with
                 // `absolute inset-0`) then has nothing to fill.
-                'flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden'
-              : 'h-screen flex flex-col overflow-hidden'
+                'relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden'
+              : 'relative h-screen flex flex-col overflow-hidden'
           }
         >
           {loading || (variant === 'pane' && !error && loadedClassroomId !== classroomId) ? (
@@ -526,13 +560,13 @@ export function ClassroomSurface({
               </div>
             </div>
           ) : (
-            <div className="relative min-h-0 flex-1">
+            <>
               <Stage
                 classroomId={classroomId}
                 onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
               />
               {generationProgress ? (
-                <div className="pointer-events-none absolute left-1/2 top-4 z-30 w-full -translate-x-1/2 px-4">
+                <div className="pointer-events-none absolute right-4 top-4 z-30 w-full max-w-xs">
                   <LessonGenerationProgress
                     sceneIndex={generationProgress.sceneIndex}
                     totalScenes={generationProgress.totalScenes}
@@ -542,7 +576,7 @@ export function ClassroomSurface({
                   />
                 </div>
               ) : null}
-            </div>
+            </>
           )}
         </div>
       </MediaStageProvider>

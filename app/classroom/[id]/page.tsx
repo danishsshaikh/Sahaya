@@ -58,6 +58,7 @@ export default function ClassroomDetailPage() {
   const classroomId = params?.id as string;
 
   const { loadFromStorage } = useStageStore();
+  const sceneCount = useStageStore((s) => s.scenes.length);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +78,7 @@ export default function ClassroomDetailPage() {
   const generationStartedRef = useRef(false);
   const sceneStartedAtRef = useRef<Record<number, number>>({});
   const completedSceneDurationsRef = useRef<number[]>([]);
+  const renderEnabledLoggedRef = useRef(false);
 
   const updateGenerationProgress = useCallback(
     (phase: LessonGenerationPhase, outline: SceneOutline) => {
@@ -126,12 +128,33 @@ export default function ClassroomDetailPage() {
         sceneIndex: index,
         elapsedMs: Date.now() - startedAt,
       });
+      if (index === 1) {
+        console.info('[SceneProgressTrace]', {
+          event: 'first-scene-ready',
+          stageId: classroomId,
+          sceneIndex: index,
+        });
+      }
     },
     onComplete: () => {
       setGenerationProgress(null);
       console.info('[SceneProgressTrace]', {
         event: 'generation-ui-complete',
         stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'progress-overlay-hidden',
+        stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'generation-complete',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'classroom-still-mounted-after-completion',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
       });
       log.info('[Classroom] All scenes generated');
     },
@@ -246,6 +269,7 @@ export default function ClassroomDetailPage() {
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
+    renderEnabledLoggedRef.current = false;
     sceneStartedAtRef.current = {};
     completedSceneDurationsRef.current = [];
 
@@ -273,6 +297,16 @@ export default function ClassroomDetailPage() {
       stop();
     };
   }, [classroomId, loadClassroom, stop]);
+
+  useEffect(() => {
+    if (renderEnabledLoggedRef.current || loading || error || sceneCount === 0) return;
+    renderEnabledLoggedRef.current = true;
+    console.info('[SceneProgressTrace]', {
+      event: 'classroom-render-enabled',
+      stageId: classroomId,
+      sceneCount,
+    });
+  }, [classroomId, error, loading, sceneCount]);
 
   // Narration written before this application stored media server-side is a
   // derived key that only this browser can resolve. The owner's browser still
@@ -369,7 +403,7 @@ export default function ClassroomDetailPage() {
   return (
     <ThemeProvider>
       <MediaStageProvider value={classroomId}>
-        <div className="h-screen flex flex-col overflow-hidden">
+        <div className="relative h-screen flex flex-col overflow-hidden">
           {loading ? (
             <div className="flex-1 flex items-center justify-center bg-gray-50 dark:bg-gray-900">
               <div className="text-center text-muted-foreground">
@@ -393,10 +427,10 @@ export default function ClassroomDetailPage() {
               </div>
             </div>
           ) : (
-            <div className="relative min-h-0 flex-1">
+            <>
               <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
               {generationProgress ? (
-                <div className="pointer-events-none absolute left-1/2 top-4 z-30 w-full -translate-x-1/2 px-4">
+                <div className="pointer-events-none absolute right-4 top-4 z-30 w-full max-w-xs">
                   <LessonGenerationProgress
                     sceneIndex={generationProgress.sceneIndex}
                     totalScenes={generationProgress.totalScenes}
@@ -406,7 +440,7 @@ export default function ClassroomDetailPage() {
                   />
                 </div>
               ) : null}
-            </div>
+            </>
           )}
         </div>
       </MediaStageProvider>
