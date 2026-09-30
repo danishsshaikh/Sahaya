@@ -52,6 +52,44 @@ const log = createLogger('SceneGenerator');
 const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
 
+type SceneLifecycleTraceEvent =
+  | 'run-start'
+  | 'run-finished'
+  | 'reentrant-run-skipped'
+  | 'consume-prefetched-content'
+  | 'dispatch'
+  | 'completion'
+  | 'failure'
+  | 'abort'
+  | 'already-in-flight';
+
+type ActiveSceneGenerationRun = {
+  runId: number;
+  stageId: string;
+  epoch: number;
+};
+
+let activeSceneGenerationRun: ActiveSceneGenerationRun | null = null;
+let nextSceneGenerationRunId = 1;
+
+function traceSceneLifecycle(
+  event: SceneLifecycleTraceEvent,
+  outline?: Pick<SceneOutline, 'id' | 'order' | 'title'>,
+  extra?: Record<string, unknown>,
+) {
+  log.info('[SceneLifecycleTrace]', {
+    event,
+    ...(outline
+      ? {
+          outlineId: outline.id,
+          order: outline.order,
+          title: outline.title,
+        }
+      : {}),
+    ...extra,
+  });
+}
+
 type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed';
 
 interface SceneContentResult {
@@ -870,20 +908,80 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const generateRemaining = useCallback(
     async (params: GenerationParams) => {
       lastParamsRef.current = params;
-      if (generatingRef.current) return;
+      const state = store.getState();
+      const { outlines, scenes, stage } = state;
+      const startEpoch = state.generationEpoch;
+      if (!stage || outlines.length === 0) {
+        return;
+      }
+
+      const activeRun = activeSceneGenerationRun;
+      if (
+        generatingRef.current ||
+        (activeRun && activeRun.stageId === stage.id && activeRun.epoch === startEpoch)
+      ) {
+        traceSceneLifecycle('reentrant-run-skipped', undefined, {
+          stageId: stage.id,
+          epoch: startEpoch,
+          activeRunId: activeRun?.runId,
+          localGenerating: generatingRef.current,
+        });
+        return;
+      }
+
+      // Determine pending outlines
+      const pending = pendingOutlinesForGeneration({
+        outlines,
+        scenes,
+        generatingOutlines: state.generatingOutlines,
+      });
+
+      if (pending.length === 0) {
+        if (state.generatingOutlines.length > 0) {
+          for (const outline of state.generatingOutlines) {
+            traceSceneLifecycle('already-in-flight', outline, {
+              stageId: stage.id,
+              epoch: startEpoch,
+            });
+          }
+          return;
+        }
+        store.getState().setGenerationStatus('completed');
+        store.getState().setGeneratingOutlines([]);
+        store.getState().setGenerationComplete(true);
+        options.onComplete?.();
+        return;
+      }
+
+      // #572: opt-in parallel content fetch. Concurrency is server-configured
+      // (PARALLEL_SCENE_CONCURRENCY), default 0 = off, so out-of-box behaviour is
+      // unchanged.
+      const parallelConcurrency = Math.max(
+        0,
+        // Belt-and-suspenders: the value is already clamped server-side and again
+        // in the settings store; re-clamp here so a stale/garbage store value can
+        // never spawn an unbounded fetch fan-out.
+        Math.floor(useSettingsStore.getState().parallelSceneConcurrency ?? 0),
+      );
+      const useParallelContent = parallelConcurrency > 1 && pending.length > 1;
+      const runId = nextSceneGenerationRunId++;
+      activeSceneGenerationRun = {
+        runId,
+        stageId: stage.id,
+        epoch: startEpoch,
+      };
       generatingRef.current = true;
       abortRef.current = false;
       const dispatchedOutlineIds = new Set<string>();
       const traceLifecycle = (
-        event: 'dispatch' | 'completion' | 'failure' | 'abort' | 'already-in-flight',
-        outline: Pick<SceneOutline, 'id' | 'order' | 'title'>,
+        event: SceneLifecycleTraceEvent,
+        outline?: Pick<SceneOutline, 'id' | 'order' | 'title'>,
         extra?: Record<string, unknown>,
       ) => {
-        log.info('[SceneLifecycleTrace]', {
-          event,
-          outlineId: outline.id,
-          order: outline.order,
-          title: outline.title,
+        traceSceneLifecycle(event, outline, {
+          stageId: stage.id,
+          epoch: startEpoch,
+          runId,
           ...extra,
         });
       };
@@ -909,42 +1007,17 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         traceLifecycle(reason, outline);
       };
 
+      traceLifecycle('run-start', undefined, {
+        pendingCount: pending.length,
+        parallelContent: useParallelContent,
+        parallelConcurrency: useParallelContent ? parallelConcurrency : 0,
+      });
+
       // Create a new AbortController for this generation run
       fetchAbortRef.current = new AbortController();
       const signal = fetchAbortRef.current.signal;
 
-      const state = store.getState();
-      const { outlines, scenes, stage } = state;
-      const startEpoch = state.generationEpoch;
-      if (!stage || outlines.length === 0) {
-        generatingRef.current = false;
-        return;
-      }
-
       store.getState().setGenerationStatus('generating');
-
-      // Determine pending outlines
-      const pending = pendingOutlinesForGeneration({
-        outlines,
-        scenes,
-        generatingOutlines: state.generatingOutlines,
-      });
-
-      if (pending.length === 0) {
-        if (state.generatingOutlines.length > 0) {
-          for (const outline of state.generatingOutlines) {
-            traceLifecycle('already-in-flight', outline);
-          }
-          generatingRef.current = false;
-          return;
-        }
-        store.getState().setGenerationStatus('completed');
-        store.getState().setGeneratingOutlines([]);
-        store.getState().setGenerationComplete(true);
-        options.onComplete?.();
-        generatingRef.current = false;
-        return;
-      }
 
       // Launch media generation in parallel — does not block content/action generation.
       // Under server-backed persistence, abort whatever the ref held first:
@@ -970,18 +1043,6 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           .filter((a): a is SpeechAction => a.type === 'speech')
           .map((a) => a.text);
       }
-
-      // #572: opt-in parallel content fetch. Concurrency is server-configured
-      // (PARALLEL_SCENE_CONCURRENCY), default 0 = off, so out-of-box behaviour is
-      // unchanged.
-      const parallelConcurrency = Math.max(
-        0,
-        // Belt-and-suspenders: the value is already clamped server-side and again
-        // in the settings store; re-clamp here so a stale/garbage store value can
-        // never spawn an unbounded fetch fan-out.
-        Math.floor(useSettingsStore.getState().parallelSceneConcurrency ?? 0),
-      );
-      const useParallelContent = parallelConcurrency > 1 && pending.length > 1;
 
       // Pipelined generation loop (#572). When parallelism is on, scene *content*
       // fetches are kicked off up front with bounded concurrency (lazyBoundedMap)
@@ -1060,6 +1121,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           // fetch it now (serial).
           let contentResult: SceneContentResult;
           if (contentPromises) {
+            traceLifecycle('consume-prefetched-content', outline);
             contentResult = (await contentPromises.get(outline.id)) ?? {
               success: false,
               error: 'Content generation failed',
@@ -1221,6 +1283,12 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           for (const outlineId of dispatchedOutlineIds) {
             removeGeneratingOutline(outlineId, 'abort');
           }
+        }
+        traceLifecycle('run-finished', undefined, {
+          status: store.getState().generationStatus,
+        });
+        if (activeSceneGenerationRun?.runId === runId) {
+          activeSceneGenerationRun = null;
         }
         generatingRef.current = false;
         fetchAbortRef.current = null;
