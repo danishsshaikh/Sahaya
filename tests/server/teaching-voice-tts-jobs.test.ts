@@ -82,6 +82,7 @@ describe('Teaching Voice async TTS routes', () => {
     await expect(response.json()).resolves.toMatchObject({
       success: true,
       async: true,
+      teachingVoiceProvider: 'qwen3',
       jobId,
       status: 'queued',
       queuePosition: 2,
@@ -110,7 +111,11 @@ describe('Teaching Voice async TTS routes', () => {
     mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
     const response = await POST(postRequest());
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ success: true, format: 'wav' });
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      format: 'wav',
+      teachingVoiceProvider: 'indicf5',
+    });
     expect(mocks.enqueue).not.toHaveBeenCalled();
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
   });

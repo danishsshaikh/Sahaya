@@ -95,7 +95,7 @@ const stageState = {
   getCurrentScene: () =>
     stageState.scenes.find((candidate) => candidate.id === stageState.currentSceneId),
   scenes: [scene, secondScene] as Array<typeof scene | typeof interactiveScene>,
-  currentSceneId: scene.id,
+  currentSceneId: scene.id as string | null,
   setCurrentSceneId: vi.fn((sceneId: string) => {
     stageState.currentSceneId = sceneId;
   }),
@@ -557,6 +557,22 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
         collapsed: false,
       }),
     );
+  });
+
+  it('passes the first generated scene into the mounted presentation canvas immediately', async () => {
+    stageState.scenes = [];
+    stageState.currentSceneId = null;
+    await renderOwner();
+    expect(mocks.canvasProps?.currentScene).toBeUndefined();
+
+    stageState.scenes = [scene];
+    stageState.currentSceneId = scene.id;
+    await rerenderOwner();
+
+    expect(mocks.canvasProps).toMatchObject({
+      currentScene: scene,
+      currentSceneIndex: 0,
+    });
   });
 
   it('skips disabled scenes in Sahaya playback navigation', async () => {

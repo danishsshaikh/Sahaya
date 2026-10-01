@@ -591,11 +591,16 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     // for them. Applying them here, ahead of the structure mark below, is what
     // keeps the placeholder out of the scene's very first save.
     reconcileSceneMediaAllocations(scene);
-    const scenes = [...get().scenes, migrateScene(scene)];
+    const previousScenes = get().scenes;
+    const scenes = [...previousScenes, migrateScene(scene)];
     // Remove the matching outline from generatingOutlines (match by order)
     const generatingOutlines = get().generatingOutlines.filter((o) => o.order !== scene.order);
-    // Auto-switch from pending page to the newly generated scene
-    const shouldSwitch = get().currentSceneId === PENDING_SCENE_ID;
+    // Show the first materialized scene immediately. After that first automatic
+    // selection, a real user-selected scene always wins as later scenes arrive.
+    const previousCurrentSceneId = get().currentSceneId;
+    const shouldSwitch =
+      previousCurrentSceneId === PENDING_SCENE_ID ||
+      (previousCurrentSceneId === null && previousScenes.length === 0);
     set({
       scenes,
       generatingOutlines,

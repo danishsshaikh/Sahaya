@@ -65,7 +65,7 @@ describe('isCurrentSceneEditable', () => {
     ).toBe(false);
   });
 
-  test('returns false while outline generation is still in flight', () => {
+  test('keeps a materialized current scene editable while later outlines generate', () => {
     expect(
       isCurrentSceneEditable({
         currentSceneId: 'scene-1',
@@ -73,7 +73,7 @@ describe('isCurrentSceneEditable', () => {
         generatingOutlineCount: 2,
         hasCurrentScene: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test('returns false when current scene id does not resolve to a scene', () => {

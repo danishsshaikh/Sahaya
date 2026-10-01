@@ -198,6 +198,19 @@ export function SceneSidebar({
                       {scene.title}
                     </span>
                   </div>
+                  {(scene.narrationStatus === 'failed' ||
+                    scene.narrationStatus === 'needs-retry') && (
+                    <span
+                      className="shrink-0 text-amber-600 dark:text-amber-400"
+                      title={
+                        scene.narrationError ||
+                        'Narration is unavailable. Open Edit to retry the affected lines.'
+                      }
+                      aria-label="Narration unavailable"
+                    >
+                      <AlertCircle className="h-3.5 w-3.5" />
+                    </span>
+                  )}
                 </div>
 
                 {/* Thumbnail */}

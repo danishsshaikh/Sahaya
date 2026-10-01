@@ -142,9 +142,9 @@ export function Stage({
       hasCurrentScene: !!currentScene,
     });
 
-  // Hosted generation is page-granular: once the current page materialises,
-  // the human may edit it while the agent writes later scene IDs. Keep the
-  // stricter whole-deck generation gate above for standalone Pro mode.
+  // Generation is page-granular: once the current page materialises, the
+  // human may edit it while the agent writes later scene IDs. The hosted gate
+  // adds deployment and ownership checks to that same readiness rule.
   const currentStageMatchesHost = !classroomId || stage?.id === classroomId;
   const hostedSceneEditable = isHostedSceneEditable({
     editorEnabled,
@@ -217,7 +217,7 @@ export function Stage({
   }, []);
 
   // Auto-exit edit mode when the current scene becomes uneditable
-  // (pending generation, no scenes, currently generating).
+  // (pending placeholder, no scenes, or no resolved current scene).
   useEffect(() => {
     if (mode === 'edit' && !isEditable) {
       setMode('playback');

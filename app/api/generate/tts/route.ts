@@ -1,8 +1,8 @@
 /**
  * Single TTS Generation API
  *
- * Generates TTS audio for a single text string and returns base64-encoded audio.
- * Called by the client in parallel for each speech action after a scene is generated.
+ * Generates TTS audio for a single text string. Qwen Teaching Voice returns an
+ * asynchronous job; other providers retain their existing audio response.
  *
  * POST /api/generate/tts
  */
@@ -107,6 +107,7 @@ export async function POST(req: NextRequest) {
           return apiSuccess(
             {
               async: true,
+              teachingVoiceProvider: providerId,
               audioId,
               jobId: job.id,
               status: job.status,
@@ -129,7 +130,7 @@ export async function POST(req: NextRequest) {
           language: ttsLanguageCode,
         });
         const base64 = Buffer.from(audio).toString('base64');
-        return apiSuccess({ audioId, base64, format });
+        return apiSuccess({ audioId, base64, format, teachingVoiceProvider: providerId });
       } catch (error) {
         const message =
           error instanceof TeachingVoiceError

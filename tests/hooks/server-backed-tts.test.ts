@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => ({
   listAgents: vi.fn(),
   toastWarning: vi.fn(),
   serverBacked: vi.fn(),
+  requireSessionUser: vi.fn(),
+  resolveFacultyVoiceProviderId: vi.fn(),
+  synthesizeFacultyVoice: vi.fn(),
 }));
 
 vi.mock('@/lib/utils/model-config', () => ({
@@ -72,6 +75,15 @@ vi.mock('@/lib/orchestration/registry/store', () => ({
 
 vi.mock('sonner', () => ({ toast: { warning: mocks.toastWarning } }));
 
+vi.mock('@/lib/auth/server', () => ({ requireSessionUser: mocks.requireSessionUser }));
+
+vi.mock('@/lib/server/ssrf-guard', () => ({ validateUrlForSSRF: vi.fn() }));
+
+vi.mock('@/lib/voice-cloning/synthesis', () => ({
+  resolveFacultyVoiceProviderId: mocks.resolveFacultyVoiceProviderId,
+  synthesizeFacultyVoice: mocks.synthesizeFacultyVoice,
+}));
+
 const mockFetch = vi.fn() as Mock;
 vi.stubGlobal('fetch', mockFetch);
 
@@ -89,11 +101,27 @@ import {
   markAssetStorageFull,
   setAssetStorageFullStoreForTests,
 } from '@/lib/media/asset-storage-full';
+import { clearResourceJobQueueForTests } from '@/lib/server/resource-job-queue';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsyncWork(turns = 16): Promise<void> {
+  for (let index = 0; index < turns; index++) await Promise.resolve();
+}
 
 describe('server-backed narration storage', () => {
   afterEach(() => vi.useRealTimers());
 
   beforeEach(() => {
+    clearResourceJobQueueForTests();
     mockFetch.mockReset();
     mocks.audioPut.mockReset().mockResolvedValue(undefined);
     mocks.audioDelete.mockReset().mockResolvedValue(undefined);
@@ -118,6 +146,11 @@ describe('server-backed narration storage', () => {
     mocks.resolveAgentVoiceOptions.mockResolvedValue({});
     mocks.listAgents.mockReturnValue([]);
     mocks.toastWarning.mockReset();
+    mocks.requireSessionUser.mockReset().mockImplementation(async (request: Request) => ({
+      id: request.headers.get('x-test-user') || 'faculty-a',
+    }));
+    mocks.resolveFacultyVoiceProviderId.mockReset().mockResolvedValue('qwen3');
+    mocks.synthesizeFacultyVoice.mockReset();
   });
 
   it('returns the pool-allocated id rather than the request key', async () => {
@@ -180,6 +213,7 @@ describe('server-backed narration storage', () => {
         ...ttsResponse(),
         json: async () => ({
           success: true,
+          teachingVoiceProvider: 'indicf5',
           format: 'wav',
           base64: btoa(JSON.parse(init.body).text),
         }),
@@ -231,6 +265,7 @@ describe('server-backed narration storage', () => {
         json: async () => ({
           success: true,
           async: true,
+          teachingVoiceProvider: 'qwen3',
           jobId: 'rq_test',
           status: 'queued',
           queuePosition: 2,
@@ -297,6 +332,213 @@ describe('server-backed narration storage', () => {
       ]);
       expect(queueStates).toEqual(['queued', 'running', null]);
       expect(await (mocks.poolPut.mock.calls[0][0] as Blob).text()).toBe('queued-audio');
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
+  it('runs the production scene narration caller through queued Qwen jobs for two faculty', async () => {
+    vi.useFakeTimers();
+    const [{ generateAndStoreTTS }, { POST }, { GET: getJob }, { GET: getAudio }] =
+      await Promise.all([
+        import('@/lib/hooks/use-scene-generator'),
+        import('@/app/api/generate/tts/route'),
+        import('@/app/api/generate/tts/jobs/[jobId]/route'),
+        import('@/app/api/generate/tts/jobs/[jobId]/audio/route'),
+      ]);
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    const gates = {
+      'faculty-a': deferred<{ audio: Uint8Array; format: string }>(),
+      'faculty-b': deferred<{ audio: Uint8Array; format: string }>(),
+    };
+    const ownerByJob = new Map<string, keyof typeof gates>();
+    const postAdmissions: Array<{
+      owner: keyof typeof gates;
+      status: number;
+      jobId: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const requestedPaths: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    mocks.synthesizeFacultyVoice.mockImplementation(
+      async ({ ownerId }: { ownerId: keyof typeof gates }) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        try {
+          return await gates[ownerId].promise;
+        } finally {
+          active -= 1;
+        }
+      },
+    );
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+
+    mockFetch.mockImplementation(async (input, init) => {
+      const rawUrl = typeof input === 'string' ? input : input.url;
+      const url = new URL(rawUrl, 'http://localhost');
+      requestedPaths.push(url.pathname);
+      if (url.pathname === '/api/generate/tts') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const owner = String(body.audioId).includes('faculty-b') ? 'faculty-b' : 'faculty-a';
+        const response = await POST(
+          new Request(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-test-user': owner },
+            body: JSON.stringify(body),
+          }) as never,
+        );
+        const payload = (await response.json()) as { jobId: string };
+        ownerByJob.set(payload.jobId, owner);
+        postAdmissions.push({ owner, status: response.status, jobId: payload.jobId, body });
+        return new Response(JSON.stringify(payload), {
+          status: response.status,
+          headers: response.headers,
+        });
+      }
+
+      const match = url.pathname.match(/^\/api\/generate\/tts\/jobs\/([^/]+)(\/audio)?$/);
+      if (!match) throw new Error(`Unexpected fetch: ${url.pathname}`);
+      const jobId = decodeURIComponent(match[1]);
+      const owner = ownerByJob.get(jobId);
+      if (!owner) throw new Error(`Missing owner for job ${jobId}`);
+      const request = new Request(url, { headers: { 'x-test-user': owner } }) as never;
+      const context = { params: Promise.resolve({ jobId }) };
+      return match[2] ? getAudio(request, context) : getJob(request, context);
+    });
+
+    try {
+      const first = generateAndStoreTTS(
+        'tts_faculty-a',
+        'First queued narration',
+        'English',
+        undefined,
+        undefined,
+        undefined,
+        'stage-a',
+        undefined,
+        0,
+        'scene-a',
+        undefined,
+        'outline-a',
+      );
+      const second = generateAndStoreTTS(
+        'tts_faculty-b',
+        'Second queued narration',
+        'English',
+        undefined,
+        undefined,
+        undefined,
+        'stage-b',
+        undefined,
+        0,
+        'scene-b',
+        undefined,
+        'outline-b',
+      );
+
+      await flushAsyncWork();
+      expect(postAdmissions.map(({ status }) => status)).toEqual([202, 202]);
+      expect(postAdmissions[1]).toMatchObject({ owner: 'faculty-b' });
+      expect(mocks.synthesizeFacultyVoice).toHaveBeenCalledTimes(1);
+      expect(maxActive).toBe(1);
+
+      const duplicate = await POST(
+        new Request('http://localhost/api/generate/tts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-test-user': 'faculty-b' },
+          body: JSON.stringify(postAdmissions[1].body),
+        }) as never,
+      );
+      expect(duplicate.status).toBe(202);
+      await expect(duplicate.json()).resolves.toMatchObject({
+        async: true,
+        teachingVoiceProvider: 'qwen3',
+        jobId: postAdmissions[1].jobId,
+        status: 'queued',
+      });
+      expect(mocks.synthesizeFacultyVoice).toHaveBeenCalledTimes(1);
+
+      gates['faculty-a'].resolve({
+        audio: new TextEncoder().encode('faculty-a-audio'),
+        format: 'wav',
+      });
+      await flushAsyncWork();
+      expect(mocks.synthesizeFacultyVoice).toHaveBeenCalledTimes(2);
+      expect(maxActive).toBe(1);
+      await vi.advanceTimersByTimeAsync(1500);
+      await expect(first).resolves.toBe('ast_audio_allocated');
+
+      gates['faculty-b'].resolve({
+        audio: new TextEncoder().encode('faculty-b-audio'),
+        format: 'wav',
+      });
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(1500);
+      await expect(second).resolves.toBe('ast_audio_allocated');
+
+      expect(maxActive).toBe(1);
+      expect(mocks.synthesizeFacultyVoice).toHaveBeenCalledTimes(2);
+      expect(requestedPaths.filter((path) => path.endsWith('/audio'))).toHaveLength(2);
+      expect(
+        requestedPaths.filter((path) => /\/jobs\/[^/]+$/.test(path)).length,
+      ).toBeGreaterThanOrEqual(2);
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+      clearResourceJobQueueForTests();
+    }
+  });
+
+  it('rejects a synchronous Qwen response instead of silently accepting legacy audio JSON', async () => {
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mockFetch.mockResolvedValueOnce({
+      ...ttsResponse(),
+      json: async () => ({
+        success: true,
+        teachingVoiceProvider: 'qwen3',
+        base64: btoa('legacy-audio'),
+        format: 'wav',
+      }),
+    });
+
+    try {
+      await expect(generateAndStoreTTS('tts_qwen_legacy', 'Narration')).rejects.toThrow(
+        'Qwen Teaching Voice must use the asynchronous synthesis job API.',
+      );
+      expect(mocks.poolPut).not.toHaveBeenCalled();
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
+  it('rejects Teaching Voice responses that omit the provider contract', async () => {
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mockFetch.mockResolvedValueOnce(ttsResponse());
+
+    try {
+      await expect(generateAndStoreTTS('tts_stale_route', 'Narration')).rejects.toThrow(
+        'Teaching Voice response is missing provider metadata.',
+      );
+      expect(mocks.poolPut).not.toHaveBeenCalled();
     } finally {
       useStageStore.setState({ stage: previousStage });
     }

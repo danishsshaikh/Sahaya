@@ -122,6 +122,10 @@ export type AppScene = DslScene<Action, SceneContent> & {
    * discarding the last successful audio.
    */
   sync?: NarrationSyncMetadata;
+  /** Narration is independent from visual scene readiness. */
+  narrationStatus?: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'needs-retry';
+  /** Safe user-facing failure context. Never contains provider payloads or narration text. */
+  narrationError?: string;
 };
 export type Scene = AppScene;
 

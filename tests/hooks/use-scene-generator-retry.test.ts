@@ -447,6 +447,7 @@ describe('browser scene generation retry wrappers', () => {
     mockFetch.mockResolvedValue(
       jsonResponse(200, {
         success: true,
+        teachingVoiceProvider: 'indicf5',
         base64: btoa('audio-data'),
         format: 'wav',
       }),
