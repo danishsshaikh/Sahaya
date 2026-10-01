@@ -1,7 +1,12 @@
 'use client';
 
-import { lessonGenerationPhaseLabel, lessonGenerationPercent } from '@/lib/generation/progress';
-import type { LessonGenerationPhase } from '@/lib/generation/progress';
+import {
+  lessonGenerationPhaseLabel,
+  lessonGenerationPercent,
+  teachingVoiceQueueEtaLabel,
+  teachingVoiceQueuePositionLabel,
+} from '@/lib/generation/progress';
+import type { LessonGenerationPhase, TeachingVoiceQueueProgress } from '@/lib/generation/progress';
 import type { SceneOutline } from '@/lib/types/generation';
 
 export function LessonGenerationProgress({
@@ -10,14 +15,19 @@ export function LessonGenerationProgress({
   phase,
   sceneType,
   etaLabel,
+  teachingVoiceQueue,
 }: {
   readonly sceneIndex: number;
   readonly totalScenes: number;
   readonly phase: LessonGenerationPhase;
   readonly sceneType?: SceneOutline['type'];
   readonly etaLabel?: string;
+  readonly teachingVoiceQueue?: TeachingVoiceQueueProgress | null;
 }) {
   const percent = lessonGenerationPercent({ sceneIndex, totalScenes, phase });
+  const queuePositionLabel = teachingVoiceQueue
+    ? teachingVoiceQueuePositionLabel(teachingVoiceQueue)
+    : null;
 
   return (
     <div
@@ -37,10 +47,24 @@ export function LessonGenerationProgress({
           style={{ width: `${percent}%` }}
         />
       </div>
-      <p className="text-sm font-medium text-foreground">
-        {lessonGenerationPhaseLabel(phase, sceneType)}
-      </p>
-      {etaLabel ? <p className="text-xs text-muted-foreground">{etaLabel}</p> : null}
+      {teachingVoiceQueue?.status === 'queued' ? (
+        <div className="space-y-1">
+          <p className="text-sm font-medium text-foreground">Teaching Voice queued</p>
+          {queuePositionLabel ? (
+            <p className="text-xs text-muted-foreground">{queuePositionLabel}</p>
+          ) : null}
+          <p className="text-xs text-muted-foreground">
+            {teachingVoiceQueueEtaLabel(teachingVoiceQueue.estimatedWaitMs)}
+          </p>
+        </div>
+      ) : (
+        <>
+          <p className="text-sm font-medium text-foreground">
+            {lessonGenerationPhaseLabel(phase, sceneType)}
+          </p>
+          {etaLabel ? <p className="text-xs text-muted-foreground">{etaLabel}</p> : null}
+        </>
+      )}
     </div>
   );
 }

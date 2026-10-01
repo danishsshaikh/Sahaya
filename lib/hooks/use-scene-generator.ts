@@ -47,6 +47,7 @@ import {
   withGenerationRetry,
   type GenerationRetryOptions,
 } from '@openmaic/generation';
+import type { TeachingVoiceQueueProgress } from '@/lib/generation/progress';
 
 const log = createLogger('SceneGenerator');
 const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
@@ -403,8 +404,90 @@ interface TTSApiResponse {
   success?: boolean;
   base64?: string;
   format?: string;
+  audioBytes?: Uint8Array;
   error?: string;
   details?: string;
+  async?: boolean;
+  jobId?: string;
+  status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  queuePosition?: number | null;
+  jobsAhead?: number | null;
+  estimatedWaitMs?: number | null;
+  statusUrl?: string;
+  audioUrl?: string;
+}
+
+const TEACHING_VOICE_JOB_POLL_INTERVAL_MS = 1500;
+
+function waitForTeachingVoicePoll(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, TEACHING_VOICE_JOB_POLL_INTERVAL_MS);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function resolveTeachingVoiceJob(
+  initial: TTSApiResponse,
+  signal: AbortSignal | undefined,
+  onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
+): Promise<TTSApiResponse> {
+  if (!initial.async || !initial.jobId || !initial.statusUrl) return initial;
+  const statusUrl = initial.statusUrl;
+  let current = initial;
+  try {
+    while (current.status === 'queued' || current.status === 'running') {
+      onQueueStatus?.({
+        status: current.status,
+        queuePosition: current.queuePosition ?? null,
+        jobsAhead: current.jobsAhead ?? null,
+        estimatedWaitMs: current.estimatedWaitMs ?? null,
+      });
+      await waitForTeachingVoicePoll(signal);
+      const response = await fetch(statusUrl, { signal });
+      const next = (await readJsonResponse(response)) as TTSApiResponse;
+      if (!response.ok) throw createHttpError(response, next, 'Teaching Voice job status failed');
+      current = { ...next, statusUrl };
+    }
+
+    if (current.status === 'failed' || current.status === 'cancelled') {
+      throw new Error(
+        current.error || 'Teaching Voice generation failed. No alternate voice was used.',
+      );
+    }
+    if (current.status !== 'completed' || !current.audioUrl) {
+      throw new Error('Teaching Voice job returned an invalid completion state.');
+    }
+
+    const audioResponse = await fetch(current.audioUrl, { signal });
+    if (!audioResponse.ok) {
+      const error = (await readJsonResponse(audioResponse)) as TTSApiResponse;
+      throw createHttpError(audioResponse, error, 'Teaching Voice audio retrieval failed');
+    }
+    const contentType = audioResponse.headers.get('content-type') || 'audio/wav';
+    return {
+      success: true,
+      format: contentType.split('/')[1]?.split(';')[0] || 'wav',
+      audioBytes: new Uint8Array(await audioResponse.arrayBuffer()),
+    };
+  } catch (error) {
+    if (isAbortError(error) && current.status === 'queued') {
+      void fetch(statusUrl, { method: 'DELETE', keepalive: true }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    onQueueStatus?.(null);
+  }
 }
 
 // A dead narrator voice is retried at most once against a DIFFERENT voice (the
@@ -432,6 +515,8 @@ export async function generateAndStoreTTS(
   // QWEN_VC_VOICE_NOT_FOUND retry so a chain of dead voices can never loop
   // /api/generate/tts beyond a single fallback hop.
   fallbackHops = 0,
+  sceneId?: string,
+  onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
@@ -541,6 +626,8 @@ export async function generateAndStoreTTS(
             ttsProviderOptions: providerOptions,
             teacherVoiceProfileId,
             ttsLanguageCode,
+            stageId,
+            sceneId,
           }),
           signal,
         });
@@ -549,11 +636,14 @@ export async function generateAndStoreTTS(
         if (!response.ok) {
           throw createHttpError(response, data, 'TTS request failed');
         }
-        return data;
+        return resolveTeachingVoiceJob(data, signal, onQueueStatus);
       },
       {
         label: `tts "${requestId}"`,
-        shouldRetryResult: (result) => !result.success || !result.base64 || !result.format,
+        shouldRetryResult: (result: TTSApiResponse) =>
+          !result.success ||
+          (((!result.base64 && !result.audioBytes) || !result.format) &&
+            !(result.async && result.jobId)),
         ...retryOptions,
         ...(teacherVoiceProfileId ? { maxRetries: 0 } : {}),
         signal,
@@ -597,6 +687,8 @@ export async function generateAndStoreTTS(
             stageId,
             undefined,
             fallbackHops + 1,
+            sceneId,
+            onQueueStatus,
           );
         }
         // Bound == global (pinned narrator): a retry would hit the same missing
@@ -615,6 +707,8 @@ export async function generateAndStoreTTS(
               stageId,
               fallbackVoice,
               fallbackHops + 1,
+              sceneId,
+              onQueueStatus,
             );
           }
         }
@@ -622,7 +716,7 @@ export async function generateAndStoreTTS(
     }
     throw error;
   }
-  if (!data.success || !data.base64 || !data.format) {
+  if (!data.success || (!data.base64 && !data.audioBytes) || !data.format) {
     const err = new Error(
       data.details || data.error || 'TTS request failed: invalid response payload',
     );
@@ -630,12 +724,17 @@ export async function generateAndStoreTTS(
     throw err;
   }
 
-  const binary = atob(data.base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  const blob = new Blob([bytes], { type: `audio/${data.format}` });
+  const bytes =
+    data.audioBytes ??
+    (() => {
+      const binary = atob(data.base64!);
+      const decoded = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) decoded[i] = binary.charCodeAt(i);
+      return decoded;
+    })();
+  const blobBytes = new Uint8Array(bytes.byteLength);
+  blobBytes.set(bytes);
+  const blob = new Blob([blobBytes], { type: `audio/${data.format}` });
   // Measure duration once at store time so video export (#854) can map this
   // clip onto a timeline without re-decoding. null → leave undefined; the audio
   // still persists and plays.
@@ -751,6 +850,7 @@ export async function generateTTSForScene(
   language?: string,
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<TTSApiResponse>,
+  onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
@@ -781,6 +881,10 @@ export async function generateTTSForScene(
         retryOptions,
         undefined,
         scene.stageId,
+        undefined,
+        0,
+        scene.id,
+        onQueueStatus,
       );
       if (assetId) {
         action.audioId = assetId;
@@ -846,6 +950,10 @@ export interface UseSceneGeneratorOptions {
   onSceneGenerated?: (scene: Scene, index: number) => void;
   onSceneFailed?: (outline: SceneOutline, error: string) => void;
   onPhaseChange?: (phase: SceneGenerationPhase, outline: SceneOutline) => void;
+  onNarrationQueueChange?: (
+    progress: TeachingVoiceQueueProgress | null,
+    outline: SceneOutline,
+  ) => void;
   onComplete?: () => void;
 }
 
@@ -1182,6 +1290,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 scene,
                 params.languageDirective || params.stageInfo.language,
                 signal,
+                undefined,
+                (progress) => options.onNarrationQueueChange?.(progress, outline),
               );
               if (!ttsResult.success) {
                 traceSceneGeneration('narration-item-failed', {

@@ -3,6 +3,8 @@ import {
   lessonGenerationEtaLabel,
   lessonGenerationPercent,
   lessonGenerationPhaseLabel,
+  teachingVoiceQueueEtaLabel,
+  teachingVoiceQueuePositionLabel,
 } from '@/lib/generation/progress';
 
 describe('lesson generation progress display helpers', () => {
@@ -49,5 +51,29 @@ describe('lesson generation progress display helpers', () => {
         totalScenes: 5,
       }),
     ).toMatch(/remaining$/);
+  });
+
+  it('renders real queue position without claiming a faculty count', () => {
+    expect(
+      teachingVoiceQueuePositionLabel({
+        status: 'queued',
+        queuePosition: 1,
+        jobsAhead: 0,
+        estimatedWaitMs: null,
+      }),
+    ).toBe("You're next");
+    expect(
+      teachingVoiceQueuePositionLabel({
+        status: 'queued',
+        queuePosition: 3,
+        jobsAhead: 2,
+        estimatedWaitMs: null,
+      }),
+    ).toBe('2 requests ahead');
+  });
+
+  it('uses a coarse server ETA and never fabricates one when absent', () => {
+    expect(teachingVoiceQueueEtaLabel(null)).toBe('Estimating wait...');
+    expect(teachingVoiceQueueEtaLabel(150_000)).toBe('About 3 min wait');
   });
 });

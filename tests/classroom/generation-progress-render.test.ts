@@ -22,6 +22,8 @@ describe('classroom generation progress render contract', () => {
       expect(text).toContain("event: 'classroom-render-enabled'");
       expect(text).toContain("event: 'progress-overlay-hidden'");
       expect(text).toContain("event: 'classroom-still-mounted-after-completion'");
+      expect(text).toContain('onNarrationQueueChange: updateTeachingVoiceQueue');
+      expect(text).toContain('teachingVoiceQueue={generationProgress.teachingVoiceQueue}');
 
       const stageIndex = text.indexOf('<Stage');
       const progressIndex = text.indexOf('<LessonGenerationProgress');

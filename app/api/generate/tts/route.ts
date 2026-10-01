@@ -29,8 +29,12 @@ import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
-import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
+import {
+  resolveFacultyVoiceProviderId,
+  synthesizeFacultyVoice,
+} from '@/lib/voice-cloning/synthesis';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
+import { enqueueQwenTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
 import { isQwenCloneVoice } from '@/lib/audio/constants';
@@ -61,6 +65,9 @@ export async function POST(req: NextRequest) {
       teacherVoiceProfileId?: string;
       ttsLanguageCode?: string;
       language?: string;
+      stageId?: string;
+      outlineId?: string;
+      sceneId?: string;
     };
     ttsProviderId = body.ttsProviderId;
     ttsVoice = typeof body.ttsVoice === 'string' ? body.ttsVoice.trim() : undefined;
@@ -85,6 +92,36 @@ export async function POST(req: NextRequest) {
 
     if (teacherVoiceProfileId) {
       try {
+        const providerId = await resolveFacultyVoiceProviderId(teacherVoiceProfileId, user.id);
+        if (providerId === 'qwen3') {
+          const { job } = enqueueQwenTeachingVoiceJob({
+            ownerId: user.id,
+            profileId: teacherVoiceProfileId,
+            text,
+            language: ttsLanguageCode,
+            audioId,
+            stageId: typeof body.stageId === 'string' ? body.stageId : undefined,
+            outlineId: typeof body.outlineId === 'string' ? body.outlineId : undefined,
+            sceneId: typeof body.sceneId === 'string' ? body.sceneId : undefined,
+          });
+          return apiSuccess(
+            {
+              async: true,
+              audioId,
+              jobId: job.id,
+              status: job.status,
+              queuePosition: job.queuePosition,
+              jobsAhead: job.jobsAhead,
+              queueDepth: job.queueDepth,
+              estimatedWaitMs: job.estimatedWaitMs,
+              statusUrl: `/api/generate/tts/jobs/${encodeURIComponent(job.id)}`,
+              ...(job.status === 'completed'
+                ? { audioUrl: `/api/generate/tts/jobs/${encodeURIComponent(job.id)}/audio` }
+                : {}),
+            },
+            job.status === 'completed' ? 200 : 202,
+          );
+        }
         const { audio, format } = await synthesizeFacultyVoice({
           profileId: teacherVoiceProfileId,
           ownerId: user.id,
@@ -94,9 +131,10 @@ export async function POST(req: NextRequest) {
         const base64 = Buffer.from(audio).toString('base64');
         return apiSuccess({ audioId, base64, format });
       } catch (error) {
-        const message = error instanceof TeachingVoiceError
-          ? error.message
-          : 'Teaching Voice generation failed. No alternate voice was used.';
+        const message =
+          error instanceof TeachingVoiceError
+            ? error.message
+            : 'Teaching Voice generation failed. No alternate voice was used.';
         log.warn('Teaching Voice generation failed', { message });
         return apiError(
           'GENERATION_FAILED',

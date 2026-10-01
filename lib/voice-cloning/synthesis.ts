@@ -20,15 +20,16 @@ import {
 
 const log = createLogger('VoiceCloningSynthesis');
 
-const TEACHING_VOICE_SYNTHESIS_QUEUE_PROVIDERS = new Set(['qwen3']);
 const DEFAULT_BUSY_RETRY_BASE_MS = 3000;
 const DEFAULT_BUSY_RETRY_MAX_RETRIES = 4;
 const MAX_BUSY_RETRY_DELAY_MS = 30000;
 
-const synthesisQueueTails = new Map<string, Promise<void>>();
-
 function traceTeachingVoiceSynthesis(event: string, extra: Record<string, unknown>) {
   log.info('[TeachingVoiceSynthesis]', { event, ...extra });
+}
+
+function traceTeachingVoiceQueue(event: string, extra: Record<string, unknown>) {
+  log.info('[TeachingVoiceQueue]', { event, ...extra });
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
@@ -74,35 +75,6 @@ function isProviderTimeoutError(error: unknown): boolean {
   );
 }
 
-async function runSerializedSynthesis<T>(
-  queueKey: string,
-  metadata: Record<string, unknown>,
-  operation: (waitMs: number) => Promise<T>,
-): Promise<T> {
-  const previous = synthesisQueueTails.get(queueKey) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.catch(() => undefined).then(() => gate);
-  synthesisQueueTails.set(queueKey, tail);
-  const queuedAt = Date.now();
-
-  traceTeachingVoiceSynthesis('queued', { queueKey, ...metadata });
-  await previous.catch(() => undefined);
-  const waitMs = Date.now() - queuedAt;
-  traceTeachingVoiceSynthesis('queue-wait-complete', { queueKey, waitMs, ...metadata });
-
-  try {
-    return await operation(waitMs);
-  } finally {
-    release();
-    if (synthesisQueueTails.get(queueKey) === tail) {
-      synthesisQueueTails.delete(queueKey);
-    }
-  }
-}
-
 async function synthesizeWithBusyRetry<T>(
   metadata: Record<string, unknown>,
   operation: (attempt: number) => Promise<T>,
@@ -113,6 +85,9 @@ async function synthesizeWithBusyRetry<T>(
   while (true) {
     const attemptStartedAt = Date.now();
     traceTeachingVoiceSynthesis('attempt-start', { attempt, ...metadata });
+    if (metadata.queueJobId) {
+      traceTeachingVoiceQueue('provider-attempt', { attempt, ...metadata });
+    }
     try {
       const result = await operation(attempt);
       traceTeachingVoiceSynthesis('completed', {
@@ -131,12 +106,28 @@ async function synthesizeWithBusyRetry<T>(
           retryDelayMs,
           ...metadata,
         });
+        if (metadata.queueJobId) {
+          traceTeachingVoiceQueue('provider-busy', {
+            attempt,
+            durationMs,
+            retryDelayMs,
+            ...metadata,
+          });
+        }
         traceTeachingVoiceSynthesis('retry-scheduled', {
           attempt,
           nextAttempt: attempt + 1,
           retryDelayMs,
           ...metadata,
         });
+        if (metadata.queueJobId) {
+          traceTeachingVoiceQueue('provider-retry', {
+            attempt,
+            nextAttempt: attempt + 1,
+            retryDelayMs,
+            ...metadata,
+          });
+        }
         await sleep(retryDelayMs);
         attempt += 1;
         continue;
@@ -153,8 +144,18 @@ async function synthesizeWithBusyRetry<T>(
   }
 }
 
-export function clearTeachingVoiceSynthesisQueueForTests() {
-  synthesisQueueTails.clear();
+export async function resolveFacultyVoiceProviderId(
+  profileId: string,
+  ownerId: string,
+): Promise<string> {
+  if (!isVoiceCloningServerEnabled()) {
+    throw new TeachingVoiceError('Voice cloning is disabled.', 403);
+  }
+  const profile = await readVoiceProfile(profileId, ownerId);
+  if (!profile || profile.ownerId !== ownerId || profile.status === 'deleted') {
+    throw new TeachingVoiceError('Voice profile not found.', 404);
+  }
+  return resolveVoiceProfileProvider(profile);
 }
 
 export async function synthesizeFacultyVoice(input: {
@@ -162,6 +163,7 @@ export async function synthesizeFacultyVoice(input: {
   ownerId: string;
   text: string;
   language?: string;
+  queueJobId?: string;
 }): Promise<{ audio: Uint8Array; format: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
@@ -192,6 +194,7 @@ export async function synthesizeFacultyVoice(input: {
       provider: providerId,
       textLength: input.text.length,
       language,
+      ...(input.queueJobId ? { queueJobId: input.queueJobId } : {}),
     };
     const run = () =>
       synthesizeWithBusyRetry(metadata, () =>
@@ -202,9 +205,7 @@ export async function synthesizeFacultyVoice(input: {
           ...settings,
         }),
       );
-    const result = TEACHING_VOICE_SYNTHESIS_QUEUE_PROVIDERS.has(providerId)
-      ? await runSerializedSynthesis(`synthesis:${providerId}`, metadata, run)
-      : await run();
+    const result = await run();
     const masteringStartedAt = Date.now();
     traceTeachingVoiceSynthesis('mastering-start', {
       ...metadata,

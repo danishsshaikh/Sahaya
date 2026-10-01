@@ -2,6 +2,13 @@ import type { SceneOutline } from '@/lib/types/generation';
 
 export type LessonGenerationPhase = 'outline' | 'content' | 'actions' | 'narration' | 'finalizing';
 
+export interface TeachingVoiceQueueProgress {
+  status: 'queued' | 'running';
+  queuePosition: number | null;
+  jobsAhead: number | null;
+  estimatedWaitMs: number | null;
+}
+
 const PHASE_PROGRESS: Record<LessonGenerationPhase, number> = {
   outline: 0.05,
   content: 0.3,
@@ -58,4 +65,23 @@ export function lessonGenerationEtaLabel(input: {
   if (minutes <= 1) return 'About 1 min remaining';
   if (minutes <= 3) return `About ${minutes} min remaining`;
   return `About ${Math.max(2, minutes - 1)}-${minutes + 1} min remaining`;
+}
+
+export function teachingVoiceQueuePositionLabel(
+  progress: TeachingVoiceQueueProgress,
+): string | null {
+  if (progress.status !== 'queued') return null;
+  if (progress.queuePosition === 1 || progress.jobsAhead === 0) return "You're next";
+  if (progress.jobsAhead && progress.jobsAhead > 0) {
+    return `${progress.jobsAhead} ${progress.jobsAhead === 1 ? 'request' : 'requests'} ahead`;
+  }
+  return 'Waiting for Teaching Voice...';
+}
+
+export function teachingVoiceQueueEtaLabel(estimatedWaitMs: number | null): string {
+  if (estimatedWaitMs === null || !Number.isFinite(estimatedWaitMs)) return 'Estimating wait...';
+  const minutes = Math.max(1, Math.round(estimatedWaitMs / 60000));
+  if (minutes <= 1) return 'About 1 min wait';
+  if (minutes <= 3) return `About ${minutes} min wait`;
+  return `About ${Math.max(2, minutes - 1)}-${minutes + 1} min wait`;
 }

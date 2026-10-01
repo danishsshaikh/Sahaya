@@ -37,7 +37,7 @@ import {
   runClassroomLoad,
 } from '@/lib/classroom/load-classroom';
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
-import type { LessonGenerationPhase } from '@/lib/generation/progress';
+import type { LessonGenerationPhase, TeachingVoiceQueueProgress } from '@/lib/generation/progress';
 import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
 import type { SceneOutline } from '@/lib/types/generation';
 
@@ -51,6 +51,7 @@ type ClassroomGenerationProgress = {
   sceneStartedAt: number;
   completedSceneDurationsMs: number[];
   etaLabel: string;
+  teachingVoiceQueue: TeachingVoiceQueueProgress | null;
 };
 
 export default function ClassroomDetailPage() {
@@ -99,6 +100,7 @@ export default function ClassroomDetailPage() {
           sceneIndex: outline.order,
           totalScenes,
         }),
+        teachingVoiceQueue: null,
       });
       console.info('[SceneProgressTrace]', {
         event: 'phase-changed',
@@ -113,8 +115,30 @@ export default function ClassroomDetailPage() {
     [classroomId],
   );
 
+  const updateTeachingVoiceQueue = useCallback(
+    (progress: TeachingVoiceQueueProgress | null, outline: SceneOutline) => {
+      setGenerationProgress((current) =>
+        current?.sceneIndex === outline.order
+          ? { ...current, teachingVoiceQueue: progress }
+          : current,
+      );
+      console.info('[SceneProgressTrace]', {
+        event: progress ? 'teaching-voice-queue-changed' : 'teaching-voice-queue-cleared',
+        stageId: classroomId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        status: progress?.status,
+        queuePosition: progress?.queuePosition,
+        jobsAhead: progress?.jobsAhead,
+        estimatedWaitMs: progress?.estimatedWaitMs,
+      });
+    },
+    [classroomId],
+  );
+
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
     onPhaseChange: updateGenerationProgress,
+    onNarrationQueueChange: updateTeachingVoiceQueue,
     onSceneGenerated: (_scene, index) => {
       const startedAt = sceneStartedAtRef.current[index] ?? Date.now();
       completedSceneDurationsRef.current = [
@@ -437,6 +461,7 @@ export default function ClassroomDetailPage() {
                     phase={generationProgress.phase}
                     sceneType={generationProgress.sceneType}
                     etaLabel={generationProgress.etaLabel}
+                    teachingVoiceQueue={generationProgress.teachingVoiceQueue}
                   />
                 </div>
               ) : null}

@@ -7,7 +7,7 @@
  * returned, so a caller can never stamp an action with narration that was not
  * stored.
  */
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getCurrentModelConfig: vi.fn(),
@@ -91,6 +91,8 @@ import {
 } from '@/lib/media/asset-storage-full';
 
 describe('server-backed narration storage', () => {
+  afterEach(() => vi.useRealTimers());
+
   beforeEach(() => {
     mockFetch.mockReset();
     mocks.audioPut.mockReset().mockResolvedValue(undefined);
@@ -205,6 +207,96 @@ describe('server-backed narration storage', () => {
         })),
       );
       expect(mocks.resolveAgentVoiceOptions).not.toHaveBeenCalled();
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
+  it('polls an asynchronous Teaching Voice job and stores its completed audio', async () => {
+    vi.useFakeTimers();
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    const queueStates: Array<string | null> = [];
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 202,
+        statusText: 'Accepted',
+        json: async () => ({
+          success: true,
+          async: true,
+          jobId: 'rq_test',
+          status: 'queued',
+          queuePosition: 2,
+          jobsAhead: 1,
+          estimatedWaitMs: null,
+          statusUrl: '/api/generate/tts/jobs/rq_test',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          success: true,
+          async: true,
+          jobId: 'rq_test',
+          status: 'running',
+          queuePosition: null,
+          jobsAhead: null,
+          estimatedWaitMs: null,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          success: true,
+          async: true,
+          jobId: 'rq_test',
+          status: 'completed',
+          audioUrl: '/api/generate/tts/jobs/rq_test/audio',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'audio/wav' }),
+        arrayBuffer: async () => new TextEncoder().encode('queued-audio').buffer,
+      });
+
+    try {
+      const pending = generateAndStoreTTS(
+        'tts_s1_action-1',
+        'Queued narration',
+        'English',
+        undefined,
+        undefined,
+        undefined,
+        'stage-test',
+        undefined,
+        0,
+        'scene-test',
+        (progress) => queueStates.push(progress?.status ?? null),
+      );
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(pending).resolves.toBe('ast_audio_allocated');
+      expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+        '/api/generate/tts',
+        '/api/generate/tts/jobs/rq_test',
+        '/api/generate/tts/jobs/rq_test',
+        '/api/generate/tts/jobs/rq_test/audio',
+      ]);
+      expect(queueStates).toEqual(['queued', 'running', null]);
+      expect(await (mocks.poolPut.mock.calls[0][0] as Blob).text()).toBe('queued-audio');
     } finally {
       useStageStore.setState({ stage: previousStage });
     }

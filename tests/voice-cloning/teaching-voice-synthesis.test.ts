@@ -4,10 +4,7 @@ import {
   TeachingVoiceProviderOperationError,
   VoiceProviderProfileNotFoundError,
 } from '@/lib/voice-cloning/types';
-import {
-  clearTeachingVoiceSynthesisQueueForTests,
-  synthesizeFacultyVoice,
-} from '@/lib/voice-cloning/synthesis';
+import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
@@ -32,7 +29,6 @@ let profile: VoiceProfile;
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
-  clearTeachingVoiceSynthesisQueueForTests();
   mocks.synthesize.mockReset();
   mocks.register.mockReset();
   profile = {
@@ -140,38 +136,6 @@ describe('profile-specific synthesis and recovery', () => {
     await synthesizeFacultyVoice(request);
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
     expect(mocks.synthesize).toHaveBeenCalledWith(expect.objectContaining({ modelVariant: 'v2' }));
-  });
-
-  it('serializes close Qwen synthesis requests instead of calling the provider concurrently', async () => {
-    const first = deferred<{ audio: Uint8Array; format: string }>();
-    const second = deferred<{ audio: Uint8Array; format: string }>();
-    let active = 0;
-    let maxActive = 0;
-    mocks.synthesize.mockImplementation(async () => {
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      try {
-        return mocks.synthesize.mock.calls.length === 1
-          ? await first.promise
-          : await second.promise;
-      } finally {
-        active -= 1;
-      }
-    });
-
-    const firstRequest = synthesizeFacultyVoice(request);
-    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(1));
-    const secondRequest = synthesizeFacultyVoice(request);
-    await Promise.resolve();
-
-    expect(mocks.synthesize).toHaveBeenCalledTimes(1);
-    first.resolve({ audio: new Uint8Array([1]), format: 'wav' });
-    await firstRequest;
-    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(2));
-    second.resolve({ audio: new Uint8Array([2]), format: 'wav' });
-
-    await expect(secondRequest).resolves.toMatchObject({ format: 'wav' });
-    expect(maxActive).toBe(1);
   });
 
   it('retries a temporary Qwen provider-busy response and then succeeds', async () => {
