@@ -73,6 +73,12 @@ import {
   getSlideElementTypeLabel,
 } from '@/components/canvas/slide-element-pick-overlay';
 import { shouldClearDraftElementReference } from '@/components/chat/element-reference-receipt';
+import {
+  findNarrationCueIndex,
+  resolveNarrationCues,
+  type ActiveNarrationHighlight,
+  type NarrationCue,
+} from '@/lib/playback/narration-cues';
 
 type DraftElementReference = {
   reference: ElementReference;
@@ -197,6 +203,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const [playbackCompleted, setPlaybackCompleted] = useState(false); // Distinguishes "never played" idle from "finished" idle
     const [lectureSpeech, setLectureSpeech] = useState<string | null>(null); // From PlaybackEngine (lecture)
     const [currentPlaybackActionIndex, setCurrentPlaybackActionIndex] = useState<number | null>(0);
+    const [narrationHighlight, setNarrationHighlight] = useState<ActiveNarrationHighlight | null>(
+      null,
+    );
     const [liveSpeech, setLiveSpeech] = useState<string | null>(null); // From buffer (discussion/QA)
     const [speechProgress, setSpeechProgress] = useState<number | null>(null); // StreamBuffer reveal progress (0–1)
     const [discussionTrigger, setDiscussionTrigger] = useState<TriggerEvent | null>(null);
@@ -295,6 +304,15 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     const engineRef = useRef<PlaybackEngine | null>(null);
     const audioPlayerRef = useRef(createAudioPlayer());
+    const activeNarrationRef = useRef<{
+      sceneId: string;
+      actionIndex: number;
+      actionId: string;
+      text: string;
+      durationMs: number;
+      cues: NarrationCue[];
+      cueIndex: number;
+    } | null>(null);
     const chatAreaRef = useRef<ChatAreaRef>(null);
     const lectureSessionIdRef = useRef<string | null>(null);
     const lectureActionCounterRef = useRef(0);
@@ -460,6 +478,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         setShowEndFlash(false);
         setActiveBubbleId(null);
         setDiscussionTrigger(null);
+        activeNarrationRef.current = null;
+        setNarrationHighlight(null);
       },
       [resetLiveState, updateCurrentPlaybackActionIndex],
     );
@@ -818,6 +838,25 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
           onSpeechStart: (text) => {
             setLectureSpeech(text);
+            const actionIndex = currentPlaybackActionIndexRef.current;
+            const action = actionIndex === null ? undefined : currentScene.actions?.[actionIndex];
+            activeNarrationRef.current =
+              typeof actionIndex === 'number' &&
+              action?.type === 'speech' &&
+              action.text === text &&
+              !!action.audioId &&
+              !action.audioInvalidated
+                ? {
+                    sceneId: currentScene.id,
+                    actionIndex,
+                    actionId: action.id,
+                    text,
+                    durationMs: 0,
+                    cues: [],
+                    cueIndex: -1,
+                  }
+                : null;
+            setNarrationHighlight(null);
             // Add to lecture session with incrementing index for dedup
             // Chat area pacing is handled by the StreamBuffer (onTextReveal)
             if (lectureSessionIdRef.current) {
@@ -838,6 +877,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             // onSpeechStart replaces it or the scene transitions.
             // Clearing here causes fallback to idleText (first sentence).
             setActiveBubbleId(null);
+            activeNarrationRef.current = null;
+            setNarrationHighlight(null);
           },
           onEffectFire: (effect: Effect) => {
             // Add to lecture session with incrementing index
@@ -997,6 +1038,49 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps -- Only re-run when scene changes, functions are stable refs
     }, [currentScene, currentSceneEnabled]);
+
+    useEffect(() => {
+      return audioPlayerRef.current.subscribePlayback((progress) => {
+        const active = activeNarrationRef.current;
+        if (!active || !progress || progress.ended) {
+          if (progress?.ended) activeNarrationRef.current = null;
+          if (active?.cueIndex !== -1 || progress?.ended) {
+            if (active) active.cueIndex = -1;
+            setNarrationHighlight(null);
+          }
+          return;
+        }
+        if (progress.durationMs <= 0) return;
+        if (active.durationMs !== progress.durationMs) {
+          active.durationMs = progress.durationMs;
+          active.cues = resolveNarrationCues({
+            text: active.text,
+            durationMs: progress.durationMs,
+          });
+        }
+        const cueIndex = findNarrationCueIndex(active.cues, progress.currentTimeMs);
+        if (cueIndex === active.cueIndex) return;
+        active.cueIndex = cueIndex;
+        const cue = active.cues[cueIndex];
+        if (!cue) {
+          setNarrationHighlight(null);
+          return;
+        }
+        setNarrationHighlight((current) =>
+          current?.actionId === active.actionId &&
+          current.cue.startOffset === cue.startOffset &&
+          current.cue.endOffset === cue.endOffset
+            ? current
+            : {
+                sceneId: active.sceneId,
+                actionIndex: active.actionIndex,
+                actionId: active.actionId,
+                text: active.text,
+                cue,
+              },
+        );
+      });
+    }, []);
 
     // Cleanup on unmount
     useEffect(() => {
@@ -1921,6 +2005,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             onActiveBubble={(id) => setActiveBubbleId(id)}
             currentSceneId={currentSceneId}
             currentActionIndex={currentPlaybackActionIndex}
+            narrationHighlight={narrationHighlight}
             canJumpToAction={canJumpToAction}
             onJumpToAction={(sceneId, actionIndex) => {
               void handleJumpToAction(sceneId, actionIndex);

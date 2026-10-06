@@ -1,0 +1,311 @@
+// @vitest-environment jsdom
+
+import { act, createElement, useEffect } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SceneOutline } from '@/lib/types/generation';
+import type { Scene } from '@/lib/types/stage';
+
+const mocks = vi.hoisted(() => ({
+  stageState: null as unknown as ReturnType<typeof makeStageState>,
+  settings: {
+    imageProviderId: '',
+    imageProvidersConfig: {},
+    imageGenerationEnabled: false,
+    videoProviderId: '',
+    videoProvidersConfig: {},
+    videoGenerationEnabled: false,
+    ttsEnabled: true,
+    ttsProviderId: 'server-tts',
+    ttsProvidersConfig: { 'server-tts': { apiKey: 'key', modelId: 'model' } },
+    ttsVoice: 'voice',
+    ttsSpeed: 1,
+    parallelSceneConcurrency: 0,
+  },
+  mediaGeneration: vi.fn().mockResolvedValue(undefined),
+  audioPut: vi.fn().mockResolvedValue(undefined),
+  audioDelete: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/lib/store/stage', () => ({
+  useStageStore: { getState: () => mocks.stageState, subscribe: () => () => undefined },
+}));
+vi.mock('@/lib/store/settings', () => ({
+  useSettingsStore: { getState: () => mocks.settings },
+}));
+vi.mock('@/lib/utils/model-config', () => ({ getCurrentModelConfig: () => ({}) }));
+vi.mock('@/lib/utils/database', () => ({
+  db: { audioFiles: { put: mocks.audioPut, delete: mocks.audioDelete } },
+}));
+vi.mock('@/lib/media/media-orchestrator', () => ({
+  generateMediaForOutlines: mocks.mediaGeneration,
+}));
+vi.mock('@/lib/media/asset-pool', () => ({ putAsset: vi.fn() }));
+vi.mock('@/lib/persistence/media-persistence', () => ({
+  isServerBackedMediaPersistence: () => false,
+}));
+vi.mock('@/lib/classroom/generation-permission', () => ({ mayGenerateForStage: () => true }));
+vi.mock('@/lib/audio/provider-enablement', () => ({ isTTSProviderEnabled: () => true }));
+vi.mock('@/lib/audio/agent-voice', () => ({
+  pickNarratorAgent: () => undefined,
+  resolveAgentVoiceOptions: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('@/lib/audio/voice-resolver', () => ({
+  getEnabledProvidersWithVoices: () => [],
+  resolveDeterministicFallbackVoice: () => null,
+  resolveNarratorVoiceBinding: () => ({ providerId: 'server-tts', voiceId: 'voice' }),
+}));
+vi.mock('@/lib/audio/constants', () => ({ resolveTTSModelForVoice: () => 'model' }));
+vi.mock('@/lib/orchestration/registry/store', () => ({
+  useAgentRegistry: { getState: () => ({ listAgents: () => [] }) },
+}));
+vi.mock('@/lib/audio/unavailable-voice-bindings', () => ({
+  isVoiceBindingUnavailable: () => false,
+  markVoiceBindingNoticeShown: () => false,
+  markVoiceBindingUnavailable: vi.fn(),
+  voiceBindingKey: () => 'voice',
+}));
+vi.mock('@/lib/voice-cloning/language', () => ({ resolveTeachingVoiceLanguage: () => 'en' }));
+vi.mock('@/lib/audio/audio-duration', () => ({ measureAudioDuration: () => undefined }));
+vi.mock('@/lib/i18n', () => ({ getClientTranslation: (key: string) => key }));
+vi.mock('sonner', () => ({ toast: { warning: vi.fn() } }));
+
+const outlines: SceneOutline[] = [1, 2, 3].map((order) => ({
+  id: `outline-${order}`,
+  type: 'slide',
+  title: `Slide ${order}`,
+  description: `Scene ${order}`,
+  keyPoints: [`Point ${order}`],
+  order,
+}));
+
+function makeStageState() {
+  const state = {
+    stage: {
+      id: 'stage-1',
+      name: 'Decoupled lesson',
+      createdAt: 1,
+      updatedAt: 1,
+      teacherVoiceProfileId: 'profile-1',
+    },
+    outlines: [...outlines],
+    scenes: [] as Scene[],
+    currentSceneId: null as string | null,
+    generatingOutlines: [] as SceneOutline[],
+    failedOutlines: [] as SceneOutline[],
+    generationEpoch: 1,
+    generationStatus: 'idle',
+    generationComplete: false,
+    setGenerationStatus(status: string) {
+      state.generationStatus = status;
+    },
+    setGeneratingOutlines(next: SceneOutline[]) {
+      state.generatingOutlines = next;
+    },
+    setGenerationComplete(value: boolean) {
+      state.generationComplete = value;
+    },
+    setCurrentGeneratingOrder: vi.fn(),
+    addFailedOutline(outline: SceneOutline) {
+      state.failedOutlines.push(outline);
+    },
+    addScene(scene: Scene) {
+      state.scenes.push(scene);
+      state.generatingOutlines = state.generatingOutlines.filter(
+        (outline) => outline.order !== scene.order,
+      );
+      state.currentSceneId ??= scene.id;
+    },
+    updateScene(sceneId: string, patch: Partial<Scene>) {
+      state.scenes = state.scenes.map((scene) =>
+        scene.id === sceneId ? ({ ...scene, ...patch } as Scene) : scene,
+      );
+    },
+    getSceneById(sceneId: string) {
+      return state.scenes.find((scene) => scene.id === sceneId);
+    },
+    bumpGenerationEpoch() {
+      state.generationEpoch += 1;
+    },
+    retryFailedOutline: vi.fn(),
+    markGenerationCompleteIfDone: vi.fn(),
+  };
+  return state;
+}
+
+function jsonResponse(body: unknown) {
+  return { ok: true, status: 200, statusText: 'OK', json: async () => body };
+}
+
+function actionResponse(order: number) {
+  return jsonResponse({
+    success: true,
+    previousSpeeches: [`Narration ${order}`],
+    scene: {
+      id: `scene-${order}`,
+      stageId: 'stage-1',
+      title: `Slide ${order}`,
+      order,
+      type: 'slide',
+      content: {
+        type: 'slide',
+        schemaVersion: 1,
+        canvas: {
+          id: `canvas-${order}`,
+          viewportSize: 1000,
+          viewportRatio: 0.5625,
+          theme: {
+            backgroundColor: '#fff',
+            themeColors: ['#000'],
+            fontColor: '#000',
+            fontName: 'Inter',
+          },
+          elements: [],
+        },
+      },
+      actions: [{ id: `speech-${order}`, type: 'speech', text: `Narration ${order}` }],
+    },
+  });
+}
+
+async function mountGenerator(root: Root, onComplete = vi.fn()) {
+  let generator!: {
+    generateRemaining: (params: { stageInfo: { name: string } }) => Promise<void>;
+    stop: () => void;
+  };
+  const { useSceneGenerator } = await import('@/lib/hooks/use-scene-generator');
+  function Harness() {
+    const current = useSceneGenerator({ onComplete });
+    useEffect(() => {
+      generator = current;
+    }, [current]);
+    return null;
+  }
+  await act(async () => root.render(createElement(Harness)));
+  return { generator, onComplete };
+}
+
+describe('scene generator visual and narration pipelines', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    mocks.stageState = makeStageState();
+    mocks.mediaGeneration.mockClear();
+    mocks.audioPut.mockClear();
+    mocks.audioDelete.mockClear();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders scenes 1-3 and completes visuals while every narration request is unresolved', async () => {
+    const events: string[] = [];
+    const narrationSignals: AbortSignal[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/scene-content') {
+          events.push(`content:${body.outline.order}`);
+          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+        }
+        if (url === '/api/generate/scene-actions') {
+          const order = body.outline.order as number;
+          events.push(`actions:${order}`);
+          return Promise.resolve(actionResponse(order));
+        }
+        if (url === '/api/generate/tts') {
+          events.push(`tts:${body.sceneId}`);
+          const signal = init?.signal as AbortSignal;
+          narrationSignals.push(signal);
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true },
+            );
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generator, onComplete } = await mountGenerator(root);
+
+    await generator.generateRemaining({ stageInfo: { name: 'Decoupled lesson' } });
+
+    expect(mocks.stageState.scenes.map((scene) => scene.id)).toEqual([
+      'scene-1',
+      'scene-2',
+      'scene-3',
+    ]);
+    expect(mocks.stageState.scenes.every((scene) => scene.narrationStatus === 'pending')).toBe(
+      true,
+    );
+    expect(mocks.stageState.currentSceneId).toBe('scene-1');
+    expect(mocks.stageState.generationStatus).toBe('completed');
+    expect(mocks.stageState.generationComplete).toBe(true);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([
+      'content:1',
+      'actions:1',
+      'tts:scene-1',
+      'content:2',
+      'actions:2',
+      'tts:scene-2',
+      'content:3',
+      'actions:3',
+      'tts:scene-3',
+    ]);
+    expect(narrationSignals).toHaveLength(3);
+    expect(narrationSignals.every((signal) => !signal.aborted)).toBe(true);
+
+    generator.stop();
+    expect(narrationSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('keeps all visual scenes usable when every narration request fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/scene-content') {
+          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+        }
+        if (url === '/api/generate/scene-actions') {
+          return Promise.resolve(actionResponse(body.outline.order as number));
+        }
+        if (url === '/api/generate/tts') {
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            statusText: 'Unauthorized',
+            json: async () => ({ success: false, error: 'Teaching Voice unavailable' }),
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    const { generator, onComplete } = await mountGenerator(root);
+
+    await generator.generateRemaining({ stageInfo: { name: 'Decoupled lesson' } });
+    await vi.waitFor(() => {
+      expect(mocks.stageState.scenes.every((scene) => scene.narrationStatus === 'failed')).toBe(
+        true,
+      );
+    });
+
+    expect(mocks.stageState.scenes).toHaveLength(3);
+    expect(mocks.stageState.currentSceneId).toBe('scene-1');
+    expect(mocks.stageState.generationStatus).toBe('completed');
+    expect(mocks.stageState.failedOutlines).toEqual([]);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});

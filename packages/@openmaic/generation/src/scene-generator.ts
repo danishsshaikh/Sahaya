@@ -952,22 +952,87 @@ async function generateQuizContent(
 
   log.debug(`Got ${generatedQuestions.length} questions for: ${outline.title}`);
 
-  // Ensure each question has an ID and normalize options format
-  const questions: QuizQuestion[] = generatedQuestions.map((q) => {
-    const isText = q.type === 'short_answer';
-    const options = isText ? undefined : normalizeQuizOptions(q.options);
-    return {
-      ...q,
-      id: q.id || `q_${nanoid(8)}`,
-      options,
-      answer: isText
-        ? undefined
-        : normalizeQuizAnswer(q as unknown as Record<string, unknown>, options),
-      hasAnswer: isText ? false : true,
-    };
+  // Treat model JSON as untrusted at this boundary. Optional metadata may be
+  // absent, but a question without renderable prompt/options must not reach the
+  // classroom as a falsely typed QuizQuestion.
+  const questions: QuizQuestion[] = generatedQuestions.flatMap((candidate, questionIndex) => {
+    if (!candidate || typeof candidate !== 'object') {
+      log.warn('[QuizValidation]', { questionIndex, field: 'question', reason: 'not-an-object' });
+      return [];
+    }
+    const q = candidate as unknown as Record<string, unknown>;
+    const type = q.type;
+    const question = typeof q.question === 'string' && q.question.trim() ? q.question : undefined;
+    if (!question || !['single', 'multiple', 'short_answer'].includes(String(type))) {
+      log.warn('[QuizValidation]', {
+        questionIndex,
+        field: !question ? 'question' : 'type',
+        reason: 'missing-or-invalid-required-field',
+      });
+      return [];
+    }
+
+    const isText = type === 'short_answer';
+    const rawOptions = Array.isArray(q.options) ? q.options : undefined;
+    if (!isText) {
+      rawOptions?.forEach((option, optionIndex) => {
+        if (!quizOptionLabel(option)) {
+          log.warn('[QuizValidation]', {
+            outlineId: outline.id,
+            questionIndex,
+            field: `options[${optionIndex}].label`,
+            reason: 'missing-option-text',
+          });
+        }
+      });
+    }
+    const options = isText ? undefined : normalizeQuizOptions(rawOptions);
+    if (!isText && (!options || options.length < 2)) {
+      log.warn('[QuizValidation]', {
+        questionIndex,
+        field: 'options',
+        reason: 'no-renderable-options',
+      });
+      return [];
+    }
+    if (q.analysis != null && (typeof q.analysis !== 'string' || !q.analysis.trim())) {
+      log.warn('[QuizValidation]', {
+        outlineId: outline.id,
+        questionIndex,
+        field: 'analysis',
+        reason: 'invalid-optional-text',
+      });
+    }
+
+    return [
+      {
+        id: typeof q.id === 'string' && q.id.trim() ? q.id : `q_${nanoid(8)}`,
+        type: type as QuizQuestion['type'],
+        question,
+        ...(options ? { options } : {}),
+        answer: isText ? undefined : normalizeQuizAnswer(q, options),
+        hasAnswer: !isText,
+        ...(typeof q.analysis === 'string' && q.analysis.trim() ? { analysis: q.analysis } : {}),
+        ...(typeof q.commentPrompt === 'string' && q.commentPrompt.trim()
+          ? { commentPrompt: q.commentPrompt }
+          : {}),
+        ...(typeof q.points === 'number' && Number.isFinite(q.points) && q.points > 0
+          ? { points: q.points }
+          : {}),
+      },
+    ];
   });
 
   return { questions };
+}
+
+function quizOptionLabel(option: unknown): string | undefined {
+  if (typeof option === 'string' && option.trim()) return option;
+  if (!option || typeof option !== 'object') return undefined;
+  const record = option as Record<string, unknown>;
+  if (typeof record.label === 'string' && record.label.trim()) return record.label;
+  if (typeof record.text === 'string' && record.text.trim()) return record.text;
+  return undefined;
 }
 
 /**
@@ -980,23 +1045,24 @@ function normalizeQuizOptions(
 ): { value: string; label: string }[] | undefined {
   if (!options || !Array.isArray(options)) return undefined;
 
-  return options.map((opt, index) => {
+  const normalized = options.flatMap((opt, index) => {
     const letter = String.fromCharCode(65 + index); // A, B, C, D...
 
-    if (typeof opt === 'string') {
-      return { value: letter, label: opt };
-    }
-
+    const label = quizOptionLabel(opt);
+    if (!label) return [];
     if (typeof opt === 'object' && opt !== null) {
       const obj = opt as Record<string, unknown>;
-      return {
-        value: typeof obj.value === 'string' ? obj.value : letter,
-        label: typeof obj.label === 'string' ? obj.label : String(obj.value || obj.text || letter),
-      };
+      return [
+        {
+          value: typeof obj.value === 'string' && obj.value.trim() ? obj.value : letter,
+          label,
+        },
+      ];
     }
 
-    return { value: letter, label: String(opt) };
+    return [{ value: letter, label }];
   });
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 /**

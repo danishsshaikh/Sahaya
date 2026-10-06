@@ -31,6 +31,40 @@ function stubAudio(play: () => Promise<void>) {
   vi.stubGlobal('Audio', AudioStub);
 }
 
+function stubObservableAudio() {
+  const instances: Array<{
+    currentTime: number;
+    duration: number;
+    playbackRate: number;
+    emit: (type: string) => void;
+  }> = [];
+  class AudioStub {
+    private listeners = new Map<string, Array<() => void>>();
+    play = vi.fn().mockResolvedValue(undefined);
+    pause = vi.fn();
+    volume = 1;
+    defaultPlaybackRate = 1;
+    playbackRate = 1;
+    src = '';
+    currentTime = 0;
+    duration = 10;
+
+    constructor() {
+      instances.push(this);
+    }
+
+    addEventListener(type: string, listener: () => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+
+    emit(type: string) {
+      for (const listener of this.listeners.get(type) ?? []) listener();
+    }
+  }
+  vi.stubGlobal('Audio', AudioStub);
+  return instances;
+}
+
 describe('AudioPlayer blob URL lifecycle', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -116,5 +150,56 @@ describe('AudioPlayer blob URL lifecycle', () => {
     player.destroy();
 
     expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:fake-url-1');
+  });
+
+  it('publishes actual media currentTime for play, seek, rate changes, and end', async () => {
+    stubObjectUrl();
+    const instances = stubObservableAudio();
+    const { AudioPlayer } = await import('@/lib/utils/audio-player');
+    const player = new AudioPlayer();
+    const updates = vi.fn();
+    player.subscribePlayback(updates);
+
+    await player.play('audio-1');
+    const audio = instances[0];
+    expect(updates).toHaveBeenLastCalledWith({ currentTimeMs: 0, durationMs: 10000, ended: false });
+
+    audio.currentTime = 4.25;
+    audio.emit('seeked');
+    expect(updates).toHaveBeenLastCalledWith({
+      currentTimeMs: 4250,
+      durationMs: 10000,
+      ended: false,
+    });
+
+    updates.mockClear();
+    player.pause();
+    audio.currentTime = 5;
+    expect(updates).not.toHaveBeenCalled();
+    player.resume();
+    audio.emit('timeupdate');
+    expect(updates).toHaveBeenLastCalledWith({
+      currentTimeMs: 5000,
+      durationMs: 10000,
+      ended: false,
+    });
+
+    player.setPlaybackRate(1.5);
+    expect(audio.playbackRate).toBe(1.5);
+    audio.currentTime = 7;
+    audio.emit('timeupdate');
+    expect(updates).toHaveBeenLastCalledWith({
+      currentTimeMs: 7000,
+      durationMs: 10000,
+      ended: false,
+    });
+
+    audio.currentTime = 10;
+    audio.emit('ended');
+    expect(updates).toHaveBeenLastCalledWith({
+      currentTimeMs: 10000,
+      durationMs: 10000,
+      ended: true,
+    });
   });
 });

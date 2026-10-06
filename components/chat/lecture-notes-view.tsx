@@ -15,6 +15,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import type { LectureNoteEntry } from '@/lib/types/chat';
+import type { ActiveNarrationHighlight } from '@/lib/playback/narration-cues';
 
 const ACTION_ICON_ONLY: Record<string, { Icon: typeof Flashlight; style: string }> = {
   spotlight: {
@@ -58,6 +59,7 @@ interface LectureNotesViewProps {
   notes: LectureNoteEntry[];
   currentSceneId?: string | null;
   currentActionIndex?: number | null;
+  narrationHighlight?: ActiveNarrationHighlight | null;
   canJumpToAction?: (sceneId: string, actionIndex: number) => boolean;
   onJumpToAction?: (sceneId: string, actionIndex: number) => void;
 }
@@ -66,11 +68,13 @@ export function LectureNotesView({
   notes,
   currentSceneId,
   currentActionIndex,
+  narrationHighlight,
   canJumpToAction,
   onJumpToAction,
 }: LectureNotesViewProps) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastManualScrollAtRef = useRef(0);
 
   // Auto-scroll to the current scene note
   useEffect(() => {
@@ -80,6 +84,12 @@ export function LectureNotesView({
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [currentSceneId]);
+
+  useEffect(() => {
+    if (!narrationHighlight || Date.now() - lastManualScrollAtRef.current < 3000) return;
+    const activeCue = containerRef.current?.querySelector('[data-active-narration-cue="true"]');
+    activeCue?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [narrationHighlight]);
 
   // Empty state
   if (notes.length === 0) {
@@ -101,6 +111,12 @@ export function LectureNotesView({
   return (
     <div
       ref={containerRef}
+      onWheelCapture={() => {
+        lastManualScrollAtRef.current = Date.now();
+      }}
+      onTouchStartCapture={() => {
+        lastManualScrollAtRef.current = Date.now();
+      }}
       className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 scrollbar-hide"
     >
       {notes.map((note, index) => {
@@ -217,6 +233,15 @@ export function LectureNotesView({
                   const isSpeech = row.kind === 'speech';
                   const isActiveSpeech =
                     isCurrent && isSpeech && row.actionIndex === currentActionIndex;
+                  const activeHighlight =
+                    isCurrent &&
+                    isSpeech &&
+                    narrationHighlight?.sceneId === note.sceneId &&
+                    narrationHighlight.actionIndex === row.actionIndex &&
+                    narrationHighlight.actionId === row.actionId &&
+                    narrationHighlight.text === row.text
+                      ? narrationHighlight
+                      : null;
                   const canJump =
                     isCurrent &&
                     isSpeech &&
@@ -243,7 +268,23 @@ export function LectureNotesView({
                           </span>
                         );
                       })}
-                      {isSpeech ? row.text : null}
+                      {isSpeech && activeHighlight ? (
+                        <>
+                          {row.text.slice(0, activeHighlight.cue.startOffset)}
+                          <mark
+                            data-active-narration-cue="true"
+                            className="rounded-sm bg-primary/20 text-foreground"
+                          >
+                            {row.text.slice(
+                              activeHighlight.cue.startOffset,
+                              activeHighlight.cue.endOffset,
+                            )}
+                          </mark>
+                          {row.text.slice(activeHighlight.cue.endOffset)}
+                        </>
+                      ) : isSpeech ? (
+                        row.text
+                      ) : null}
                     </>
                   );
                   if (isSpeech) {

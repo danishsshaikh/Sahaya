@@ -50,6 +50,10 @@ describe('parseQuizMathText', () => {
 });
 
 describe('isLikelyStandaloneMathText', () => {
+  it.each([undefined, null, ''])('safely rejects missing or empty runtime input: %s', (value) => {
+    expect(isLikelyStandaloneMathText(value)).toBe(false);
+  });
+
   it('recognizes delimiter-free algebra like the issue report', () => {
     expect(isLikelyStandaloneMathText('a(x-2)+b(2-x)^2=a(x-2)+b(x-2)^2')).toBe(true);
   });
@@ -85,6 +89,10 @@ describe('isLikelyStandaloneMathText', () => {
 });
 
 describe('renderQuizMathText', () => {
+  it.each([undefined, null, ''])('renders missing or empty runtime input safely: %s', (value) => {
+    expect(renderQuizMathText(value)).toEqual([{ type: 'text', value: '' }]);
+  });
+
   it('renders delimiter-free algebra as one math segment', () => {
     const segments = renderQuizMathText('a(x-2)+b(2-x)^2=a(x-2)+b(x-2)^2');
 

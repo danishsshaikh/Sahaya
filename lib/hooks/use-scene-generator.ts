@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useStageStore } from '@/lib/store/stage';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
@@ -61,6 +61,11 @@ const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
 
 type SceneGenerationPhase = 'content' | 'actions' | 'narration';
+
+interface ManagedNarrationTask {
+  controller: AbortController;
+  promise: Promise<void>;
+}
 
 function traceSceneGeneration(event: string, details: Record<string, unknown>) {
   log.info('[SceneGenerationTrace]', { event, ...details });
@@ -1016,10 +1021,180 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const generatingRef = useRef(false);
   const mediaAbortRef = useRef<AbortController | null>(null);
   const fetchAbortRef = useRef<AbortController | null>(null);
+  const narrationTasksRef = useRef(new Map<string, ManagedNarrationTask>());
   const lastParamsRef = useRef<GenerationParams | null>(null);
   const generateRemainingRef = useRef<((params: GenerationParams) => Promise<void>) | null>(null);
 
   const store = useStageStore;
+
+  const abortNarrationTasks = useCallback(() => {
+    for (const task of narrationTasksRef.current.values()) {
+      task.controller.abort();
+    }
+  }, []);
+
+  useEffect(() => {
+    let observedEpoch = store.getState().generationEpoch;
+    const unsubscribe = store.subscribe((state) => {
+      if (state.generationEpoch === observedEpoch) return;
+      observedEpoch = state.generationEpoch;
+      abortNarrationTasks();
+    });
+    return () => {
+      unsubscribe();
+      abortNarrationTasks();
+    };
+  }, [abortNarrationTasks, store]);
+
+  const scheduleNarration = useCallback(
+    ({
+      scene,
+      outline,
+      stageId,
+      generationRunId,
+      generationEpoch,
+      language,
+      provider,
+    }: {
+      scene: Scene;
+      outline: SceneOutline;
+      stageId: string;
+      generationRunId: string;
+      generationEpoch: number;
+      language?: string;
+      provider: string;
+    }) => {
+      const taskKey = `${generationEpoch}:${scene.id}`;
+      if (narrationTasksRef.current.has(taskKey)) {
+        log.info('[SceneNarration]', {
+          event: 'skipped-already-in-flight',
+          stageId,
+          generationRunId,
+          outlineId: outline.id,
+          sceneId: scene.id,
+        });
+        return;
+      }
+
+      const controller = new AbortController();
+      const narrationScene = sceneForNarrationSynthesis(scene);
+      const narrationStartedAt = Date.now();
+      log.info('[SceneNarration]', {
+        event: 'scheduled',
+        stageId,
+        generationRunId,
+        outlineId: outline.id,
+        sceneId: scene.id,
+        sceneIndex: outline.order,
+        provider,
+      });
+
+      const promise = (async () => {
+        try {
+          options.onPhaseChange?.('narration', outline);
+          const ttsResult = await generateTTSForScene(
+            narrationScene,
+            language,
+            controller.signal,
+            undefined,
+            (progress) => {
+              if (
+                progress &&
+                store.getState().generationEpoch === generationEpoch &&
+                store.getState().getSceneById(scene.id)
+              ) {
+                store.getState().updateScene(scene.id, narrationProgressPatch(progress.status));
+              }
+              options.onNarrationQueueChange?.(progress, outline);
+            },
+            outline.id,
+          );
+
+          if (controller.signal.aborted || store.getState().generationEpoch !== generationEpoch) {
+            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+            log.info('[SceneNarration]', {
+              event: 'cancelled-stale',
+              stageId,
+              generationRunId,
+              outlineId: outline.id,
+              sceneId: scene.id,
+            });
+            return;
+          }
+
+          if (!ttsResult.success) {
+            store.getState().updateScene(scene.id, narrationFailurePatch());
+            log.warn('[SceneNarration]', {
+              event: 'failed',
+              stageId,
+              generationRunId,
+              outlineId: outline.id,
+              sceneId: scene.id,
+              durationMs: Date.now() - narrationStartedAt,
+            });
+            return;
+          }
+
+          const currentScene = store.getState().getSceneById(scene.id);
+          if (!currentScene) {
+            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+            return;
+          }
+          const patch = mergeCompletedNarration(currentScene, narrationScene);
+          const retainedAudioIds = new Set(
+            (patch.actions ?? []).flatMap((action) =>
+              action.type === 'speech' && action.audioId ? [action.audioId] : [],
+            ),
+          );
+          await removeFreshTtsAllocations(
+            speechAllocationIds(narrationScene).filter((audioId) => !retainedAudioIds.has(audioId)),
+          );
+          store.getState().updateScene(scene.id, patch);
+          log.info('[SceneNarration]', {
+            event: patch.narrationStatus === 'completed' ? 'completed' : 'completed-stale',
+            stageId,
+            generationRunId,
+            outlineId: outline.id,
+            sceneId: scene.id,
+            durationMs: Date.now() - narrationStartedAt,
+          });
+        } catch (error) {
+          await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+          if (isAbortError(error) || controller.signal.aborted) {
+            log.info('[SceneNarration]', {
+              event: 'aborted',
+              stageId,
+              generationRunId,
+              outlineId: outline.id,
+              sceneId: scene.id,
+            });
+            return;
+          }
+          if (
+            store.getState().generationEpoch === generationEpoch &&
+            store.getState().getSceneById(scene.id)
+          ) {
+            store.getState().updateScene(scene.id, narrationFailurePatch());
+          }
+          log.warn('[SceneNarration]', {
+            event: 'failed',
+            stageId,
+            generationRunId,
+            outlineId: outline.id,
+            sceneId: scene.id,
+            durationMs: Date.now() - narrationStartedAt,
+            error: messageFromError(error, 'Narration generation failed'),
+          });
+        } finally {
+          const activeTask = narrationTasksRef.current.get(taskKey);
+          if (activeTask?.controller === controller) narrationTasksRef.current.delete(taskKey);
+        }
+      })();
+
+      narrationTasksRef.current.set(taskKey, { controller, promise });
+    },
+    [options, store],
+  );
 
   const generateRemaining = useCallback(
     async (params: GenerationParams) => {
@@ -1339,72 +1514,25 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             });
             options.onSceneGenerated?.(scene, outline.order);
 
-            let narrationScene: Scene | null = null;
             if (narrationEnabled) {
-              narrationScene = sceneForNarrationSynthesis(scene);
-              options.onPhaseChange?.('narration', outline);
-              const narrationStartedAt = Date.now();
-              traceSceneGeneration('narration-batch-start', {
+              scheduleNarration({
+                scene,
+                outline,
                 stageId: stage.id,
                 generationRunId,
-                outlineId: outline.id,
-                sceneId: scene.id,
-                sceneIndex: outline.order,
+                generationEpoch: startEpoch,
+                language: params.languageDirective || params.stageInfo.language,
                 provider: teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId,
               });
-              const ttsResult = await generateTTSForScene(
-                narrationScene,
-                params.languageDirective || params.stageInfo.language,
-                signal,
-                undefined,
-                (progress) => {
-                  if (progress) {
-                    store.getState().updateScene(scene.id, narrationProgressPatch(progress.status));
-                  }
-                  options.onNarrationQueueChange?.(progress, outline);
-                },
-                outline.id,
-              );
-              if (!ttsResult.success) {
-                traceSceneGeneration('narration-item-failed', {
-                  stageId: stage.id,
-                  generationRunId,
-                  outlineId: outline.id,
-                  sceneId: scene.id,
-                  sceneIndex: outline.order,
-                  durationMs: Date.now() - narrationStartedAt,
-                  status: 'failed',
-                });
-                store.getState().updateScene(scene.id, narrationFailurePatch());
-              } else {
-                const currentScene = store.getState().getSceneById(scene.id);
-                if (currentScene) {
-                  store
-                    .getState()
-                    .updateScene(scene.id, mergeCompletedNarration(currentScene, narrationScene));
-                }
-                traceSceneGeneration('narration-batch-complete', {
-                  stageId: stage.id,
-                  generationRunId,
-                  outlineId: outline.id,
-                  sceneId: scene.id,
-                  sceneIndex: outline.order,
-                  durationMs: Date.now() - narrationStartedAt,
-                  status: 'completed',
-                });
-              }
             }
 
-            // Epoch changed while narration was in flight. The departing
-            // stage has already been cleared; discard only unattached audio.
             if (store.getState().generationEpoch !== startEpoch) {
-              await removeFreshTtsAllocations(speechAllocationIds(narrationScene ?? scene));
               pausedByFailureOrAbort = true;
               break;
             }
             const nextOutline = pending.find((candidate) => candidate.order > outline.order);
             if (nextOutline) {
-              traceSceneGeneration('next-scene-dispatch', {
+              traceSceneGeneration('next-scene-dispatch-after-visual-ready', {
                 stageId: stage.id,
                 generationRunId,
                 outlineId: nextOutline.id,
@@ -1478,7 +1606,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         fetchAbortRef.current = null;
       }
     },
-    [store],
+    [options, scheduleNarration, store],
   );
 
   // Keep ref in sync so retrySingleOutline can call it
@@ -1489,7 +1617,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     store.getState().bumpGenerationEpoch();
     fetchAbortRef.current?.abort();
     mediaAbortRef.current?.abort();
-  }, [store]);
+    abortNarrationTasks();
+  }, [abortNarrationTasks, store]);
 
   const isGenerating = useCallback(() => generatingRef.current, []);
 
@@ -1611,36 +1740,19 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         committedSceneId = scene.id;
         options.onSceneGenerated?.(scene, outline.order);
 
-        let narrationScene: Scene | null = null;
         if (narrationEnabled) {
-          narrationScene = sceneForNarrationSynthesis(scene);
-          const ttsResult = await generateTTSForScene(
-            narrationScene,
-            params.languageDirective || params.stageInfo.language,
-            signal,
-            undefined,
-            (progress) => {
-              if (progress) {
-                store.getState().updateScene(scene.id, narrationProgressPatch(progress.status));
-              }
-              options.onNarrationQueueChange?.(progress, outline);
-            },
-            outline.id,
-          );
-          if (!ttsResult.success) {
-            store.getState().updateScene(scene.id, narrationFailurePatch());
-          } else {
-            const currentScene = store.getState().getSceneById(scene.id);
-            if (currentScene) {
-              store
-                .getState()
-                .updateScene(scene.id, mergeCompletedNarration(currentScene, narrationScene));
-            }
-          }
+          scheduleNarration({
+            scene,
+            outline,
+            stageId: state.stage.id,
+            generationRunId: `${state.stage.id}:${retryEpoch}:retry-${outline.id}`,
+            generationEpoch: retryEpoch,
+            language: params.languageDirective || params.stageInfo.language,
+            provider: teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId,
+          });
         }
 
         if (store.getState().generationEpoch !== retryEpoch) {
-          await removeFreshTtsAllocations(speechAllocationIds(narrationScene ?? scene));
           return;
         }
 
@@ -1664,7 +1776,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         }
       }
     },
-    [store],
+    [options, scheduleNarration, store],
   );
 
   return { generateRemaining, retrySingleOutline, stop, isGenerating };

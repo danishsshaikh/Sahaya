@@ -27,6 +27,7 @@ import {
 } from './use-chat-sessions';
 import { SessionList } from './session-list';
 import { LectureNotesView } from './lecture-notes-view';
+import type { ActiveNarrationHighlight } from '@/lib/playback/narration-cues';
 
 interface ChatAreaProps {
   className?: string;
@@ -55,6 +56,7 @@ interface ChatAreaProps {
   shouldHoldAfterReveal?: () => { holding: boolean; segmentDone: number } | boolean;
   currentSceneId?: string | null;
   currentActionIndex?: number | null;
+  narrationHighlight?: ActiveNarrationHighlight | null;
   canJumpToAction?: (sceneId: string, actionIndex: number) => boolean;
   onJumpToAction?: (sceneId: string, actionIndex: number) => void;
 }
@@ -108,6 +110,7 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
       shouldHoldAfterReveal,
       currentSceneId,
       currentActionIndex,
+      narrationHighlight,
       canJumpToAction,
       onJumpToAction,
     },
@@ -378,6 +381,7 @@ export const ChatArea = forwardRef<ChatAreaRef, ChatAreaProps>(
                 notes={lectureNotes}
                 currentSceneId={currentSceneId}
                 currentActionIndex={currentActionIndex}
+                narrationHighlight={narrationHighlight}
                 canJumpToAction={canJumpToAction}
                 onJumpToAction={onJumpToAction}
               />

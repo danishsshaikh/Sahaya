@@ -354,6 +354,7 @@ vi.mock('@/lib/utils/audio-player', () => ({
     setMuted: vi.fn(),
     setVolume: vi.fn(),
     setPlaybackRate: vi.fn(),
+    subscribePlayback: vi.fn(() => () => undefined),
   }),
 }));
 vi.mock('@/lib/hooks/use-discussion-tts', () => ({

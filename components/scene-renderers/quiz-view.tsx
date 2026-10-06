@@ -24,6 +24,7 @@ import type { QuizQuestion } from '@/lib/types/stage';
 import { SpeechButton } from '@/components/audio/speech-button';
 import { gradeChoiceQuestions, isShortAnswer, type QuestionResult } from '@/lib/quiz/grading';
 import { renderQuizMathText } from '@/lib/quiz/math-text';
+import { normalizeQuizQuestions } from '@/lib/quiz/validation';
 import { writeDraftRecovery } from '@/lib/quiz/persistence';
 import {
   createQuizAttemptWriter,
@@ -690,8 +691,12 @@ function ScoreBanner({
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
+export function QuizView({ questions: rawQuestions, sceneId, stageId }: QuizViewProps) {
   const { t, locale } = useI18n();
+  const questions = useMemo(
+    () => normalizeQuizQuestions(rawQuestions, sceneId),
+    [rawQuestions, sceneId],
+  );
 
   const [phase, setPhase] = useState<Phase>('not_started');
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});

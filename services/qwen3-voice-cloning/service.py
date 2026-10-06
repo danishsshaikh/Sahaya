@@ -207,7 +207,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
         payload, output_seconds = serialize_wav(active, audio, sample_rate)
         generation_seconds = time.perf_counter() - started
         log.info(
-            "Synthesis profileId=%s language=%s textChars=%d generationSeconds=%.3f outputSeconds=%.3f rtf=%.3f",
+            "Synthesis profileId=%s language=%s textChars=%d conditioningMode=speaker-embedding generationSeconds=%.3f outputSeconds=%.3f rtf=%.3f",
             req.profileId, req.language, len(req.text), generation_seconds,
             output_seconds, generation_seconds / output_seconds,
         )
@@ -267,7 +267,11 @@ def generate_audio(active: Runtime, profile: VoiceProfile, text: str) -> tuple[A
         language="English",
         ref_audio=str(reference_audio),
         ref_text=profile.reference_text,
-        x_vector_only_mode=False,
+        # Full-ICL treats the reference waveform and transcript as a prompt to
+        # continue, which can replay the final reference words before target
+        # narration. Speaker-embedding conditioning retains voice identity but
+        # removes that content-continuation path; no generated audio is trimmed.
+        x_vector_only_mode=True,
     )
     if len(wavs) != 1:
         raise ValueError("expected one generated waveform")
@@ -275,13 +279,11 @@ def generate_audio(active: Runtime, profile: VoiceProfile, text: str) -> tuple[A
 
 
 def prepare_reference_audio_for_icl(active: Runtime, reference: Path) -> Path:
-    """Add an explicit silence boundary after the reference utterance.
+    """Keep an explicit silence boundary after the reference utterance.
 
-    Qwen full-ICL cloning conditions on both the transcript and the reference
-    waveform. Enrollment recordings can end immediately after the last spoken
-    token, which makes the target generation behave like a continuation of that
-    tail. We keep the transcript exact and only give the model a real acoustic
-    boundary before the target text starts.
+    This preserves the deterministic reference preparation introduced for
+    existing profiles. Synthesis now extracts speaker identity only, so the
+    boundary is no longer relied on to prevent content continuation.
     """
     stat = reference.stat()
     cache_root = Path(tempfile.gettempdir()) / "sahaya-qwen3-reference-boundaries"

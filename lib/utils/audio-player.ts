@@ -16,6 +16,14 @@ const log = createLogger('AudioPlayer');
  * endpoint must not pin a playback line indefinitely. */
 const LEGACY_URL_FETCH_TIMEOUT_MS = 15_000;
 
+export interface AudioPlaybackProgress {
+  currentTimeMs: number;
+  durationMs: number;
+  ended: boolean;
+}
+
+type AudioPlaybackListener = (progress: AudioPlaybackProgress | null) => void;
+
 /** Bytes an audio id currently resolves to, pool first. Loaded lazily to keep
  * this module importable without the media graph. */
 async function resolveBytes(audioId: string): Promise<Blob | null> {
@@ -39,6 +47,7 @@ export class AudioPlayer {
   private requestToken: number = 0;
   /** The object URL backing the current audio element, if any. */
   private blobUrl: string | null = null;
+  private playbackListeners = new Set<AudioPlaybackListener>();
   /**
    * The in-flight legacy narration fetch of the current play, if any. Aborted
    * when the play is superseded (a replacement play, stop, or destroy), so a
@@ -76,6 +85,19 @@ export class AudioPlayer {
     // Stop or replacement before natural end must not leak the fetched
     // narration: the element is dropped here, so its URL is released with it.
     this.releaseBlobUrl(this.blobUrl);
+    this.notifyPlayback(null);
+  }
+
+  private notifyPlayback(progress: AudioPlaybackProgress | null): void {
+    for (const listener of this.playbackListeners) listener(progress);
+  }
+
+  private playbackProgress(audio: HTMLAudioElement, ended = false): AudioPlaybackProgress {
+    return {
+      currentTimeMs: Math.max(0, audio.currentTime * 1000),
+      durationMs: Number.isFinite(audio.duration) ? Math.max(0, audio.duration * 1000) : 0,
+      ended,
+    };
   }
 
   /**
@@ -161,10 +183,19 @@ export class AudioPlayer {
         // Completion belongs to this element, not whichever action installed
         // the latest callback. Clear ownership before advancing (exactly once).
         if (this.audio !== audio) return;
+        this.notifyPlayback(this.playbackProgress(audio, true));
         this.audio = null;
         this.releaseBlobUrl(blobUrl);
         this.onEndedCallback?.();
       });
+      const publishProgress = () => {
+        if (this.audio === audio) this.notifyPlayback(this.playbackProgress(audio));
+      };
+      audio.addEventListener('loadedmetadata', publishProgress);
+      audio.addEventListener('durationchange', publishProgress);
+      audio.addEventListener('timeupdate', publishProgress);
+      audio.addEventListener('seeking', publishProgress);
+      audio.addEventListener('seeked', publishProgress);
 
       // Play. If play() rejects (autoplay policy, decode error, interrupted
       // load) the 'ended' listener never fires, so revoke the blob URL here to
@@ -181,6 +212,7 @@ export class AudioPlayer {
       }
       // Re-apply after play() — some browsers reset during load
       audio.playbackRate = this.playbackRate;
+      publishProgress();
       return true;
     } catch (error) {
       log.error('Failed to play audio:', error);
@@ -258,6 +290,11 @@ export class AudioPlayer {
     this.onEndedCallback = callback;
   }
 
+  public subscribePlayback(listener: AudioPlaybackListener): () => void {
+    this.playbackListeners.add(listener);
+    return () => this.playbackListeners.delete(listener);
+  }
+
   /**
    * Set mute state (takes effect immediately on currently playing audio)
    */
@@ -294,6 +331,7 @@ export class AudioPlayer {
   public destroy(): void {
     this.stop();
     this.onEndedCallback = null;
+    this.playbackListeners.clear();
   }
 }
 

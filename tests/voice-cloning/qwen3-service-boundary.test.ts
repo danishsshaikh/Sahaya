@@ -15,7 +15,7 @@ describe('Qwen3 Teaching Voice service boundary', () => {
     expect(source).not.toContain('f"{profile.reference_text} {text}"');
   });
 
-  it('adds an acoustic boundary to Qwen full-ICL reference audio before synthesis', () => {
+  it('keeps the acoustic reference boundary while preventing full-ICL content continuation', () => {
     const source = readFileSync(servicePath, 'utf8');
 
     expect(source).toContain('REFERENCE_TAIL_SILENCE_SECONDS = 0.35');
@@ -24,6 +24,19 @@ describe('Qwen3 Teaching Voice service boundary', () => {
     expect(source).toContain('bounded = active.numpy.concatenate([audio, tail], axis=0)');
     expect(source).toContain('reference_audio = prepare_reference_audio_for_icl');
     expect(source).toContain('ref_audio=str(reference_audio),');
-    expect(source).toContain('x_vector_only_mode=False,');
+    expect(source).toContain('x_vector_only_mode=True,');
+    expect(source).toContain('conditioningMode=speaker-embedding');
+    expect(source).not.toMatch(/x_vector_only_mode\s*=\s*False/);
+  });
+
+  it('serializes only the generated waveform without reference-audio concatenation or trimming', () => {
+    const source = readFileSync(servicePath, 'utf8');
+
+    expect(source).toContain('return wavs[0], int(sample_rate)');
+    expect(source).toContain('payload, output_seconds = serialize_wav(active, audio, sample_rate)');
+    expect(source).not.toMatch(
+      /concatenate\(\[\s*(?:reference|profile\.reference_audio)[^\]]*,\s*audio/,
+    );
+    expect(source).not.toMatch(/audio\s*=\s*audio\[\s*int\(/);
   });
 });
