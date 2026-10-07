@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   MessageSquare,
@@ -11,11 +11,21 @@ import {
   SlidersHorizontal,
   StickyNote,
   Eye,
+  LoaderCircle,
+  WandSparkles,
+  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import type { LectureNoteEntry } from '@/lib/types/chat';
 import type { ActiveNarrationHighlight } from '@/lib/playback/narration-cues';
+import { useStageStore } from '@/lib/store/stage';
+import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
+import {
+  isShortPronunciationSelection,
+  selectionOffsetsWithin,
+} from '@/lib/audio/pronunciation-selection';
+import { requestPronunciationRepair } from '@/lib/audio/pronunciation-repair';
 
 const ACTION_ICON_ONLY: Record<string, { Icon: typeof Flashlight; style: string }> = {
   spotlight: {
@@ -64,6 +74,16 @@ interface LectureNotesViewProps {
   onJumpToAction?: (sceneId: string, actionIndex: number) => void;
 }
 
+interface PronunciationSelection {
+  sceneId: string;
+  actionId: string;
+  actionIndex: number;
+  displayText: string;
+  startOffset: number;
+  endOffset: number;
+  selectedText: string;
+}
+
 export function LectureNotesView({
   notes,
   currentSceneId,
@@ -75,6 +95,36 @@ export function LectureNotesView({
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const lastManualScrollAtRef = useRef(0);
+  const stage = useStageStore((state) => state.stage);
+  const mayRepairPronunciation = useMayGenerateForStage(stage?.id);
+  const [pronunciationSelection, setPronunciationSelection] =
+    useState<PronunciationSelection | null>(null);
+  const [pronounceAs, setPronounceAs] = useState('');
+  const [repairStatus, setRepairStatus] = useState<'idle' | 'submitting' | 'error'>('idle');
+
+  const closePronunciationRepair = () => {
+    setPronunciationSelection(null);
+    setPronounceAs('');
+    setRepairStatus('idle');
+    window.getSelection()?.removeAllRanges();
+  };
+
+  const repairPronunciation = async () => {
+    if (!pronunciationSelection || !stage) return;
+    setRepairStatus('submitting');
+    try {
+      const result = await requestPronunciationRepair({
+        ...pronunciationSelection,
+        stageId: stage.id,
+        pronounceAs,
+        language: stage.languageDirective,
+      });
+      if (result.status === 'replaced') closePronunciationRepair();
+      else setRepairStatus('error');
+    } catch {
+      setRepairStatus('error');
+    }
+  };
 
   // Auto-scroll to the current scene note
   useEffect(() => {
@@ -268,46 +318,123 @@ export function LectureNotesView({
                           </span>
                         );
                       })}
-                      {isSpeech && activeHighlight ? (
-                        <>
-                          {row.text.slice(0, activeHighlight.cue.startOffset)}
-                          <mark
-                            data-active-narration-cue="true"
-                            className="rounded-sm bg-primary/20 text-foreground"
-                          >
-                            {row.text.slice(
-                              activeHighlight.cue.startOffset,
-                              activeHighlight.cue.endOffset,
-                            )}
-                          </mark>
-                          {row.text.slice(activeHighlight.cue.endOffset)}
-                        </>
-                      ) : isSpeech ? (
-                        row.text
+                      {isSpeech ? (
+                        <span
+                          data-narration-action-id={row.actionId}
+                          onMouseUp={(event) => {
+                            if (!mayRepairPronunciation) return;
+                            const offsets = selectionOffsetsWithin(
+                              event.currentTarget,
+                              window.getSelection(),
+                            );
+                            if (!offsets || !isShortPronunciationSelection(offsets)) return;
+                            setPronunciationSelection({
+                              sceneId: note.sceneId,
+                              actionId: row.actionId,
+                              actionIndex: row.actionIndex,
+                              displayText: row.text,
+                              startOffset: offsets.startOffset,
+                              endOffset: offsets.endOffset,
+                              selectedText: offsets.text,
+                            });
+                            setPronounceAs('');
+                            setRepairStatus('idle');
+                          }}
+                        >
+                          {activeHighlight ? (
+                            <>
+                              {row.text.slice(0, activeHighlight.cue.startOffset)}
+                              <mark
+                                data-active-narration-cue="true"
+                                className="rounded-sm bg-primary/20 text-foreground"
+                              >
+                                {row.text.slice(
+                                  activeHighlight.cue.startOffset,
+                                  activeHighlight.cue.endOffset,
+                                )}
+                              </mark>
+                              {row.text.slice(activeHighlight.cue.endOffset)}
+                            </>
+                          ) : (
+                            row.text
+                          )}
+                        </span>
                       ) : null}
                     </>
                   );
                   if (isSpeech) {
+                    const repairOpen =
+                      pronunciationSelection?.sceneId === note.sceneId &&
+                      pronunciationSelection.actionId === row.actionId;
                     return (
-                      <button
-                        key={row.actionId}
-                        type="button"
-                        disabled={!canJump}
-                        title={jumpTitle}
-                        onClick={() => onJumpToAction?.(note.sceneId, row.actionIndex)}
-                        className={cn(
-                          'block w-full text-left rounded-md px-1 py-0.5 text-[12px] leading-[1.8] transition-colors',
-                          isActiveSpeech
-                            ? 'bg-primary/10 text-primary dark:bg-primary/10 dark:text-primary'
-                            : 'text-gray-700 dark:text-gray-300',
-                          canJump
-                            ? 'cursor-pointer hover:bg-primary/10 dark:hover:bg-primary/10'
-                            : 'cursor-default',
-                        )}
-                        aria-label={jumpTitle}
-                      >
-                        {content}
-                      </button>
+                      <div key={row.actionId}>
+                        <button
+                          type="button"
+                          aria-disabled={!canJump}
+                          title={jumpTitle}
+                          onClick={() => {
+                            if (window.getSelection()?.toString().trim()) return;
+                            if (canJump) onJumpToAction?.(note.sceneId, row.actionIndex);
+                          }}
+                          className={cn(
+                            'block w-full text-left rounded-md px-1 py-0.5 text-[12px] leading-[1.8] transition-colors',
+                            isActiveSpeech
+                              ? 'bg-primary/10 text-primary dark:bg-primary/10 dark:text-primary'
+                              : 'text-gray-700 dark:text-gray-300',
+                            canJump
+                              ? 'cursor-pointer hover:bg-primary/10 dark:hover:bg-primary/10'
+                              : 'cursor-text',
+                          )}
+                          aria-label={jumpTitle}
+                        >
+                          {content}
+                        </button>
+                        {repairOpen ? (
+                          <div className="mt-1.5 rounded-md border border-border/70 bg-background px-2 py-2">
+                            <div className="flex items-center gap-1.5">
+                              <WandSparkles className="size-3.5 shrink-0 text-primary" />
+                              <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
+                                {pronunciationSelection.selectedText.trim()}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={closePronunciationRepair}
+                                className="grid size-5 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                                aria-label="Close pronunciation repair"
+                                title="Close"
+                              >
+                                <X className="size-3" />
+                              </button>
+                            </div>
+                            <div className="mt-2 flex items-center gap-1.5">
+                              <input
+                                value={pronounceAs}
+                                onChange={(event) => setPronounceAs(event.target.value)}
+                                placeholder="Pronounce as (optional)"
+                                className="h-7 min-w-0 flex-1 rounded border border-input bg-transparent px-2 text-[11px] outline-none focus:border-primary"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => void repairPronunciation()}
+                                disabled={repairStatus === 'submitting'}
+                                className="inline-flex h-7 shrink-0 items-center gap-1 rounded bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-60"
+                              >
+                                {repairStatus === 'submitting' ? (
+                                  <LoaderCircle className="size-3 animate-spin" />
+                                ) : (
+                                  <WandSparkles className="size-3" />
+                                )}
+                                Fix pronunciation
+                              </button>
+                            </div>
+                            {repairStatus === 'error' ? (
+                              <p className="mt-1.5 text-[10px] text-destructive">
+                                Repair failed. Existing audio was kept.
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
                     );
                   }
                   return (
