@@ -3,7 +3,17 @@
 import { useEffect, useState, Suspense, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
-import { CheckCircle2, Sparkles, AlertCircle, AlertTriangle, ArrowLeft, Bot } from 'lucide-react';
+import {
+  CheckCircle2,
+  Sparkles,
+  AlertCircle,
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  FileText,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -31,6 +41,7 @@ import { FOREGROUND_SCENE_RETRY_OPTIONS } from './foreground-retry';
 import {
   loadImageMapping,
   loadDocumentBlob,
+  deleteDocumentBlob,
   cleanupOldImages,
   storeImages,
 } from '@/lib/utils/image-storage';
@@ -43,6 +54,12 @@ import {
   buildDocumentBundle,
   type ParsedDocumentPart,
 } from '@/lib/document/bundle';
+import {
+  extractDocumentBatch,
+  hasUnresolvedDocumentSources,
+  removeDocumentSourceById,
+  updateDocumentSourceProcessing,
+} from '@/lib/document/extraction-batch';
 import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
 import {
   shouldGenerateClassroomAgents,
@@ -125,6 +142,10 @@ function GenerationPreviewContent() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const outlineReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outlineReviewResolveRef = useRef<((outlines: SceneOutline[]) => void) | null>(null);
+  const parsedDocumentPartsRef = useRef(new Map<string, ParsedDocumentPart>());
+  const sourceReviewResolveRef = useRef<
+    ((result: { sources: SessionDocumentSource[]; parts: ParsedDocumentPart[] }) => void) | null
+  >(null);
   // Sticky flag: true once the user signals review intent (either by clicking the
   // streaming card mid-stream, or by restoring a session that was already in review).
   // Combined with `reviewOutlineEnabled` to decide whether the post-stream timer fires.
@@ -132,6 +153,7 @@ function GenerationPreviewContent() {
   const { profiles: voiceProfiles } = useAllVoiceProfiles();
 
   const [session, setSession] = useState<GenerationSessionState | null>(null);
+  const sessionRef = useRef<GenerationSessionState | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
@@ -194,6 +216,7 @@ function GenerationPreviewContent() {
   const activeSteps = getActiveSteps(session);
   const isOutlineReady = session?.previewPhase === 'outline-ready';
   const isReviewingOutlines = session?.previewPhase === 'review';
+  const isReviewingSources = session?.previewPhase === 'source-review';
 
   const sceneGenerationErrorMessage = (failure: SceneGenerationFailure): string => {
     if (
@@ -224,6 +247,7 @@ function GenerationPreviewContent() {
   };
 
   const persistSession = (nextSession: GenerationSessionState) => {
+    sessionRef.current = nextSession;
     setSession(nextSession);
     sessionStorage.setItem('generationSession', JSON.stringify(nextSession));
   };
@@ -284,6 +308,7 @@ function GenerationPreviewContent() {
           outlineReviewIntentRef.current = true;
         }
         parsed.taskEngineMode = parsed.taskEngineMode === true;
+        sessionRef.current = parsed;
         setSession(parsed);
       } catch (e) {
         log.error('Failed to parse generation session:', e);
@@ -333,6 +358,102 @@ function GenerationPreviewContent() {
     return thinkingConfig ? { ...body, thinkingConfig } : body;
   };
 
+  const extractDocumentSource = async (
+    source: SessionDocumentSource,
+    generationSession: GenerationSessionState,
+    signal: AbortSignal,
+  ): Promise<ParsedDocumentPart> => {
+    const providerId = source.providerId || generationSession.pdfProviderId;
+    const legacySourceConfig = (
+      source as SessionDocumentSource & {
+        providerConfig?: {
+          apiKey?: string;
+          baseUrl?: string;
+          accessKeyId?: string;
+          accessKeySecret?: string;
+        };
+      }
+    ).providerConfig;
+    const providerConfig = generationSession.pdfProviderConfig || legacySourceConfig;
+    const documentBlob = await loadDocumentBlob(source.storageKey);
+    if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
+      throw new Error(t('generation.courseMaterialLoadFailed'));
+    }
+    const documentFile = new File([documentBlob], source.name || 'document.pdf', {
+      type: source.mimeType || documentBlob.type || 'application/pdf',
+    });
+    const parseFormData = new FormData();
+    parseFormData.append('file', documentFile);
+    if (providerId) parseFormData.append('providerId', providerId);
+    if (providerConfig?.apiKey?.trim()) parseFormData.append('apiKey', providerConfig.apiKey);
+    if (providerConfig?.baseUrl?.trim()) parseFormData.append('baseUrl', providerConfig.baseUrl);
+    if (providerConfig?.accessKeyId?.trim()) {
+      parseFormData.append('accessKeyId', providerConfig.accessKeyId);
+    }
+    if (providerConfig?.accessKeySecret?.trim()) {
+      parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
+    }
+    const parseResponse = await fetch('/api/extract-document', {
+      method: 'POST',
+      body: parseFormData,
+      signal,
+    });
+    if (!parseResponse.ok) throw new Error(t('generation.courseMaterialParseFailed'));
+    const parseResult = await parseResponse.json();
+    if (!parseResult.success || !parseResult.data) {
+      throw new Error(t('generation.courseMaterialParseFailed'));
+    }
+    const parseData = parseResult.data;
+    const rawImages = parseData.metadata?.pdfImages;
+    const images = rawImages
+      ? rawImages.map((img: ParsedDocumentResponseImage) => ({
+          id: img.id,
+          src: img.src || '',
+          pageNumber: img.pageNumber ?? 1,
+          description: img.description,
+          width: img.width,
+          height: img.height,
+        }))
+      : ((parseData.images as string[] | undefined) ?? []).map((src, index) => ({
+          id: `img_${index + 1}`,
+          src,
+          pageNumber: 1,
+        }));
+
+    return {
+      source: {
+        id: source.id,
+        name: source.name,
+        size: source.size,
+        lastModified: source.lastModified,
+        mimeType: source.mimeType,
+        order: source.order,
+        providerId,
+        processingStatus: 'ready',
+      },
+      text: parseData.text as string,
+      rawTextLength: (parseData.text as string).length,
+      pageCount: parseData.metadata?.pageCount,
+      images,
+    };
+  };
+
+  const waitForSourceReview = (
+    signal: AbortSignal,
+  ): Promise<{ sources: SessionDocumentSource[]; parts: ParsedDocumentPart[] }> =>
+    new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      sourceReviewResolveRef.current = resolve;
+      const onAbort = () => {
+        sourceReviewResolveRef.current = null;
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+
   // Auto-start generation when session is loaded
   useEffect(() => {
     if (!session || hasStartedRef.current) return;
@@ -341,6 +462,7 @@ function GenerationPreviewContent() {
     const shouldAutoStart =
       !phase ||
       phase === 'preparing' ||
+      phase === 'source-review' ||
       phase === 'generating-content' ||
       // Refresh during early-review: editor is shown but outlines weren't persisted,
       // so kick off SSE again — the editor will receive streaming outlines.
@@ -386,85 +508,52 @@ function GenerationPreviewContent() {
       if (hasPdfToAnalyze) {
         log.debug('=== Generation Preview: Extracting course material bundle ===');
         validateDocumentSources(documentSources, t);
-        const sortedDocumentSources = [...documentSources].sort((a, b) => a.order - b.order);
-        const parsedParts = await Promise.all(
-          sortedDocumentSources.map(async (source): Promise<ParsedDocumentPart> => {
-            const providerId = source.providerId || currentSession.pdfProviderId;
-            const legacySourceConfig = (
-              source as SessionDocumentSource & {
-                providerConfig?: {
-                  apiKey?: string;
-                  baseUrl?: string;
-                  accessKeyId?: string;
-                  accessKeySecret?: string;
-                };
-              }
-            ).providerConfig;
-            const providerConfig = currentSession.pdfProviderConfig || legacySourceConfig;
-            const documentBlob = await loadDocumentBlob(source.storageKey);
-            if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
-              throw new Error(t('generation.courseMaterialLoadFailed'));
-            }
-            const documentFile = new File([documentBlob], source.name || 'document.pdf', {
-              type: source.mimeType || documentBlob.type || 'application/pdf',
-            });
-            const parseFormData = new FormData();
-            parseFormData.append('file', documentFile);
-            if (providerId) parseFormData.append('providerId', providerId);
-            if (providerConfig?.apiKey?.trim())
-              parseFormData.append('apiKey', providerConfig.apiKey);
-            if (providerConfig?.baseUrl?.trim())
-              parseFormData.append('baseUrl', providerConfig.baseUrl);
-            if (providerConfig?.accessKeyId?.trim()) {
-              parseFormData.append('accessKeyId', providerConfig.accessKeyId);
-            }
-            if (providerConfig?.accessKeySecret?.trim()) {
-              parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
-            }
-            const parseResponse = await fetch('/api/extract-document', {
-              method: 'POST',
-              body: parseFormData,
-              signal,
-            });
-            if (!parseResponse.ok) throw new Error(t('generation.courseMaterialParseFailed'));
-            const parseResult = await parseResponse.json();
-            if (!parseResult.success || !parseResult.data) {
-              throw new Error(t('generation.courseMaterialParseFailed'));
-            }
-            const parseData = parseResult.data;
-            const rawImages = parseData.metadata?.pdfImages;
-            const images = rawImages
-              ? rawImages.map((img: ParsedDocumentResponseImage) => ({
-                  id: img.id,
-                  src: img.src || '',
-                  pageNumber: img.pageNumber ?? 1,
-                  description: img.description,
-                  width: img.width,
-                  height: img.height,
-                }))
-              : ((parseData.images as string[] | undefined) ?? []).map((src, i) => ({
-                  id: `img_${i + 1}`,
-                  src,
-                  pageNumber: 1,
-                }));
+        let sortedDocumentSources: SessionDocumentSource[] = [...documentSources]
+          .sort((a, b) => a.order - b.order)
+          .map((source) => ({
+            ...source,
+            processingStatus: 'processing' as const,
+            processingError: undefined,
+          }));
+        currentSession = { ...currentSession, documentSources: sortedDocumentSources };
+        persistSession(currentSession);
 
-            return {
-              source: {
-                id: source.id,
-                name: source.name,
-                size: source.size,
-                lastModified: source.lastModified,
-                mimeType: source.mimeType,
-                order: source.order,
-                providerId,
-              },
-              text: parseData.text as string,
-              rawTextLength: (parseData.text as string).length,
-              pageCount: parseData.metadata?.pageCount,
-              images,
-            };
-          }),
+        const extraction = await extractDocumentBatch(sortedDocumentSources, (source) =>
+          extractDocumentSource(source, currentSession, signal),
         );
+        parsedDocumentPartsRef.current.clear();
+        for (const result of extraction.successes) {
+          parsedDocumentPartsRef.current.set(result.source.id, result.value);
+        }
+        const failedById = new Map(
+          extraction.failures.map((failure) => [failure.source.id, failure.error]),
+        );
+        sortedDocumentSources = sortedDocumentSources.map((source) => ({
+          ...source,
+          processingStatus: failedById.has(source.id) ? 'failed' : 'ready',
+          processingError: failedById.get(source.id),
+        }));
+
+        let parsedParts = extraction.successes.map((result) => result.value);
+        if (extraction.failures.length > 0) {
+          setStatusMessage('Some source files need attention.');
+          currentSession = {
+            ...currentSession,
+            documentSources: sortedDocumentSources,
+            previewPhase: 'source-review',
+          };
+          persistSession(currentSession);
+          const reviewed = await waitForSourceReview(signal);
+          setStatusMessage('');
+          sortedDocumentSources = reviewed.sources;
+          parsedParts = reviewed.parts;
+          currentSession = {
+            ...currentSession,
+            documentSources: sortedDocumentSources,
+            previewPhase: 'preparing',
+          };
+          persistSession(currentSession);
+        }
 
         const bundle = buildDocumentBundle(parsedParts);
         const imageStorageIds = await storeImages(bundle.images);
@@ -487,7 +576,7 @@ function GenerationPreviewContent() {
         // Update session with extracted document data
         const updatedSession = {
           ...currentSession,
-          documentSources,
+          documentSources: sortedDocumentSources,
           pdfText: bundle.text,
           pdfImages,
           imageStorageIds,
@@ -1209,6 +1298,106 @@ function GenerationPreviewContent() {
     router.push('/');
   };
 
+  const finishSourceReviewIfReady = (nextSession: GenerationSessionState) => {
+    const sources = resolveSessionDocumentSources(nextSession).sort((a, b) => a.order - b.order);
+    if (hasUnresolvedDocumentSources(sources) || !sourceReviewResolveRef.current) return;
+    const resolve = sourceReviewResolveRef.current;
+    sourceReviewResolveRef.current = null;
+    resolve({
+      sources,
+      parts: sources.flatMap((source) => {
+        const part = parsedDocumentPartsRef.current.get(source.id);
+        return part ? [part] : [];
+      }),
+    });
+  };
+
+  const retryDocumentSource = async (sourceId: string) => {
+    const activeSession = sessionRef.current;
+    if (!activeSession || !abortControllerRef.current) return;
+    const source = activeSession.documentSources?.find((candidate) => candidate.id === sourceId);
+    if (!source || source.processingStatus === 'processing') return;
+
+    const processingSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: updateDocumentSourceProcessing(
+        activeSession.documentSources ?? [],
+        sourceId,
+        'processing',
+      ),
+    };
+    persistSession(processingSession);
+    try {
+      const part = await extractDocumentSource(
+        source,
+        processingSession,
+        abortControllerRef.current.signal,
+      );
+      parsedDocumentPartsRef.current.set(sourceId, part);
+      const latestSession = sessionRef.current ?? processingSession;
+      const readySession: GenerationSessionState = {
+        ...latestSession,
+        documentSources: updateDocumentSourceProcessing(
+          latestSession.documentSources ?? [],
+          sourceId,
+          'ready',
+        ),
+      };
+      persistSession(readySession);
+      finishSourceReviewIfReady(readySession);
+    } catch (sourceError) {
+      if (isAbortError(sourceError)) return;
+      const latestSession = sessionRef.current ?? processingSession;
+      const failedSession: GenerationSessionState = {
+        ...latestSession,
+        documentSources: updateDocumentSourceProcessing(
+          latestSession.documentSources ?? [],
+          sourceId,
+          'failed',
+          sourceError instanceof Error
+            ? sourceError.message
+            : t('generation.courseMaterialParseFailed'),
+        ),
+      };
+      persistSession(failedSession);
+    }
+  };
+
+  const removeDocumentSource = async (sourceId: string) => {
+    const activeSession = sessionRef.current;
+    if (!activeSession) return;
+    const source = activeSession.documentSources?.find((candidate) => candidate.id === sourceId);
+    const nextSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: removeDocumentSourceById(activeSession.documentSources ?? [], sourceId),
+    };
+    parsedDocumentPartsRef.current.delete(sourceId);
+    persistSession(nextSession);
+    if (source?.storageKey) await deleteDocumentBlob(source.storageKey).catch(() => undefined);
+    finishSourceReviewIfReady(nextSession);
+  };
+
+  const continueWithoutFailedSources = async () => {
+    const activeSession = sessionRef.current;
+    if (!activeSession) return;
+    const failedSources = activeSession.documentSources?.filter(
+      (source) => source.processingStatus === 'failed',
+    );
+    const failedIds = new Set(failedSources?.map((source) => source.id) ?? []);
+    const nextSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: (activeSession.documentSources ?? []).filter(
+        (source) => !failedIds.has(source.id),
+      ),
+    };
+    for (const source of failedSources ?? []) {
+      parsedDocumentPartsRef.current.delete(source.id);
+      await deleteDocumentBlob(source.storageKey).catch(() => undefined);
+    }
+    persistSession(nextSession);
+    finishSourceReviewIfReady(nextSession);
+  };
+
   // Triggered when the user clicks the streaming outline card mid-stream.
   // SSE keeps running; only the surface morph + intent flag change.
   const handleExpandStreamingOutline = () => {
@@ -1622,6 +1811,84 @@ function GenerationPreviewContent() {
                   )}
                 </AnimatePresence>
               </div>
+
+              {isReviewingSources ? (
+                <div className="w-full max-w-sm border-t border-border/70 pt-4 text-left">
+                  <div className="space-y-2">
+                    {session.documentSources?.map((source) => {
+                      const isProcessing = source.processingStatus === 'processing';
+                      const isFailed = source.processingStatus === 'failed';
+                      return (
+                        <div
+                          key={source.id}
+                          className="flex items-center gap-2 rounded-md border border-border/60 px-2.5 py-2"
+                        >
+                          <FileText
+                            className={cn(
+                              'size-4 shrink-0',
+                              isFailed ? 'text-destructive' : 'text-muted-foreground',
+                            )}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-xs font-medium text-foreground">
+                              {source.name}
+                            </p>
+                            <p
+                              className={cn(
+                                'truncate text-[10px]',
+                                isFailed ? 'text-destructive' : 'text-muted-foreground',
+                              )}
+                            >
+                              {isProcessing
+                                ? 'Processing'
+                                : isFailed
+                                  ? source.processingError || 'Could not process this file'
+                                  : 'Ready'}
+                            </p>
+                          </div>
+                          {isFailed || isProcessing ? (
+                            <button
+                              type="button"
+                              onClick={() => void retryDocumentSource(source.id)}
+                              disabled={isProcessing}
+                              className="grid size-7 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                              aria-label={`Retry ${source.name}`}
+                              title="Retry file"
+                            >
+                              <RefreshCw
+                                className={cn('size-3.5', isProcessing && 'animate-spin')}
+                              />
+                            </button>
+                          ) : null}
+                          {isFailed ? (
+                            <button
+                              type="button"
+                              onClick={() => void removeDocumentSource(source.id)}
+                              className="grid size-7 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              aria-label={`Remove ${source.name}`}
+                              title="Remove file"
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={() => void continueWithoutFailedSources()}
+                    disabled={session.documentSources?.some(
+                      (source) => source.processingStatus === 'processing',
+                    )}
+                  >
+                    Continue without failed files
+                  </Button>
+                </div>
+              ) : null}
             </div>
           </Card>
         </motion.div>
@@ -1639,7 +1906,7 @@ function GenerationPreviewContent() {
                   {t('generation.goBackAndRetry')}
                 </Button>
               </motion.div>
-            ) : isOutlineReady ? null : !isComplete ? (
+            ) : isOutlineReady || isReviewingSources ? null : !isComplete ? (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

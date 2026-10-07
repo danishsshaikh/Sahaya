@@ -665,6 +665,7 @@ function HomePage() {
               order: index + 1,
               storageKey,
               providerId: pdfProviderId,
+              processingStatus: 'pending',
             });
           }
         } catch (error) {

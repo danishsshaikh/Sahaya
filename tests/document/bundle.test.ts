@@ -74,6 +74,30 @@ describe('document bundle', () => {
     ]);
   });
 
+  it('keeps PDF and presentation provenance in a shared bounded context', () => {
+    const pdf = part(1);
+    const presentation = part(2, {
+      source: {
+        ...part(2).source,
+        name: 'Lecture slides.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      },
+    });
+
+    const bundle = buildDocumentBundle([pdf, presentation], {
+      maxChars: 1000,
+      maxVisionImages: 2,
+    });
+
+    expect(bundle.text).toContain('Source 1.pdf');
+    expect(bundle.text).toContain('Lecture slides.pptx');
+    expect(bundle.images.map((image) => image.sourceDocumentName)).toEqual([
+      'Source 1.pdf',
+      'Lecture slides.pptx',
+    ]);
+    expect(bundle.text.length).toBeLessThanOrEqual(1000);
+  });
+
   it('assigns vision priority round-robin across source documents', () => {
     const bundle = buildDocumentBundle(
       [
