@@ -174,4 +174,60 @@ describe('pronunciation repair', () => {
     await expect(requestPronunciationRepair(request())).rejects.toThrow('provider unavailable');
     expect(mocks.state.scenes[0].actions?.[0]).toMatchObject({ audioId: 'audio-old' });
   });
+
+  it('allows only the latest pronunciation revision to replace audio', async () => {
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    mocks.generate
+      .mockReturnValueOnce(new Promise<string>((done) => (resolveFirst = done)))
+      .mockReturnValueOnce(new Promise<string>((done) => (resolveSecond = done)));
+    const { requestPronunciationRepair } = await import('@/lib/audio/pronunciation-repair');
+
+    const first = requestPronunciationRepair(request('pol-IM-er-ace'));
+    const second = requestPronunciationRepair(request('pol-y-mer-ace'));
+
+    resolveFirst('audio-first');
+    await expect(first).resolves.toMatchObject({ status: 'stale' });
+    expect(mocks.state.scenes[0].actions?.[0]).toMatchObject({ audioId: 'audio-old' });
+    expect(mocks.remove).toHaveBeenCalledWith(['audio-first']);
+
+    resolveSecond('audio-second');
+    await expect(second).resolves.toMatchObject({ status: 'replaced', audioId: 'audio-second' });
+    expect(mocks.state.scenes[0].actions?.[0]).toMatchObject({ audioId: 'audio-second' });
+  });
+
+  it('repairs the identified speech action instead of the first action in its scene', async () => {
+    mocks.state.scenes[0].actions = [
+      { id: 'speech-first', type: 'speech', text: 'First narration.', audioId: 'audio-first' },
+      {
+        id: 'speech-target',
+        type: 'speech',
+        text: 'Hinduism, Buddhism, and Jainism.',
+        audioId: 'audio-target-old',
+      },
+    ];
+    mocks.generate.mockResolvedValue('audio-target-new');
+    const { requestPronunciationRepair } = await import('@/lib/audio/pronunciation-repair');
+
+    await expect(
+      requestPronunciationRepair({
+        stageId: 'stage-1',
+        sceneId: 'scene-1',
+        actionId: 'speech-target',
+        actionIndex: 1,
+        displayText: 'Hinduism, Buddhism, and Jainism.',
+        startOffset: 24,
+        endOffset: 31,
+        pronounceAs: 'JAY-nism',
+        language: 'English',
+      }),
+    ).resolves.toMatchObject({ status: 'replaced', audioId: 'audio-target-new' });
+
+    expect(mocks.state.scenes[0].actions?.[0]).toMatchObject({ audioId: 'audio-first' });
+    expect(mocks.state.scenes[0].actions?.[1]).toMatchObject({
+      text: 'Hinduism, Buddhism, and Jainism.',
+      audioId: 'audio-target-new',
+    });
+    expect(mocks.generate.mock.calls[0][1]).toBe('Hinduism, Buddhism, and JAY-nism.');
+  });
 });

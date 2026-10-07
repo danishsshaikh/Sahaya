@@ -94,6 +94,7 @@ import {
   resolveSpeechAudioId,
 } from '@/lib/audio/regenerate-speech-tts';
 import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
+import { PronunciationRepairDialog } from './PronunciationRepairDialog';
 
 const EMPTY: Action[] = [];
 const EMPTY_ELEMENTS: { id?: string; type: string; content?: string }[] = [];
@@ -274,6 +275,9 @@ type PreviewPhase = 'idle' | 'loading' | 'playing';
 
 /** Audio status + preview / regenerate row, shown when managed TTS is on. */
 export function SpeechTtsBar({
+  stageId,
+  sceneId,
+  actionIndex,
   actionId,
   audioId,
   audioUrl,
@@ -283,8 +287,13 @@ export function SpeechTtsBar({
   text,
   refreshKey,
   regenerating,
+  actionVoicePending,
   onGenerated,
+  onRepairPendingChange,
 }: {
+  stageId: string;
+  sceneId: string;
+  actionIndex: number;
   actionId: string;
   audioId?: string;
   /** The legacy URL of an unconverted pair: narration exists until conversion removes it. */
@@ -295,6 +304,7 @@ export function SpeechTtsBar({
   text: string;
   refreshKey?: number;
   regenerating?: boolean;
+  actionVoicePending: boolean;
   /**
    * Notification that regeneration succeeded. Carries the freshly allocated
    * audioId so the caller can stamp it on the action: this tree allocates pool
@@ -302,9 +312,11 @@ export function SpeechTtsBar({
    * re-derived by the caller like the reference's deterministic key.
    */
   onGenerated: (audioId: string) => void;
+  onRepairPendingChange: (pending: boolean) => void;
 }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<TtsStatus>('none');
+  const [pronunciationRepairPending, setPronunciationRepairPending] = useState(false);
   // Holds this line in the generating state across a batch ("Voice all") run
   // and — crucially — until its OWN audio re-check resolves, so it can't
   // briefly flash back to not voiced in the window between the batch clearing
@@ -485,6 +497,26 @@ export function SpeechTtsBar({
       <Volume2 className="size-3 shrink-0 text-muted-foreground/40" />
       <span className={cn('text-[10px] font-medium', s.cls)}>{s.label}</span>
       <span className="ml-auto" />
+      {mayRegenerate && stageId ? (
+        <PronunciationRepairDialog
+          stageId={stageId}
+          sceneId={sceneId}
+          actionId={actionId}
+          actionIndex={actionIndex}
+          displayText={text}
+          language={language}
+          actionVoicePending={actionVoicePending || effStatus === 'generating'}
+          onPendingChange={(pending) => {
+            setPronunciationRepairPending(pending);
+            onRepairPendingChange(pending);
+          }}
+          onRepaired={(audioId) => {
+            setReadAudioId(audioId);
+            setStatus('ready');
+            onGenerated(audioId);
+          }}
+        />
+      ) : null}
       <button
         type="button"
         onClick={previewPhase === 'idle' ? () => void preview() : stopPreview}
@@ -504,7 +536,7 @@ export function SpeechTtsBar({
         <button
           type="button"
           onClick={regenerate}
-          disabled={effStatus === 'generating' || !text.trim()}
+          disabled={effStatus === 'generating' || pronunciationRepairPending || !text.trim()}
           className="grid size-5 place-items-center rounded-md text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
           aria-label={t('edit.tts.regenerate')}
           title={t('edit.tts.regenerate')}
@@ -518,8 +550,11 @@ export function SpeechTtsBar({
 
 /** One spoken line — a numbered, editable clip block. */
 function SpeechClip({
+  stageId,
+  sceneId,
   text,
   index,
+  actionIndex,
   actionId,
   audioId,
   audioUrl,
@@ -530,8 +565,10 @@ function SpeechClip({
   ttsActive,
   ttsRefresh,
   regenerating,
+  actionVoicePending,
   onCommit,
   onGenerated,
+  onRepairPendingChange,
   onDelete,
   onMoveLeft,
   onMoveRight,
@@ -541,8 +578,11 @@ function SpeechClip({
   onDragEnd,
   onFocused,
 }: {
+  stageId: string;
+  sceneId: string;
   text: string;
   index: number;
+  actionIndex: number;
   actionId: string;
   audioId?: string;
   audioUrl?: string;
@@ -553,8 +593,10 @@ function SpeechClip({
   ttsActive: boolean;
   ttsRefresh?: number;
   regenerating?: boolean;
+  actionVoicePending: boolean;
   onCommit: (text: string) => void;
   onGenerated: (audioId: string) => void;
+  onRepairPendingChange: (pending: boolean) => void;
   onDelete: () => void;
   onMoveLeft: () => void;
   onMoveRight: () => void;
@@ -641,6 +683,9 @@ function SpeechClip({
       />
       {ttsActive && (
         <SpeechTtsBar
+          stageId={stageId}
+          sceneId={sceneId}
+          actionIndex={actionIndex}
           actionId={actionId}
           audioId={audioId}
           audioUrl={audioUrl}
@@ -650,6 +695,8 @@ function SpeechClip({
           text={val}
           refreshKey={ttsRefresh}
           regenerating={regenerating}
+          actionVoicePending={actionVoicePending}
+          onRepairPendingChange={onRepairPendingChange}
           onGenerated={onGenerated}
         />
       )}
@@ -1052,15 +1099,22 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
         | undefined
     )?.canvas?.elements ?? EMPTY_ELEMENTS;
   const language = useStageStore((s) => s.stage?.languageDirective);
+  const stageId = useStageStore((s) => s.stage?.id ?? '');
+  const teacherVoiceProfileId = useStageStore((s) => s.stage?.teacherVoiceProfileId);
   // Managed TTS on → speech clips show audio status + preview / regenerate.
   // The ownership gate belongs on regeneration alone: listening back to
   // narration that already exists, and seeing whether a line has any, spend
   // nothing, and a course with no ownership record must not lose its playback
   // controls the way it must lose its ability to bill the operator.
   const ttsActive = useSettingsStore(
-    (s) => s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts',
+    (s) =>
+      Boolean(teacherVoiceProfileId) || (s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts'),
   );
   const mayGenerate = useMayGenerateForStage(useStageStore((s) => s.stage?.id));
+  const sceneNarrationInFlight =
+    scene?.narrationStatus === 'pending' ||
+    scene?.narrationStatus === 'queued' ||
+    scene?.narrationStatus === 'running';
 
   // Agents a discussion can be initiated by — sourced from the user's currently
   // SELECTED agents, the exact set the playback engine gates on: it skips (and
@@ -1092,6 +1146,7 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
   // Ids of speech lines currently being (re)generated by "Voice all", so each
   // line's status row shows the generating state for the duration of the batch.
   const [regeneratingIds, setRegeneratingIds] = useState<ReadonlySet<string>>(NO_IDS);
+  const [repairingIds, setRepairingIds] = useState<ReadonlySet<string>>(NO_IDS);
   const [ttsRefresh, setTtsRefresh] = useState(0); // bump → speech clips re-check audio status
   const reduce = useReducedMotion();
   const dragRef = useRef<DragPayload | null>(null);
@@ -1114,7 +1169,10 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
     if (regenAll) return;
     const latest = () => useStageStore.getState().scenes.find((s) => s.id === sceneId);
     const speeches = (latest()?.actions ?? []).filter(
-      (a) => a.type === 'speech' && ((a as { text?: string }).text ?? '').trim(),
+      (a) =>
+        a.type === 'speech' &&
+        ((a as { text?: string }).text ?? '').trim() &&
+        !repairingIds.has(a.id ?? ''),
     );
     if (!speeches.length) return;
     const order = latest()?.order ?? 0;
@@ -1156,7 +1214,7 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
       // batchPending flag) instead of getting stuck in the generating state.
       setTtsRefresh((n) => n + 1);
     }
-  }, [regenAll, sceneId, language, commit]);
+  }, [regenAll, sceneId, language, commit, repairingIds]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const panViewport = (dir: -1 | 1) =>
@@ -1378,8 +1436,11 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
                         <div className="min-h-0 w-full flex-1">
                           {action.type === 'speech' ? (
                             <SpeechClip
+                              stageId={stageId}
+                              sceneId={sceneId}
                               text={(action as { text?: string }).text ?? ''}
                               index={si}
+                              actionIndex={index}
                               actionId={key}
                               audioId={(action as { audioId?: string }).audioId}
                               audioUrl={(action as { audioUrl?: string }).audioUrl}
@@ -1391,6 +1452,11 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
                               ttsActive={ttsActive}
                               ttsRefresh={ttsRefresh}
                               regenerating={regeneratingIds.has(key)}
+                              actionVoicePending={
+                                regeneratingIds.has(key) ||
+                                (sceneNarrationInFlight &&
+                                  !(action as { audioId?: string }).audioId)
+                              }
                               autoFocus={key === focusId}
                               onFocused={() => setFocusId(null)}
                               onCommit={(text) => {
@@ -1415,6 +1481,14 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
                                 // stamped reference is durable once the row
                                 // settles (pool bytes persist first, stamp last).
                                 void flushStageSave().catch(() => undefined);
+                              }}
+                              onRepairPendingChange={(pending) => {
+                                setRepairingIds((current) => {
+                                  const next = new Set(current);
+                                  if (pending) next.add(key);
+                                  else next.delete(key);
+                                  return next.size > 0 ? next : NO_IDS;
+                                });
                               }}
                               onDelete={() => {
                                 commit((cur) => removeById(cur, key));

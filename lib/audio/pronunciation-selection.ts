@@ -4,6 +4,29 @@ export interface TextSelectionOffsets {
   text: string;
 }
 
+export interface PronunciationPhraseOccurrence {
+  startOffset: number;
+  endOffset: number;
+}
+
+/** Find every non-overlapping exact occurrence so callers can choose one deterministically. */
+export function findPronunciationPhraseOccurrences(
+  displayText: string,
+  phrase: string,
+): PronunciationPhraseOccurrence[] {
+  if (!phrase) return [];
+
+  const occurrences: PronunciationPhraseOccurrence[] = [];
+  let fromIndex = 0;
+  while (fromIndex <= displayText.length - phrase.length) {
+    const startOffset = displayText.indexOf(phrase, fromIndex);
+    if (startOffset < 0) break;
+    occurrences.push({ startOffset, endOffset: startOffset + phrase.length });
+    fromIndex = startOffset + phrase.length;
+  }
+  return occurrences;
+}
+
 export function selectionOffsetsWithin(
   container: HTMLElement,
   selection: Selection | null,

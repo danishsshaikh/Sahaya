@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  findPronunciationPhraseOccurrences,
   isShortPronunciationSelection,
   selectionOffsetsWithin,
 } from '@/lib/audio/pronunciation-selection';
@@ -41,5 +42,14 @@ describe('pronunciation text selection', () => {
         text: Array.from({ length: 20 }, () => 'word').join(' '),
       }),
     ).toBe(false);
+  });
+
+  it('returns deterministic offsets for repeated exact phrases', () => {
+    expect(
+      findPronunciationPhraseOccurrences('India influenced India-facing trade routes.', 'India'),
+    ).toEqual([
+      { startOffset: 0, endOffset: 5 },
+      { startOffset: 17, endOffset: 22 },
+    ]);
   });
 });
