@@ -23,6 +23,7 @@ import type { SceneType, SlideContent, InteractiveContent } from '@/lib/types/st
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { BrandWordmark } from '@/components/branding/brand-wordmark';
 import { filterEnabledScenes } from '@/lib/config/feature-flags';
+import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
 
 interface SceneSidebarProps {
   readonly collapsed: boolean;
@@ -51,6 +52,10 @@ export function SceneSidebar({
   const viewportSize = useCanvasStore.use.viewportSize();
   const viewportRatio = useCanvasStore.use.viewportRatio();
   const visibleScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
+  const pendingScene = useMemo(
+    () => selectNextRecoverableOutline(generatingOutlines, failedOutlines),
+    [failedOutlines, generatingOutlines],
+  );
 
   const [retryingOutlineId, setRetryingOutlineId] = useState<string | null>(null);
 
@@ -352,10 +357,9 @@ export function SceneSidebar({
           })}
 
           {/* Single placeholder for the next generating page (clickable) */}
-          {generatingOutlines.length > 0 &&
+          {pendingScene &&
             (() => {
-              const outline = generatingOutlines[0];
-              const isFailed = failedOutlines.some((f) => f.id === outline.id);
+              const { outline, failed: isFailed } = pendingScene;
               const isRetrying = retryingOutlineId === outline.id;
               const isPaused = generationStatus === 'paused';
               const isActive = currentSceneId === PENDING_SCENE_ID;
@@ -391,7 +395,7 @@ export function SceneSidebar({
                             : 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500',
                         )}
                       >
-                        {scenes.length + 1}
+                        {outline.order}
                       </span>
                       <span
                         className={cn(
@@ -473,7 +477,7 @@ export function SceneSidebar({
 
           {/* Course-complete placeholder (shown when outline is exhausted) */}
           {isCourseComplete &&
-            generatingOutlines.length === 0 &&
+            !pendingScene &&
             (() => {
               const isActive = currentSceneId === PENDING_SCENE_ID;
               return (

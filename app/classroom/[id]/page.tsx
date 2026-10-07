@@ -347,14 +347,17 @@ export default function ClassroomDetailPage() {
     if (!mayGenerate) return;
 
     const state = useStageStore.getState();
-    const { outlines, scenes, stage, generationComplete } = state;
+    const { outlines, scenes, stage, failedOutlines, generationComplete } = state;
 
     // Check if there are pending outlines. A finished deck is frozen for
     // editing: deleting a slide leaves its outline orphaned, but that must not
     // be treated as an interrupted generation and regenerated. Only resume
     // when generation has not completed.
     const completedOrders = new Set(scenes.map((s) => s.order));
-    const hasPending = !generationComplete && outlines.some((o) => !completedOrders.has(o.order));
+    const failedIds = new Set(failedOutlines.map((outline) => outline.id));
+    const hasPending =
+      !generationComplete &&
+      outlines.some((outline) => !failedIds.has(outline.id) && !completedOrders.has(outline.order));
 
     if (hasPending && stage) {
       generationStartedRef.current = true;

@@ -216,6 +216,8 @@ describe('browser scene generation retry wrappers', () => {
           success: true,
           async: true,
           jobId: 'job-1',
+          stageId: 'stage-1',
+          outlineId: simulationOutline.id,
           status: 'queued',
           pollIntervalMs: 1,
         }),
@@ -225,6 +227,8 @@ describe('browser scene generation retry wrappers', () => {
           success: true,
           async: true,
           jobId: 'job-1',
+          stageId: 'stage-1',
+          outlineId: simulationOutline.id,
           status: 'generating',
         }),
       )
@@ -233,6 +237,8 @@ describe('browser scene generation retry wrappers', () => {
           success: true,
           async: true,
           jobId: 'job-1',
+          stageId: 'stage-1',
+          outlineId: simulationOutline.id,
           status: 'completed',
           content: { html: '<html>Simulation</html>', widgetType: 'simulation' },
           effectiveOutline: simulationOutline,
@@ -268,6 +274,8 @@ describe('browser scene generation retry wrappers', () => {
           success: true,
           async: true,
           jobId: 'job-failed',
+          stageId: 'stage-1',
+          outlineId: simulationOutline.id,
           status: 'queued',
           pollIntervalMs: 1,
         }),
@@ -277,6 +285,8 @@ describe('browser scene generation retry wrappers', () => {
           success: true,
           async: true,
           jobId: 'job-failed',
+          stageId: 'stage-1',
+          outlineId: simulationOutline.id,
           status: 'failed',
           error: 'Simulation generation failed',
         }),
@@ -302,6 +312,39 @@ describe('browser scene generation retry wrappers', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('rejects an async job whose stage or outline identity does not match the request', async () => {
+    const { fetchSceneContent } = await import('@/lib/hooks/use-scene-generator');
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(202, {
+        success: true,
+        async: true,
+        jobId: 'job-wrong-outline',
+        stageId: 'stage-1',
+        outlineId: 'outline-other',
+        status: 'queued',
+      }),
+    );
+
+    const result = await fetchSceneContent(
+      {
+        outline: simulationOutline,
+        allOutlines: [simulationOutline],
+        stageId: 'stage-1',
+        stageInfo: { name: 'Retry Course' },
+      },
+      undefined,
+      retryOptions,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'failed',
+      jobTerminal: true,
+      errorCode: 'GENERATION_FAILED',
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('rethrows aborts while polling async simulation content', async () => {
     const { fetchSceneContent } = await import('@/lib/hooks/use-scene-generator');
     const controller = new AbortController();
@@ -311,6 +354,8 @@ describe('browser scene generation retry wrappers', () => {
         success: true,
         async: true,
         jobId: 'job-abort',
+        stageId: 'stage-1',
+        outlineId: simulationOutline.id,
         status: 'queued',
         pollIntervalMs: 1,
       }),

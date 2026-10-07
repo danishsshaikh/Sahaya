@@ -79,6 +79,7 @@ import {
   type ActiveNarrationHighlight,
   type NarrationCue,
 } from '@/lib/playback/narration-cues';
+import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
 
 type DraftElementReference = {
   reference: ElementReference;
@@ -1287,7 +1288,11 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // get scene information
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
-    const hasNextPending = generatingOutlines.length > 0;
+    const pendingScene = useMemo(
+      () => selectNextRecoverableOutline(generatingOutlines, failedOutlines),
+      [failedOutlines, generatingOutlines],
+    );
+    const hasNextPending = pendingScene !== null;
     // True when every outline has materialized into a scene and nothing is
     // currently generating — signals the classroom has finished and the user
     // can see a completion page. Comparing scenes.length === outlines.length
@@ -1799,12 +1804,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               hideToolbar={mode === 'playback' || (isPresenting && !controlsVisible)}
               isPendingScene={isPendingScene}
               isCourseComplete={isCourseComplete}
-              isGenerationFailed={
-                isPendingScene && failedOutlines.some((f) => f.id === generatingOutlines[0]?.id)
-              }
+              isGenerationFailed={isPendingScene && pendingScene?.failed === true}
               onRetryGeneration={
-                onRetryOutline && generatingOutlines[0]
-                  ? () => onRetryOutline(generatingOutlines[0].id)
+                onRetryOutline && pendingScene?.failed
+                  ? () => onRetryOutline(pendingScene.outline.id)
                   : undefined
               }
             />

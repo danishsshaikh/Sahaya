@@ -85,6 +85,8 @@ interface SceneContentResult {
   status?: SceneContentJobStatus;
   pollIntervalMs?: number;
   jobTerminal?: boolean;
+  stageId?: string;
+  outlineId?: string;
 }
 
 interface SceneActionsResult {
@@ -212,6 +214,7 @@ const defaultPollSleep = (ms: number, signal?: AbortSignal) =>
 
 async function pollSceneContentJob(
   initial: SceneContentResult & { async: true; jobId: string },
+  expected: { stageId: string; outlineId: string },
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneContentResult>,
 ): Promise<SceneContentResult> {
@@ -258,6 +261,16 @@ async function pollSceneContentJob(
     const data = (await readJsonResponse(response)) as unknown as SceneContentResult;
     if (!response.ok) {
       throw createHttpError(response, data, 'Scene content job status request failed');
+    }
+    if (data.stageId !== expected.stageId || data.outlineId !== expected.outlineId) {
+      return {
+        success: false,
+        error: 'Scene content job identity did not match the requested slide',
+        errorCode: 'GENERATION_FAILED',
+        jobId: initial.jobId,
+        status: 'failed',
+        jobTerminal: true,
+      };
     }
 
     if (data.status === 'completed') {
@@ -341,7 +354,22 @@ export async function fetchSceneContent(
 
         const result = data as unknown as SceneContentResult;
         if (isAsyncSceneContentStart(result)) {
-          return pollSceneContentJob(result, signal, retryOptions);
+          if (result.stageId !== params.stageId || result.outlineId !== params.outline.id) {
+            return {
+              success: false,
+              error: 'Scene content job identity did not match the requested slide',
+              errorCode: 'GENERATION_FAILED',
+              jobId: result.jobId,
+              status: 'failed',
+              jobTerminal: true,
+            };
+          }
+          return pollSceneContentJob(
+            result,
+            { stageId: params.stageId, outlineId: params.outline.id },
+            signal,
+            retryOptions,
+          );
         }
 
         return result;
@@ -1022,6 +1050,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const mediaAbortRef = useRef<AbortController | null>(null);
   const fetchAbortRef = useRef<AbortController | null>(null);
   const narrationTasksRef = useRef(new Map<string, ManagedNarrationTask>());
+  const retryTasksRef = useRef(new Map<string, AbortController>());
   const lastParamsRef = useRef<GenerationParams | null>(null);
   const generateRemainingRef = useRef<((params: GenerationParams) => Promise<void>) | null>(null);
 
@@ -1033,18 +1062,25 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     }
   }, []);
 
+  const abortRetryTasks = useCallback(() => {
+    for (const controller of retryTasksRef.current.values()) controller.abort();
+    retryTasksRef.current.clear();
+  }, []);
+
   useEffect(() => {
     let observedEpoch = store.getState().generationEpoch;
     const unsubscribe = store.subscribe((state) => {
       if (state.generationEpoch === observedEpoch) return;
       observedEpoch = state.generationEpoch;
       abortNarrationTasks();
+      abortRetryTasks();
     });
     return () => {
       unsubscribe();
       abortNarrationTasks();
+      abortRetryTasks();
     };
-  }, [abortNarrationTasks, store]);
+  }, [abortNarrationTasks, abortRetryTasks, store]);
 
   const scheduleNarration = useCallback(
     ({
@@ -1226,8 +1262,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       // Determine pending outlines
       const completedOrders = new Set(scenes.map((s) => s.order));
+      const failedIds = new Set(state.failedOutlines.map((outline) => outline.id));
       const pending = outlines
-        .filter((o) => !completedOrders.has(o.order))
+        .filter((o) => !failedIds.has(o.id) && !completedOrders.has(o.order))
         .sort((a, b) => a.order - b.order);
 
       if (pending.length === 0) {
@@ -1414,6 +1451,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               break;
             }
             store.getState().addFailedOutline(outline);
+            removeGeneratingOutline(outline.id);
             options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
             if (contentPromises) {
               // Parallel: surface the failure but keep going with the other scenes
@@ -1557,6 +1595,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               break;
             }
             store.getState().addFailedOutline(outline);
+            removeGeneratingOutline(outline.id);
             options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
@@ -1565,7 +1604,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         }
 
         if (!abortRef.current && !pausedByFailureOrAbort) {
-          if (hadContentFailure) {
+          if (hadContentFailure || store.getState().failedOutlines.length > 0) {
             // Parallel content phase left some outlines failed but kept going;
             // surface them for retry instead of signalling a clean completion.
             store.getState().setGenerationStatus('paused');
@@ -1618,7 +1657,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     fetchAbortRef.current?.abort();
     mediaAbortRef.current?.abort();
     abortNarrationTasks();
-  }, [abortNarrationTasks, store]);
+    abortRetryTasks();
+  }, [abortNarrationTasks, abortRetryTasks, store]);
 
   const isGenerating = useCallback(() => generatingRef.current, []);
 
@@ -1635,6 +1675,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       // the render condition one rule.
       if (!mayGenerateForStage(state.stage.id)) return;
       const retryEpoch = state.generationEpoch;
+      const retryKey = `${state.stage.id}:${retryEpoch}:${outline.id}`;
+      if (retryTasksRef.current.has(retryKey)) return;
 
       // Regen-lock (#571): never silently replace a scene that is open in
       // edit mode. Failed outlines have no completed scene yet so this is
@@ -1667,6 +1709,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       }
 
       const abortController = new AbortController();
+      retryTasksRef.current.set(retryKey, abortController);
       const signal = abortController.signal;
       let committedSceneId: string | null = null;
 
@@ -1688,11 +1731,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
         if (!contentResult.success || !contentResult.content) {
           store.getState().addFailedOutline(outline);
+          options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
           return;
         }
 
         // Step 2: Actions
-        const sortedScenes = [...store.getState().scenes].sort((a, b) => a.order - b.order);
+        const sortedScenes = store
+          .getState()
+          .scenes.filter((scene) => scene.order < outline.order)
+          .sort((a, b) => a.order - b.order);
         const lastScene = sortedScenes[sortedScenes.length - 1];
         const previousSpeeches = lastScene
           ? (lastScene.actions || [])
@@ -1716,6 +1763,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
         if (!actionsResult.success || !actionsResult.scene) {
           store.getState().addFailedOutline(outline);
+          options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
           return;
         }
 
@@ -1759,12 +1807,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         // Resume remaining generation if there are pending outlines
         if (store.getState().generatingOutlines.length > 0 && lastParamsRef.current) {
           generateRemainingRef.current?.(lastParamsRef.current);
+        } else if (store.getState().failedOutlines.length > 0) {
+          store.getState().setGenerationStatus('paused');
         } else {
           // This retry may have materialized the final outstanding slide. The
           // generateRemaining completion path is not reached on the retry flow,
           // so mark completion here too — otherwise a later delete would treat
           // the orphaned outline as pending and regenerate it.
           store.getState().markGenerationCompleteIfDone();
+          store.getState().setGenerationStatus('completed');
         }
       } catch (err) {
         if (!isAbortError(err)) {
@@ -1773,6 +1824,16 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           } else {
             store.getState().addFailedOutline(outline);
           }
+        }
+      } finally {
+        if (!committedSceneId) {
+          removeGeneratingOutline();
+          if (store.getState().generationEpoch === retryEpoch) {
+            store.getState().setGenerationStatus('paused');
+          }
+        }
+        if (retryTasksRef.current.get(retryKey) === abortController) {
+          retryTasksRef.current.delete(retryKey);
         }
       }
     },

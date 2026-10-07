@@ -558,6 +558,8 @@ export async function POST(req: NextRequest) {
           async: true,
           jobId: job.id,
           status: job.status,
+          stageId: job.stageId,
+          outlineId: job.outlineId,
           pollUrl: `${buildRequestOrigin(req)}/api/generate/scene-content/status?jobId=${job.id}`,
           pollIntervalMs: SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS,
           done: job.status === 'completed' || job.status === 'failed',

@@ -127,8 +127,16 @@ function makeStageState() {
     bumpGenerationEpoch() {
       state.generationEpoch += 1;
     },
-    retryFailedOutline: vi.fn(),
-    markGenerationCompleteIfDone: vi.fn(),
+    retryFailedOutline(outlineId: string) {
+      state.failedOutlines = state.failedOutlines.filter((outline) => outline.id !== outlineId);
+    },
+    markGenerationCompleteIfDone() {
+      state.generationComplete =
+        state.failedOutlines.length === 0 &&
+        state.outlines.every((outline) =>
+          state.scenes.some((scene) => scene.order === outline.order),
+        );
+    },
   };
   return state;
 }
@@ -171,6 +179,7 @@ function actionResponse(order: number) {
 async function mountGenerator(root: Root, onComplete = vi.fn()) {
   let generator!: {
     generateRemaining: (params: { stageInfo: { name: string } }) => Promise<void>;
+    retrySingleOutline: (outlineId: string) => Promise<void>;
     stop: () => void;
   };
   const { useSceneGenerator } = await import('@/lib/hooks/use-scene-generator');
@@ -307,5 +316,83 @@ describe('scene generator visual and narration pipelines', () => {
     expect(mocks.stageState.generationStatus).toBe('completed');
     expect(mocks.stageState.failedOutlines).toEqual([]);
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps scene 1 usable and retries only a terminally failed async scene 2', async () => {
+    const contentAttempts = new Map<number, number>();
+    let scene2StatusChecks = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/scene-content') {
+          const order = body.outline.order as number;
+          contentAttempts.set(order, (contentAttempts.get(order) ?? 0) + 1);
+          if (order === 2) {
+            const attempt = contentAttempts.get(order)!;
+            return Promise.resolve(
+              jsonResponse({
+                success: true,
+                async: true,
+                jobId: `scene-2-attempt-${attempt}`,
+                stageId: 'stage-1',
+                outlineId: 'outline-2',
+                status: 'queued',
+                pollIntervalMs: 1,
+              }),
+            );
+          }
+          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+        }
+        if (url.startsWith('/api/generate/scene-content/status?jobId=scene-2-attempt-')) {
+          scene2StatusChecks += 1;
+          const retrySucceeded = url.endsWith('scene-2-attempt-2');
+          return Promise.resolve(
+            jsonResponse({
+              success: retrySucceeded,
+              async: true,
+              jobId: retrySucceeded ? 'scene-2-attempt-2' : 'scene-2-attempt-1',
+              stageId: 'stage-1',
+              outlineId: 'outline-2',
+              status: retrySucceeded ? 'completed' : 'failed',
+              ...(retrySucceeded ? { content: { elements: [] } } : { error: 'Timed out' }),
+            }),
+          );
+        }
+        if (url === '/api/generate/scene-actions') {
+          return Promise.resolve(actionResponse(body.outline.order as number));
+        }
+        if (url === '/api/generate/tts') {
+          return new Promise(() => undefined);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generator } = await mountGenerator(root);
+    await generator.generateRemaining({ stageInfo: { name: 'Recoverable lesson' } });
+
+    expect(mocks.stageState.scenes.map((scene) => scene.id)).toEqual(['scene-1']);
+    expect(mocks.stageState.currentSceneId).toBe('scene-1');
+    expect(mocks.stageState.failedOutlines.map((outline) => outline.id)).toEqual(['outline-2']);
+    expect(mocks.stageState.generatingOutlines.map((outline) => outline.id)).toEqual(['outline-3']);
+    expect(mocks.stageState.generationStatus).toBe('paused');
+
+    await Promise.all([
+      generator.retrySingleOutline('outline-2'),
+      generator.retrySingleOutline('outline-2'),
+    ]);
+
+    expect(contentAttempts.get(2)).toBe(2);
+    expect(scene2StatusChecks).toBe(2);
+    await vi.waitFor(() => {
+      expect(mocks.stageState.scenes.map((scene) => scene.id)).toEqual([
+        'scene-1',
+        'scene-2',
+        'scene-3',
+      ]);
+    });
+    expect(mocks.stageState.failedOutlines).toEqual([]);
+    expect(mocks.stageState.generationComplete).toBe(true);
   });
 });

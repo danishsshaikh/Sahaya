@@ -28,6 +28,8 @@ export type DocumentProducer = 'client' | 'server-job';
 /** Generation intent stored opaquely with the document aggregate. */
 export interface AppDocumentOutline {
   outlines: SceneOutline[];
+  /** Terminal client-generation failures preserved so hydration does not report them as running. */
+  failedOutlineIds?: string[];
   /**
    * The requirement text the plan was generated from (agent runtime only).
    * Doubles as the replan idempotency key: a `generate_outline` replan
