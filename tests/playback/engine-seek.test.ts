@@ -367,13 +367,16 @@ describe('generated narration completion ownership', () => {
     vi.useFakeTimers();
     const onSpeechStart = vi.fn();
     const onComplete = vi.fn();
+    const onNarrationPending = vi.fn();
+    const play = vi.fn().mockResolvedValue(true);
     const pendingScene = {
       ...scene([speech('pending', 'Narration is still being generated.')]),
       narrationStatus: 'pending',
     } as Scene;
-    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(), {
+    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(play), {
       onSpeechStart,
       onComplete,
+      onNarrationPending,
     });
     engines.push(engine);
 
@@ -383,6 +386,93 @@ describe('generated narration completion ownership', () => {
     expect(onSpeechStart).not.toHaveBeenCalled();
     expect(onComplete).not.toHaveBeenCalled();
     expect(engine.getSnapshot().actionIndex).toBe(0);
-    expect(engine.getMode()).toBe('idle');
+    expect(engine.getMode()).toBe('playing');
+    expect(onNarrationPending).toHaveBeenCalledWith('scene-1', 0);
+
+    engine.pause();
+    expect(engine.getMode()).toBe('paused');
+
+    engine.replaceScene({
+      ...pendingScene,
+      actions: [speech('pending', 'Narration is still being generated.', 'ast_ready')],
+    });
+    expect(engine.continuePendingNarration(0)).toBe(false);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it('plays a ready action while aggregate scene narration is still running', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const runningScene = {
+      ...scene([
+        speech('ready', 'Ready narration', 'ast_ready'),
+        speech('pending', 'Pending narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([runningScene], fakeActionEngine(), fakeAudio(play));
+
+    engine.start();
+    await flushPromises();
+
+    expect(play).toHaveBeenCalledWith('ast_ready', undefined);
+    expect(engine.getSnapshot().actionIndex).toBe(1);
+  });
+
+  it('continues a retained Play request at the exact action once narration is ready', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const onNarrationPending = vi.fn();
+    const pendingScene = {
+      ...scene([
+        { id: 'discussion-before-audio', type: 'discussion', topic: 'Already handled' } as Action,
+        speech('ready', 'Ready narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(play), {
+      onNarrationPending,
+    });
+
+    expect(engine.continuePendingNarration(1)).toBe(true);
+    expect(onNarrationPending).toHaveBeenCalledWith('scene-1', 1);
+    expect(play).not.toHaveBeenCalled();
+
+    engine.replaceScene({
+      ...pendingScene,
+      actions: [pendingScene.actions[0], speech('ready', 'Ready narration', 'ast_ready')],
+    });
+    expect(engine.continuePendingNarration(1)).toBe(true);
+    await flushPromises();
+
+    expect(play).toHaveBeenCalledWith('ast_ready', undefined);
+    expect(engine.getSnapshot().actionIndex).toBe(2);
+  });
+
+  it('refreshes future narration audio without interrupting the active clip', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const audio = fakeAudio(play);
+    const initialScene = {
+      ...scene([
+        speech('active', 'Active narration', 'ast_active'),
+        speech('future', 'Future narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([initialScene], fakeActionEngine(), audio);
+    engine.start();
+    await flushPromises();
+
+    expect(
+      engine.replaceScene({
+        ...initialScene,
+        actions: [
+          speech('active', 'Active narration', 'ast_active'),
+          speech('future', 'Future narration', 'ast_future'),
+        ],
+      }),
+    ).toBe(true);
+
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(engine.getMode()).toBe('playing');
+    expect(engine.getSnapshot().actionIndex).toBe(1);
   });
 });

@@ -34,9 +34,7 @@ import { useI18n } from '@/lib/hooks/use-i18n';
 import {
   fetchSceneActions,
   fetchSceneContent,
-  generateTTSForScene,
   commitSceneAttempt,
-  removeFreshTtsAllocations,
 } from '@/lib/hooks/use-scene-generator';
 import { isAbortError } from '@openmaic/generation';
 import { FOREGROUND_SCENE_RETRY_OPTIONS } from './foreground-retry';
@@ -89,12 +87,7 @@ import {
 } from './types';
 import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
-import {
-  mergeCompletedNarration,
-  narrationFailurePatch,
-  sceneForNarrationSynthesis,
-  sceneWithPendingNarration,
-} from '@/lib/generation/scene-narration';
+import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
 import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
 
 const log = createLogger('GenerationPreview');
@@ -1251,49 +1244,9 @@ function GenerationPreviewContent() {
         throw new Error(commitResult.error || 'First scene generation attempt could not commit.');
       }
 
-      const scheduleFirstSceneNarration = narrationEnabled
-        ? () => {
-            const narrationScene = sceneForNarrationSynthesis(firstScene);
-            void generateTTSForScene(
-              narrationScene,
-              languageDirective,
-              undefined,
-              FOREGROUND_SCENE_RETRY_OPTIONS,
-              undefined,
-              firstOutline.id,
-            )
-              .then(async (ttsResult) => {
-                const current = useStageStore.getState();
-                const currentScene = current.getSceneById(firstScene.id);
-                if (current.stage?.id !== stage.id || !currentScene) {
-                  const allocations = (narrationScene.actions ?? []).flatMap(
-                    (action: { type: string; audioId?: string }) =>
-                      action.type === 'speech' && action.audioId ? [action.audioId] : [],
-                  );
-                  await removeFreshTtsAllocations(allocations);
-                  return;
-                }
-                current.updateScene(
-                  firstScene.id,
-                  ttsResult.success
-                    ? mergeCompletedNarration(currentScene, narrationScene)
-                    : narrationFailurePatch(),
-                );
-                await current.saveToStorage();
-              })
-              .catch(async (narrationError) => {
-                const current = useStageStore.getState();
-                if (current.stage?.id === stage.id && current.getSceneById(firstScene.id)) {
-                  current.updateScene(firstScene.id, narrationFailurePatch());
-                  await current.saveToStorage();
-                }
-                log.warn('[GenerationPreview] First scene narration failed:', narrationError);
-              });
-          }
-        : undefined;
-
       // Visual readiness is content + actions + authoritative commit. Teaching
-      // Voice starts only after the visual scene is durable and navigable.
+      // Voice is recovered by the classroom's single narration observer after
+      // the pending visual scene is durable and navigable.
       await finalizeFirstSceneVisual({
         commitVisual: () => {
           store.addScene(firstScene);
@@ -1321,7 +1274,6 @@ function GenerationPreviewContent() {
         },
         persistVisual: () => store.saveToStorage(),
         navigateToClassroom: () => router.push(`/classroom/${stage.id}`),
-        scheduleNarration: scheduleFirstSceneNarration,
       });
     } catch (err) {
       setIsOutlineStreaming(false);

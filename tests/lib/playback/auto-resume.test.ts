@@ -1,5 +1,53 @@
 import { describe, expect, it } from 'vitest';
-import { shouldAutoResumeLecture, type AutoResumeArgs } from '@/lib/playback/auto-resume';
+import {
+  pendingNarrationIntentState,
+  shouldAutoResumeLecture,
+  type AutoResumeArgs,
+} from '@/lib/playback/auto-resume';
+import type { Scene } from '@/lib/types/stage';
+
+const narrationScene = (audioId?: string): Scene =>
+  ({
+    id: 'scene-1',
+    stageId: 'stage-1',
+    outlineId: 'outline-1',
+    order: 1,
+    title: 'Narration',
+    type: 'slide',
+    content: { type: 'slide', elements: [] },
+    actions: [
+      {
+        id: 'speech-1',
+        type: 'speech',
+        text: 'Teaching Voice narration',
+        ...(audioId ? { audioId } : {}),
+      },
+    ],
+  }) as Scene;
+
+describe('pending narration play intent', () => {
+  const intent = { sceneId: 'scene-1', actionIndex: 0 };
+
+  it('stays pending until the targeted speech action has usable audio', () => {
+    expect(pendingNarrationIntentState(narrationScene(), intent)).toBe('pending');
+    expect(pendingNarrationIntentState(narrationScene('ast_ready'), intent)).toBe('ready');
+  });
+
+  it('does not carry play intent into another scene or action', () => {
+    expect(
+      pendingNarrationIntentState(narrationScene('ast_ready'), {
+        sceneId: 'scene-2',
+        actionIndex: 0,
+      }),
+    ).toBe('unrelated');
+    expect(
+      pendingNarrationIntentState(narrationScene('ast_ready'), {
+        sceneId: 'scene-1',
+        actionIndex: 1,
+      }),
+    ).toBe('unrelated');
+  });
+});
 
 const base: AutoResumeArgs = {
   source: 'soft_close_timeout',

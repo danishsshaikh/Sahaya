@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
-import { useStageStore } from '@/lib/store/stage';
+import { flushStageSave, useStageStore } from '@/lib/store/stage';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -57,6 +57,7 @@ import {
 } from '@/lib/generation/scene-narration';
 
 const log = createLogger('SceneGenerator');
+type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
 const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
 
@@ -530,6 +531,15 @@ interface TTSApiResponse {
   teachingVoiceProvider?: string;
 }
 
+interface NarrationTraceContext {
+  stageId?: string;
+  outlineId?: string;
+  sceneId?: string;
+  actionId?: string;
+  startedAt: number;
+  onJobIdentified?: (jobId: string) => void;
+}
+
 const TEACHING_VOICE_JOB_POLL_INTERVAL_MS = 1500;
 
 function waitForTeachingVoicePoll(signal?: AbortSignal): Promise<void> {
@@ -555,6 +565,7 @@ async function resolveTeachingVoiceJob(
   signal: AbortSignal | undefined,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   teachingVoiceExpected = false,
+  traceContext?: NarrationTraceContext,
 ): Promise<TTSApiResponse> {
   if (teachingVoiceExpected && !initial.teachingVoiceProvider) {
     throw new Error('Teaching Voice response is missing provider metadata.');
@@ -566,6 +577,7 @@ async function resolveTeachingVoiceJob(
     return initial;
   }
   const statusUrl = initial.statusUrl;
+  traceContext?.onJobIdentified?.(initial.jobId);
   let current = initial;
   let lastLoggedStatus: TTSApiResponse['status'];
   traceSceneGeneration('teaching-voice-async-job-received', {
@@ -608,16 +620,37 @@ async function resolveTeachingVoiceJob(
       throw new Error('Teaching Voice job returned an invalid completion state.');
     }
 
+    log.info('[SceneNarration]', {
+      event: 'narration-tts-job-completed',
+      stageId: traceContext?.stageId,
+      outlineId: traceContext?.outlineId,
+      sceneId: traceContext?.sceneId,
+      actionId: traceContext?.actionId,
+      jobId: initial.jobId,
+      elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+    });
+
     const audioResponse = await fetch(current.audioUrl, { signal });
     if (!audioResponse.ok) {
       const error = (await readJsonResponse(audioResponse)) as TTSApiResponse;
       throw createHttpError(audioResponse, error, 'Teaching Voice audio retrieval failed');
     }
     const contentType = audioResponse.headers.get('content-type') || 'audio/wav';
+    const audioBytes = new Uint8Array(await audioResponse.arrayBuffer());
+    log.info('[SceneNarration]', {
+      event: 'narration-audio-downloaded',
+      stageId: traceContext?.stageId,
+      outlineId: traceContext?.outlineId,
+      sceneId: traceContext?.sceneId,
+      actionId: traceContext?.actionId,
+      jobId: initial.jobId,
+      elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+    });
     return {
       success: true,
       format: contentType.split('/')[1]?.split(';')[0] || 'wav',
-      audioBytes: new Uint8Array(await audioResponse.arrayBuffer()),
+      audioBytes,
+      jobId: initial.jobId,
     };
   } catch (error) {
     // A component unmount only stops this observer. The owner-scoped server job
@@ -657,6 +690,7 @@ export async function generateAndStoreTTS(
   sceneId?: string,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   outlineId?: string,
+  traceContext?: NarrationTraceContext,
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
@@ -777,7 +811,13 @@ export async function generateAndStoreTTS(
         if (!response.ok) {
           throw createHttpError(response, data, 'TTS request failed');
         }
-        return resolveTeachingVoiceJob(data, signal, onQueueStatus, Boolean(teacherVoiceProfileId));
+        return resolveTeachingVoiceJob(
+          data,
+          signal,
+          onQueueStatus,
+          Boolean(teacherVoiceProfileId),
+          traceContext,
+        );
       },
       {
         label: `tts "${requestId}"`,
@@ -830,6 +870,7 @@ export async function generateAndStoreTTS(
             sceneId,
             onQueueStatus,
             outlineId,
+            traceContext,
           );
         }
         // Bound == global (pinned narrator): a retry would hit the same missing
@@ -851,6 +892,7 @@ export async function generateAndStoreTTS(
               sceneId,
               onQueueStatus,
               outlineId,
+              traceContext,
             );
           }
         }
@@ -922,6 +964,15 @@ export async function generateAndStoreTTS(
   } else {
     await cacheWrite;
   }
+  log.info('[SceneNarration]', {
+    event: 'narration-audio-asset-ready',
+    stageId,
+    outlineId,
+    sceneId,
+    actionId: traceContext?.actionId,
+    jobId: data.jobId,
+    elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+  });
   return audioId;
 }
 
@@ -980,12 +1031,6 @@ export async function removeFreshTtsAllocations(assetIds: readonly string[]): Pr
   }
 }
 
-function speechAllocationIds(scene: Scene): string[] {
-  return (scene.actions ?? []).flatMap((action) =>
-    action.type === 'speech' && action.audioId ? [action.audioId] : [],
-  );
-}
-
 /** Generate TTS for all speech actions in a scene. Returns result. */
 export async function generateTTSForScene(
   scene: Scene,
@@ -994,12 +1039,21 @@ export async function generateTTSForScene(
   retryOptions?: ClientRetryOptions<TTSApiResponse>,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   outlineId?: string,
+  options: {
+    skipReadyActions?: boolean;
+    onActionReady?: (
+      action: SpeechAction,
+      audioId: string,
+      trace: { jobId?: string; elapsedMs: number },
+    ) => boolean | Promise<boolean>;
+  } = {},
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
   scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
   const speechActions = scene.actions.filter(
-    (a): a is SpeechAction => a.type === 'speech' && !!a.text,
+    (a): a is SpeechAction =>
+      a.type === 'speech' && !!a.text && (!options.skipReadyActions || !a.audioId),
   );
   if (speechActions.length === 0) return { success: true, failedCount: 0 };
 
@@ -1015,6 +1069,8 @@ export async function generateTTSForScene(
   // one bad clip never aborts the rest of the scene.
   const generateOne = async (action: SpeechAction) => {
     const requestId = `tts_s${sceneOrder}_${action.id}`;
+    const startedAt = Date.now();
+    let jobId: string | undefined;
     try {
       const assetId = await generateAndStoreTTS(
         requestId,
@@ -1029,10 +1085,30 @@ export async function generateTTSForScene(
         scene.id,
         onQueueStatus,
         outlineId,
+        {
+          stageId: scene.stageId,
+          outlineId,
+          sceneId: scene.id,
+          actionId: action.id,
+          startedAt,
+          onJobIdentified: (identifiedJobId) => {
+            jobId = identifiedJobId;
+          },
+        },
       );
       if (assetId) {
         action.audioId = assetId;
-        freshAllocations.push(assetId);
+        const retained =
+          (await options.onActionReady?.(action, assetId, {
+            jobId,
+            elapsedMs: Date.now() - startedAt,
+          })) ?? true;
+        if (retained) {
+          freshAllocations.push(assetId);
+        } else {
+          delete action.audioId;
+          await removeFreshTtsAllocations([assetId]);
+        }
       }
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -1073,12 +1149,14 @@ export async function generateTTSForScene(
       }
     }
   } catch (error) {
-    await removeFreshTtsAllocations(freshAllocations);
-    for (const action of speechActions) delete action.audioId;
+    if (!options.onActionReady) {
+      await removeFreshTtsAllocations(freshAllocations);
+      for (const action of speechActions) delete action.audioId;
+    }
     throw error;
   }
 
-  if (failedCount > 0) {
+  if (failedCount > 0 && !options.onActionReady) {
     await removeFreshTtsAllocations(freshAllocations);
     for (const action of speechActions) delete action.audioId;
   }
@@ -1124,6 +1202,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const retryTasksRef = useRef(new Map<string, AbortController>());
   const lastParamsRef = useRef<GenerationParams | null>(null);
   const generateRemainingRef = useRef<((params: GenerationParams) => Promise<void>) | null>(null);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   const store = useStageStore;
 
@@ -1185,6 +1265,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       const controller = new AbortController();
       const narrationScene = sceneForNarrationSynthesis(scene);
+      const attachedAudioIds = new Set<string>();
       const narrationStartedAt = Date.now();
       log.info('[SceneNarration]', {
         event: 'scheduled',
@@ -1197,8 +1278,24 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       });
 
       const promise = (async () => {
+        let persistence = Promise.resolve();
+        const queuePersistence = () => {
+          persistence = persistence
+            .then(async () => {
+              await flushStageSave();
+            })
+            .catch((error) => {
+              log.warn('[SceneNarration]', {
+                event: 'narration-action-persistence-failed',
+                stageId,
+                outlineId: outline.id,
+                sceneId: scene.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        };
         try {
-          options.onPhaseChange?.('narration', outline);
+          optionsRef.current.onPhaseChange?.('narration', outline);
           const ttsResult = await generateTTSForScene(
             narrationScene,
             language,
@@ -1212,13 +1309,60 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               ) {
                 store.getState().updateScene(scene.id, narrationProgressPatch(progress.status));
               }
-              options.onNarrationQueueChange?.(progress, outline);
+              optionsRef.current.onNarrationQueueChange?.(progress, outline);
             },
             outline.id,
+            {
+              skipReadyActions: true,
+              onActionReady: (generatedAction, audioId, trace) => {
+                if (
+                  controller.signal.aborted ||
+                  store.getState().stage?.id !== stageId ||
+                  store.getState().generationEpoch !== generationEpoch
+                ) {
+                  return false;
+                }
+                const currentScene = store.getState().getSceneById(scene.id);
+                const currentAction = currentScene?.actions.find(
+                  (action: Action) => action.id === generatedAction.id && action.type === 'speech',
+                ) as RuntimeSpeechAction | undefined;
+                if (
+                  !currentScene ||
+                  !currentAction ||
+                  currentAction.text !== generatedAction.text
+                ) {
+                  return false;
+                }
+                if (currentAction.audioId || currentAction.audioInvalidated) {
+                  return false;
+                }
+                const actions = currentScene.actions.map((action: Action) =>
+                  action.id === generatedAction.id && action.type === 'speech'
+                    ? { ...action, audioId }
+                    : action,
+                );
+                store.getState().updateScene(scene.id, {
+                  actions,
+                  narrationStatus: 'running',
+                  narrationError: undefined,
+                });
+                attachedAudioIds.add(audioId);
+                queuePersistence();
+                log.info('[SceneNarration]', {
+                  event: 'narration-action-attached',
+                  stageId,
+                  outlineId: outline.id,
+                  sceneId: scene.id,
+                  actionId: generatedAction.id,
+                  jobId: trace.jobId,
+                  elapsedMs: trace.elapsedMs,
+                });
+                return true;
+              },
+            },
           );
 
           if (controller.signal.aborted || store.getState().generationEpoch !== generationEpoch) {
-            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
             log.info('[SceneNarration]', {
               event: 'cancelled-stale',
               stageId,
@@ -1231,6 +1375,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
           if (!ttsResult.success) {
             store.getState().updateScene(scene.id, narrationFailurePatch());
+            await persistence;
             await store.getState().saveToStorage();
             log.warn('[SceneNarration]', {
               event: 'failed',
@@ -1245,19 +1390,20 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
           const currentScene = store.getState().getSceneById(scene.id);
           if (!currentScene) {
-            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+            await removeFreshTtsAllocations([...attachedAudioIds]);
             return;
           }
           const patch = mergeCompletedNarration(currentScene, narrationScene);
           const retainedAudioIds = new Set(
-            (patch.actions ?? []).flatMap((action) =>
+            (patch.actions ?? []).flatMap((action: Action) =>
               action.type === 'speech' && action.audioId ? [action.audioId] : [],
             ),
           );
           await removeFreshTtsAllocations(
-            speechAllocationIds(narrationScene).filter((audioId) => !retainedAudioIds.has(audioId)),
+            [...attachedAudioIds].filter((audioId) => !retainedAudioIds.has(audioId)),
           );
           store.getState().updateScene(scene.id, patch);
+          await persistence;
           await store.getState().saveToStorage();
           log.info('[SceneNarration]', {
             event: patch.narrationStatus === 'completed' ? 'completed' : 'completed-stale',
@@ -1268,7 +1414,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             durationMs: Date.now() - narrationStartedAt,
           });
         } catch (error) {
-          await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+          await persistence;
           if (isAbortError(error) || controller.signal.aborted) {
             log.info('[SceneNarration]', {
               event: 'aborted',
@@ -1303,7 +1449,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       narrationTasksRef.current.set(taskKey, { controller, promise });
     },
-    [options, store],
+    [store],
   );
 
   // A visual scene is committed before Teaching Voice finishes. Refreshes and
@@ -1311,36 +1457,55 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   // pending. Re-submit its deterministic action identity to rejoin the existing
   // owner-scoped server job; completed jobs return their retained result.
   useEffect(() => {
-    const state = store.getState();
-    const stage = state.stage;
-    if (!stage) return;
-    const resumableStatuses = new Set(['pending', 'queued', 'running']);
-    const settings = useSettingsStore.getState();
-    const provider = stage.teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId;
-
-    for (const scene of state.scenes) {
-      if (!scene.narrationStatus || !resumableStatuses.has(scene.narrationStatus)) continue;
-      if (
-        !scene.actions.some(
-          (action: Action) => action.type === 'speech' && !!action.text && !action.audioId,
-        )
-      ) {
-        continue;
-      }
-      const outline = state.outlines.find(
-        (candidate) => candidate.id === scene.outlineId || candidate.order === scene.order,
-      );
-      if (!outline) continue;
-      scheduleNarration({
-        scene,
-        outline,
-        stageId: stage.id,
-        generationRunId: `${stage.id}:${state.generationEpoch}:narration-resume`,
-        generationEpoch: state.generationEpoch,
-        language: stage.languageDirective,
-        provider,
+    let previousSignature = '';
+    const reconcilePendingNarration = () => {
+      const state = store.getState();
+      const stage = state.stage;
+      if (!stage) return;
+      const resumableStatuses = new Set(['pending', 'queued', 'running']);
+      const candidates = state.scenes.flatMap((scene) => {
+        if (!scene.narrationStatus || !resumableStatuses.has(scene.narrationStatus)) return [];
+        const missingActions = scene.actions.filter(
+          (action: Action): action is SpeechAction =>
+            action.type === 'speech' && !!action.text && !action.audioId,
+        );
+        if (missingActions.length === 0) return [];
+        const outline = state.outlines.find(
+          (candidate) => candidate.id === scene.outlineId || candidate.order === scene.order,
+        );
+        return outline ? [{ scene, outline, missingActions }] : [];
       });
-    }
+      const signature = JSON.stringify({
+        stageId: stage.id,
+        generationEpoch: state.generationEpoch,
+        pending: candidates.map(({ scene, missingActions }) => [
+          scene.id,
+          missingActions.map((action: SpeechAction) => [action.id, action.text]),
+        ]),
+      });
+      if (signature === previousSignature) return;
+      previousSignature = signature;
+      const settings = useSettingsStore.getState();
+      const provider = stage.teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId;
+
+      for (const { scene, outline } of candidates) {
+        const taskKey = `${state.generationEpoch}:${scene.id}`;
+        if (narrationTasksRef.current.has(taskKey)) continue;
+        scheduleNarration({
+          scene,
+          outline,
+          stageId: stage.id,
+          generationRunId: `${stage.id}:${state.generationEpoch}:narration-resume`,
+          generationEpoch: state.generationEpoch,
+          language: stage.languageDirective,
+          provider,
+        });
+      }
+    };
+
+    reconcilePendingNarration();
+    const unsubscribe = store.subscribe(reconcilePendingNarration);
+    return unsubscribe;
   }, [scheduleNarration, store]);
 
   const generateRemaining = useCallback(

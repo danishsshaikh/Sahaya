@@ -94,6 +94,8 @@ const stageState = {
   stage: { id: 'stage-1', whiteboard: [] },
   getCurrentScene: () =>
     stageState.scenes.find((candidate) => candidate.id === stageState.currentSceneId),
+  getSceneById: (sceneId: string) =>
+    stageState.scenes.find((candidate) => candidate.id === sceneId),
   scenes: [scene, secondScene] as Array<typeof scene | typeof interactiveScene>,
   currentSceneId: scene.id as string | null,
   setCurrentSceneId: vi.fn((sceneId: string) => {
@@ -318,17 +320,24 @@ vi.mock('@/lib/playback', () => ({
     jumpToAction() {
       return Promise.resolve(false);
     }
+    replaceScene() {
+      return true;
+    }
     handleUserInterrupt(text: string) {
       mocks.handleUserInterrupt(text);
       mocks.engineOptions?.onUserInterrupt?.(text);
     }
     start() {}
     continuePlayback() {}
+    continuePendingNarration() {
+      return false;
+    }
     pause() {}
     confirmDiscussion() {}
     skipDiscussion() {}
   },
   computePlaybackView: () => ({ kind: 'idle', isTopicActive: mocks.topicActive }),
+  pendingNarrationIntentState: () => 'unrelated',
   shouldAutoResumeLecture: () => false,
 }));
 vi.mock('@/lib/playback/action-navigation', () => ({

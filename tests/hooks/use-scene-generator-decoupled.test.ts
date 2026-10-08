@@ -25,10 +25,19 @@ const mocks = vi.hoisted(() => ({
   mediaGeneration: vi.fn().mockResolvedValue(undefined),
   audioPut: vi.fn().mockResolvedValue(undefined),
   audioDelete: vi.fn().mockResolvedValue(undefined),
+  logInfo: vi.fn(),
+  stageSubscribers: new Set<(state: ReturnType<typeof makeStageState>) => void>(),
 }));
 
 vi.mock('@/lib/store/stage', () => ({
-  useStageStore: { getState: () => mocks.stageState, subscribe: () => () => undefined },
+  flushStageSave: () => mocks.stageState.saveToStorage(),
+  useStageStore: {
+    getState: () => mocks.stageState,
+    subscribe: (listener: (state: ReturnType<typeof makeStageState>) => void) => {
+      mocks.stageSubscribers.add(listener);
+      return () => mocks.stageSubscribers.delete(listener);
+    },
+  },
 }));
 vi.mock('@/lib/store/settings', () => ({
   useSettingsStore: { getState: () => mocks.settings },
@@ -68,6 +77,13 @@ vi.mock('@/lib/audio/unavailable-voice-bindings', () => ({
 vi.mock('@/lib/voice-cloning/language', () => ({ resolveTeachingVoiceLanguage: () => 'en' }));
 vi.mock('@/lib/audio/audio-duration', () => ({ measureAudioDuration: () => undefined }));
 vi.mock('@/lib/i18n', () => ({ getClientTranslation: (key: string) => key }));
+vi.mock('@/lib/logger', () => ({
+  createLogger: () => ({
+    info: mocks.logInfo,
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
 vi.mock('sonner', () => ({ toast: { warning: vi.fn() } }));
 
 const outlines: SceneOutline[] = [1, 2, 3].map((order) => ({
@@ -120,6 +136,7 @@ function makeStageState() {
       state.scenes = state.scenes.map((scene) =>
         scene.id === sceneId ? ({ ...scene, ...patch } as Scene) : scene,
       );
+      for (const listener of mocks.stageSubscribers) listener(state);
     },
     getSceneById(sceneId: string) {
       return state.scenes.find((scene) => scene.id === sceneId);
@@ -197,8 +214,9 @@ async function mountGenerator(root: Root, onComplete = vi.fn()) {
     }, [current]);
     return null;
   }
-  await act(async () => root.render(createElement(Harness)));
-  return { generator, onComplete };
+  const rerender = async () => act(async () => root.render(createElement(Harness)));
+  await rerender();
+  return { generator, onComplete, rerender };
 }
 
 describe('scene generator visual and narration pipelines', () => {
@@ -211,6 +229,8 @@ describe('scene generator visual and narration pipelines', () => {
     mocks.mediaGeneration.mockClear();
     mocks.audioPut.mockClear();
     mocks.audioDelete.mockClear();
+    mocks.logInfo.mockClear();
+    mocks.stageSubscribers.clear();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -379,7 +399,138 @@ describe('scene generator visual and narration pipelines', () => {
     });
     expect(ttsAdmissions).toBe(2);
     expect(deleteRequests).toEqual([]);
-    expect(mocks.stageState.saveToStorage).toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.stageState.saveToStorage).toHaveBeenCalled());
+    expect(mocks.logInfo.mock.calls.map(([, details]) => details?.event)).toEqual(
+      expect.arrayContaining([
+        'narration-tts-job-completed',
+        'narration-audio-downloaded',
+        'narration-audio-asset-ready',
+        'narration-action-attached',
+      ]),
+    );
+  });
+
+  it('publishes narration from whichever scene finishes first', async () => {
+    const first = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    const second = ((await actionResponse(2).json()) as { scene: Scene }).scene;
+    first.narrationStatus = 'pending';
+    second.narrationStatus = 'pending';
+    mocks.stageState.outlines = outlines.slice(0, 2);
+    mocks.stageState.scenes = [first, second];
+    mocks.stageState.currentSceneId = first.id;
+    mocks.stageState.generationComplete = true;
+    const downloads = new Map<string, ReturnType<typeof Promise.withResolvers<Response>>>([
+      ['speech-1', Promise.withResolvers<Response>()],
+      ['speech-2', Promise.withResolvers<Response>()],
+    ]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/generate/tts') {
+          const body = JSON.parse(String(init?.body));
+          const actionId = String(body.audioId).split('_').at(-1)!;
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: `rq_${actionId}`,
+              status: 'completed',
+              statusUrl: `/api/generate/tts/jobs/rq_${actionId}`,
+              audioUrl: `/audio/${actionId}`,
+            }),
+          );
+        }
+        if (url.startsWith('/audio/')) {
+          return downloads.get(url.slice('/audio/'.length))!.promise;
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    await mountGenerator(root);
+    await vi.waitFor(() => expect(downloads.size).toBe(2));
+    downloads.get('speech-2')!.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'audio/wav' }),
+      arrayBuffer: async () => new TextEncoder().encode('second scene').buffer,
+    } as Response);
+
+    await vi.waitFor(() => {
+      expect(
+        (mocks.stageState.scenes[0].actions[0] as { audioId?: string }).audioId,
+      ).toBeUndefined();
+      expect((mocks.stageState.scenes[1].actions[0] as { audioId?: string }).audioId).toBe(
+        'tts_s2_speech-2',
+      );
+    });
+
+    downloads.get('speech-1')!.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'audio/wav' }),
+      arrayBuffer: async () => new TextEncoder().encode('first scene').buffer,
+    } as Response);
+    await vi.waitFor(() =>
+      expect((mocks.stageState.scenes[0].actions[0] as { audioId?: string }).audioId).toBe(
+        'tts_s1_speech-1',
+      ),
+    );
+  });
+
+  it('does not overwrite pronunciation audio with a stale narration completion', async () => {
+    const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    committedScene.narrationStatus = 'pending';
+    mocks.stageState.outlines = [outlines[0]];
+    mocks.stageState.scenes = [committedScene];
+    mocks.stageState.currentSceneId = committedScene.id;
+    mocks.stageState.generationComplete = true;
+    const download = Promise.withResolvers<Response>();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/generate/tts') {
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_stale_completion',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_stale_completion',
+              audioUrl: '/audio/stale-completion',
+            }),
+          );
+        }
+        if (url === '/audio/stale-completion') return download.promise;
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    await mountGenerator(root);
+    await vi.waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith('/audio/stale-completion', expect.anything()),
+    );
+    mocks.stageState.updateScene(committedScene.id, {
+      actions: [{ ...committedScene.actions[0], audioId: 'ast_pronunciation_repair' }],
+    });
+    download.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'audio/wav' }),
+      arrayBuffer: async () => new TextEncoder().encode('stale narration').buffer,
+    } as Response);
+
+    await vi.waitFor(() => expect(mocks.audioDelete).toHaveBeenCalledWith('tts_s1_speech-1'));
+    expect((mocks.stageState.scenes[0].actions[0] as { audioId?: string }).audioId).toBe(
+      'ast_pronunciation_repair',
+    );
   });
 
   it('retries a transient Teaching Voice request failure through server idempotency', async () => {
@@ -509,6 +660,162 @@ describe('scene generator visual and narration pipelines', () => {
 
     await expect(result).resolves.toBe('tts_s1_speech-1');
     expect(statusChecks).toBe(4);
+  });
+
+  it('publishes the first completed speech clip before the second clip finishes', async () => {
+    const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    committedScene.actions = [
+      { id: 'speech-1', type: 'speech', text: 'First narration' },
+      { id: 'speech-2', type: 'speech', text: 'Second narration' },
+    ];
+    committedScene.narrationStatus = 'pending';
+    mocks.stageState.outlines = [outlines[0]];
+    mocks.stageState.scenes = [committedScene];
+    mocks.stageState.currentSceneId = committedScene.id;
+    mocks.stageState.generationComplete = true;
+    const secondAdmission = Promise.withResolvers<Response>();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/tts') {
+          if (body.audioId === 'tts_s1_speech-2') return secondAdmission.promise;
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_first_clip_ready_immediately',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_first_clip_ready_immediately',
+              audioUrl: '/api/generate/tts/jobs/rq_first_clip_ready_immediately/audio',
+            }),
+          );
+        }
+        if (url === '/api/generate/tts/jobs/rq_first_clip_ready_immediately/audio') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({ 'content-type': 'audio/wav' }),
+            arrayBuffer: async () => new TextEncoder().encode('first clip').buffer,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    await mountGenerator(root);
+
+    await vi.waitFor(() => {
+      const actions = mocks.stageState.scenes[0]?.actions as Array<{ audioId?: string }>;
+      expect(actions[0]?.audioId).toBe('tts_s1_speech-1');
+      expect(actions[1]?.audioId).toBeUndefined();
+      expect(mocks.stageState.scenes[0]?.narrationStatus).toBe('running');
+    });
+    await vi.waitFor(() => expect(mocks.stageState.saveToStorage).toHaveBeenCalled());
+  });
+
+  it('reuses completed clips while recovering only missing narration', async () => {
+    const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    committedScene.actions = [
+      { id: 'speech-ready', type: 'speech', text: 'Already ready', audioId: 'ast_existing' },
+      { id: 'speech-missing', type: 'speech', text: 'Needs narration' },
+    ];
+    committedScene.narrationStatus = 'running';
+    mocks.stageState.outlines = [outlines[0]];
+    mocks.stageState.scenes = [committedScene];
+    mocks.stageState.currentSceneId = committedScene.id;
+    mocks.stageState.generationComplete = true;
+    const admissions: string[] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/generate/tts') {
+          const body = JSON.parse(String(init?.body));
+          admissions.push(body.audioId);
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_missing_only',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_missing_only',
+              audioUrl: '/audio/missing-only',
+            }),
+          );
+        }
+        if (url === '/audio/missing-only') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({ 'content-type': 'audio/wav' }),
+            arrayBuffer: async () => new TextEncoder().encode('missing clip').buffer,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    await mountGenerator(root);
+
+    await vi.waitFor(() =>
+      expect((mocks.stageState.scenes[0].actions[1] as { audioId?: string }).audioId).toBe(
+        'tts_s1_speech-missing',
+      ),
+    );
+    expect(admissions).toEqual(['tts_s1_speech-missing']);
+    expect((mocks.stageState.scenes[0].actions[0] as { audioId?: string }).audioId).toBe(
+      'ast_existing',
+    );
+    expect(mocks.audioDelete).not.toHaveBeenCalledWith('ast_existing');
+  });
+
+  it('does not reconsider active narration observers on unrelated rerenders', async () => {
+    const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    committedScene.narrationStatus = 'pending';
+    mocks.stageState.outlines = [outlines[0]];
+    mocks.stageState.scenes = [committedScene];
+    mocks.stageState.currentSceneId = committedScene.id;
+    mocks.stageState.generationComplete = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url !== '/api/generate/tts') throw new Error(`Unexpected fetch: ${url}`);
+        const signal = init?.signal as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }),
+    );
+
+    const mounted = await mountGenerator(root);
+    await vi.waitFor(() =>
+      expect(mocks.logInfo.mock.calls.some(([, details]) => details?.event === 'scheduled')).toBe(
+        true,
+      ),
+    );
+    mocks.logInfo.mockClear();
+
+    await mounted.rerender();
+    await mounted.rerender();
+    await mounted.rerender();
+    mocks.stageState.updateScene(committedScene.id, { narrationStatus: 'queued' });
+    mocks.stageState.updateScene(committedScene.id, { narrationStatus: 'running' });
+
+    expect(
+      mocks.logInfo.mock.calls.filter(
+        ([, details]) => details?.event === 'skipped-already-in-flight',
+      ),
+    ).toHaveLength(0);
   });
 
   it('admits one authoritative attempt across two hook instances for the same outline', async () => {

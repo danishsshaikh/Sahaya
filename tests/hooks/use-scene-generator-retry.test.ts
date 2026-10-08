@@ -28,6 +28,7 @@ vi.mock('@/lib/store/settings', () => ({
 }));
 
 vi.mock('@/lib/store/stage', () => ({
+  flushStageSave: vi.fn().mockResolvedValue(undefined),
   useStageStore: {
     getState: mocks.stageState,
   },
