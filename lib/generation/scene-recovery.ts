@@ -8,16 +8,21 @@ export interface RecoverableSceneOutline {
 
 /** The next unresolved outline in deck order, with terminal failure taking precedence. */
 export function selectNextRecoverableOutline(
-  generatingOutlines: readonly SceneOutline[],
+  outlines: readonly SceneOutline[],
+  scenes: readonly Pick<Scene, 'order' | 'outlineId'>[],
   failedOutlines: readonly SceneOutline[],
 ): RecoverableSceneOutline | null {
   const failedIds = new Set(failedOutlines.map((outline) => outline.id));
-  const byId = new Map<string, SceneOutline>();
-  for (const outline of [...generatingOutlines, ...failedOutlines]) {
-    byId.set(outline.id, outline);
-  }
-
-  const outline = [...byId.values()].sort((a, b) => a.order - b.order)[0];
+  const completedOutlineIds = new Set(
+    scenes.flatMap((scene) => (scene.outlineId ? [scene.outlineId] : [])),
+  );
+  const completedOrders = new Set(scenes.map((scene) => scene.order));
+  const outline = outlines
+    .filter(
+      (candidate) =>
+        !completedOutlineIds.has(candidate.id) && !completedOrders.has(candidate.order),
+    )
+    .sort((a, b) => a.order - b.order)[0];
   return outline ? { outline, failed: failedIds.has(outline.id) } : null;
 }
 
@@ -25,12 +30,12 @@ export function restorePersistedSceneRecovery(
   outlines: readonly SceneOutline[],
   scenes: readonly Pick<Scene, 'order'>[],
   failedOutlineIds: readonly string[],
-): { failedOutlines: SceneOutline[]; generatingOutlines: SceneOutline[] } {
+): { failedOutlines: SceneOutline[]; pendingOutlines: SceneOutline[] } {
   const completedOrders = new Set(scenes.map((scene) => scene.order));
   const failedIds = new Set(failedOutlineIds);
   return {
     failedOutlines: outlines.filter((outline) => failedIds.has(outline.id)),
-    generatingOutlines: outlines.filter(
+    pendingOutlines: outlines.filter(
       (outline) => !failedIds.has(outline.id) && !completedOrders.has(outline.order),
     ),
   };

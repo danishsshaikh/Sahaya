@@ -145,9 +145,15 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 }
 
-function actionResponse(order: number) {
+function actionResponse(
+  order: number,
+  attemptId = `attempt-${order}`,
+  generationVersion = 'version-1',
+) {
   return jsonResponse({
     success: true,
+    attemptId,
+    generationVersion,
     previousSpeeches: [`Narration ${order}`],
     scene: {
       id: `scene-${order}`,
@@ -228,7 +234,14 @@ describe('scene generator visual and narration pipelines', () => {
         const body = init?.body ? JSON.parse(String(init.body)) : {};
         if (url === '/api/generate/scene-content') {
           events.push(`content:${body.outline.order}`);
-          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              content: { elements: [] },
+              attemptId: `attempt-${body.outline.order}`,
+              generationVersion: 'version-1',
+            }),
+          );
         }
         if (url === '/api/generate/scene-actions') {
           const order = body.outline.order as number;
@@ -246,6 +259,9 @@ describe('scene generator visual and narration pipelines', () => {
               { once: true },
             );
           });
+        }
+        if (url === '/api/generate/scene-attempt/commit') {
+          return Promise.resolve(jsonResponse({ success: true, accepted: true }));
         }
         throw new Error(`Unexpected fetch: ${url}`);
       }),
@@ -323,7 +339,7 @@ describe('scene generator visual and narration pipelines', () => {
             actionsProviderCalls += 1;
           }
           await actionsGate.promise;
-          return actionResponse(1);
+          return actionResponse(1, admittedAttemptId);
         }
         if (url === '/api/generate/scene-attempt/commit') {
           return jsonResponse({ success: true, accepted: true });
@@ -389,7 +405,9 @@ describe('scene generator visual and narration pipelines', () => {
           );
         }
         if (url === '/api/generate/scene-actions') {
-          return Promise.resolve(actionResponse(body.outline.order as number));
+          return Promise.resolve(
+            actionResponse(body.outline.order as number, body.attemptId, body.generationVersion),
+          );
         }
         if (url === '/api/generate/scene-attempt/commit') {
           return Promise.resolve(jsonResponse({ success: true, accepted: true }));
@@ -420,10 +438,19 @@ describe('scene generator visual and narration pipelines', () => {
       vi.fn((url: string, init?: RequestInit) => {
         const body = init?.body ? JSON.parse(String(init.body)) : {};
         if (url === '/api/generate/scene-content') {
-          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              content: { elements: [] },
+              attemptId: `attempt-${body.outline.order}`,
+              generationVersion: 'version-1',
+            }),
+          );
         }
         if (url === '/api/generate/scene-actions') {
-          return Promise.resolve(actionResponse(body.outline.order as number));
+          return Promise.resolve(
+            actionResponse(body.outline.order as number, body.attemptId, body.generationVersion),
+          );
         }
         if (url === '/api/generate/tts') {
           return Promise.resolve({
@@ -432,6 +459,9 @@ describe('scene generator visual and narration pipelines', () => {
             statusText: 'Unauthorized',
             json: async () => ({ success: false, error: 'Teaching Voice unavailable' }),
           });
+        }
+        if (url === '/api/generate/scene-attempt/commit') {
+          return Promise.resolve(jsonResponse({ success: true, accepted: true }));
         }
         throw new Error(`Unexpected fetch: ${url}`);
       }),
@@ -469,6 +499,8 @@ describe('scene generator visual and narration pipelines', () => {
                 success: true,
                 async: true,
                 jobId: `scene-2-attempt-${attempt}`,
+                attemptId: `attempt-2-${attempt}`,
+                generationVersion: 'version-1',
                 stageId: 'stage-1',
                 outlineId: 'outline-2',
                 status: 'queued',
@@ -476,7 +508,14 @@ describe('scene generator visual and narration pipelines', () => {
               }),
             );
           }
-          return Promise.resolve(jsonResponse({ success: true, content: { elements: [] } }));
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              content: { elements: [] },
+              attemptId: `attempt-${order}`,
+              generationVersion: 'version-1',
+            }),
+          );
         }
         if (url.startsWith('/api/generate/scene-content/status?jobId=scene-2-attempt-')) {
           scene2StatusChecks += 1;
@@ -489,12 +528,19 @@ describe('scene generator visual and narration pipelines', () => {
               stageId: 'stage-1',
               outlineId: 'outline-2',
               status: retrySucceeded ? 'completed' : 'failed',
+              attemptId: retrySucceeded ? 'attempt-2-2' : 'attempt-2-1',
+              generationVersion: 'version-1',
               ...(retrySucceeded ? { content: { elements: [] } } : { error: 'Timed out' }),
             }),
           );
         }
         if (url === '/api/generate/scene-actions') {
-          return Promise.resolve(actionResponse(body.outline.order as number));
+          return Promise.resolve(
+            actionResponse(body.outline.order as number, body.attemptId, body.generationVersion),
+          );
+        }
+        if (url === '/api/generate/scene-attempt/commit') {
+          return Promise.resolve(jsonResponse({ success: true, accepted: true }));
         }
         if (url === '/api/generate/tts') {
           return new Promise(() => undefined);
@@ -509,7 +555,7 @@ describe('scene generator visual and narration pipelines', () => {
     expect(mocks.stageState.scenes.map((scene) => scene.id)).toEqual(['scene-1']);
     expect(mocks.stageState.currentSceneId).toBe('scene-1');
     expect(mocks.stageState.failedOutlines.map((outline) => outline.id)).toEqual(['outline-2']);
-    expect(mocks.stageState.generatingOutlines.map((outline) => outline.id)).toEqual(['outline-3']);
+    expect(mocks.stageState.generatingOutlines).toEqual([]);
     expect(mocks.stageState.generationStatus).toBe('paused');
 
     await Promise.all([

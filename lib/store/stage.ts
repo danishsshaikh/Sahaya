@@ -297,7 +297,8 @@ interface StageState {
   // UI state
   toolbarState: ToolbarState;
 
-  // Transient generation state (not persisted)
+  // Transient outlines whose visual requests have actually been dispatched.
+  // Queued outlines are derived from outlines minus committed/failed scenes.
   generatingOutlines: SceneOutline[];
 
   // Persisted outlines for resume-on-refresh
@@ -603,6 +604,17 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     if (!currentStage || scene.stageId !== currentStage.id) {
       log.warn(
         `Ignoring scene "${scene.title}" - stageId mismatch (scene: ${scene.stageId}, current: ${currentStage?.id})`,
+      );
+      return;
+    }
+    const existingLogicalScene = get().scenes.find(
+      (candidate) =>
+        (!!scene.outlineId && candidate.outlineId === scene.outlineId) ||
+        candidate.order === scene.order,
+    );
+    if (existingLogicalScene) {
+      log.info(
+        `Ignoring duplicate logical scene "${scene.title}" (incoming: ${scene.id}, existing: ${existingLogicalScene.id})`,
       );
       return;
     }
@@ -1111,11 +1123,9 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
           outlines,
           generationComplete,
           failedOutlines,
-          // Compute generatingOutlines from persisted outlines minus completed
-          // scenes. Once generation is complete the deck is frozen for editing,
-          // so an orphaned outline (e.g. from a deleted slide) must NOT surface
-          // as a pending placeholder or drive resume regeneration.
-          generatingOutlines: generationComplete ? [] : persistedRecovery.generatingOutlines,
+          // Active dispatch ownership lives on the server and is deliberately
+          // not reconstructed from every unresolved outline during hydration.
+          generatingOutlines: [],
           // `mode` is transient UI state, not persisted with the stage.
           // Reset to 'playback' on every load so SPA navigation between
           // classrooms doesn't carry Pro-mode state across — e.g. user

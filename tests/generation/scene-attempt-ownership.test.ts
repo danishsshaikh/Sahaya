@@ -120,6 +120,148 @@ describe('authoritative scene generation attempts', () => {
     expect(mocks.buildCompleteScene).toHaveBeenCalledTimes(1);
     expect(secondActions.scene).toEqual(firstActions.scene);
     expect(firstActions.attemptId).toBe(first.attemptId);
+
+    const { POST: commitPost } = await import('@/app/api/generate/scene-attempt/commit/route');
+    const firstCommit = await commitPost(
+      request({
+        attemptId: first.attemptId,
+        generationVersion: first.generationVersion,
+        stageId: 'stage-1',
+        outlineId: outline.id,
+        sceneId: firstActions.scene.id,
+      }),
+    );
+    const secondCommit = await commitPost(
+      request({
+        attemptId: first.attemptId,
+        generationVersion: first.generationVersion,
+        stageId: 'stage-1',
+        outlineId: outline.id,
+        sceneId: firstActions.scene.id,
+      }),
+    );
+    expect(await firstCommit.json()).toMatchObject({ accepted: true, alreadyCommitted: false });
+    expect(await secondCommit.json()).toMatchObject({ accepted: true, alreadyCommitted: true });
+
+    const reopenedResponse = await contentPost(request(contentBody('client-attempt-reopen')));
+    const reopened = await reopenedResponse.json();
+    expect(reopened.attemptId).toBe(first.attemptId);
+    expect(mocks.generateSceneContent).toHaveBeenCalledTimes(1);
+
+    const registry = await import('@/lib/server/scene-generation-attempts');
+    registry.cleanupSceneGenerationAttempts(Date.now() + 31 * 60 * 1000);
+    expect(registry.sceneGenerationAttemptSnapshotForTests(first.attemptId)).toBeNull();
+  });
+
+  test('rejects stale content and actions after an expired owner is superseded', async () => {
+    const registry = await import('@/lib/server/scene-generation-attempts');
+    registry.clearSceneGenerationAttemptsForTests();
+    const generationVersion = registry.createSceneGenerationVersion({
+      outline,
+      allOutlines: [outline],
+    });
+    const first = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'attempt-old',
+    }).identity;
+    const oldContentGate = Promise.withResolvers<void>();
+    const oldContent = registry.runSceneAttemptContent('owner-1', first, async () => {
+      await oldContentGate.promise;
+      return { content: { elements: ['old'] }, effectiveOutline: outline };
+    });
+
+    registry.cleanupSceneGenerationAttempts(Date.now() + 21 * 60 * 1000);
+    const second = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'attempt-new',
+    }).identity;
+    oldContentGate.resolve();
+    await expect(oldContent).rejects.toMatchObject({ code: 'GENERATION_ATTEMPT_STALE' });
+
+    const authoritativeContent = { elements: ['new'] };
+    await registry.runSceneAttemptContent('owner-1', second, async () => ({
+      content: authoritativeContent,
+      effectiveOutline: outline,
+    }));
+    const oldActionsGate = Promise.withResolvers<void>();
+    const oldActions = registry.runSceneAttemptActions(
+      'owner-1',
+      second,
+      authoritativeContent,
+      async () => {
+        await oldActionsGate.promise;
+        return {
+          scene: {
+            id: 'scene-old-actions',
+            stageId: 'stage-1',
+            title: outline.title,
+            order: 1,
+            type: 'slide',
+            content: { type: 'slide', elements: [] },
+            actions: [],
+          } as never,
+          previousSpeeches: [],
+        };
+      },
+    );
+    registry.cleanupSceneGenerationAttempts(Date.now() + 21 * 60 * 1000);
+    const third = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'attempt-latest',
+    }).identity;
+    oldActionsGate.resolve();
+    await expect(oldActions).rejects.toMatchObject({ code: 'GENERATION_ATTEMPT_STALE' });
+    expect(third.attemptId).not.toBe(second.attemptId);
+  });
+
+  test('creates a new attempt after terminal failure without colliding across owners', async () => {
+    const registry = await import('@/lib/server/scene-generation-attempts');
+    registry.clearSceneGenerationAttemptsForTests();
+    const generationVersion = registry.createSceneGenerationVersion({
+      outline,
+      allOutlines: [outline],
+    });
+    const failed = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'shared-attempt-id',
+    }).identity;
+    await expect(
+      registry.runSceneAttemptContent('owner-1', failed, async () => {
+        throw new Error('terminal provider failure');
+      }),
+    ).rejects.toThrow('terminal provider failure');
+
+    const retry = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'retry-attempt-id',
+    }).identity;
+    const otherOwner = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-2',
+      stageId: 'stage-1',
+      outlineId: outline.id,
+      generationVersion,
+      proposedAttemptId: 'retry-attempt-id',
+    }).identity;
+
+    expect(retry.attemptId).not.toBe(failed.attemptId);
+    expect(otherOwner.attemptId).not.toBe(retry.attemptId);
+    registry.cleanupSceneGenerationAttempts(Date.now() + 31 * 60 * 1000);
+    expect(registry.sceneGenerationAttemptSnapshotForTests(failed.attemptId)).toBeNull();
   });
 
   test('does not globally serialize different stages', async () => {

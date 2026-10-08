@@ -35,6 +35,12 @@ import {
   shouldCollectLLMRouteTiming,
   withRouteTiming,
 } from '@/lib/server/generation-timing';
+import { requireSessionUser } from '@/lib/auth/server';
+import {
+  runSceneAttemptActions,
+  SceneGenerationAttemptError,
+  type SceneGenerationAttemptIdentity,
+} from '@/lib/server/scene-generation-attempts';
 
 const log = createLogger('Scene Actions API');
 
@@ -71,6 +77,8 @@ export async function POST(req: NextRequest) {
       previousSpeeches: incomingPreviousSpeeches,
       userProfile,
       languageDirective,
+      attemptId,
+      generationVersion,
     } = body as {
       outline: SceneOutline;
       allOutlines: SceneOutline[];
@@ -85,6 +93,8 @@ export async function POST(req: NextRequest) {
       previousSpeeches?: string[];
       userProfile?: string;
       languageDirective?: string;
+      attemptId?: string;
+      generationVersion?: string;
     };
 
     // Validate required fields
@@ -103,6 +113,21 @@ export async function POST(req: NextRequest) {
     }
     if (!stageId) {
       return apiError('MISSING_REQUIRED_FIELD', 400, 'stageId is required');
+    }
+    if ((attemptId && !generationVersion) || (!attemptId && generationVersion)) {
+      return apiError(
+        'MISSING_REQUIRED_FIELD',
+        400,
+        'attemptId and generationVersion must be provided together',
+      );
+    }
+    let ownerUserId: string | undefined;
+    let attemptIdentity: SceneGenerationAttemptIdentity | undefined;
+    if (attemptId && generationVersion) {
+      const user = await requireSessionUser(req);
+      if (user instanceof Response) return user;
+      ownerUserId = user.id;
+      attemptIdentity = { attemptId, generationVersion, stageId, outlineId: outline.id };
     }
 
     // ── Model resolution from request headers/body ──
@@ -168,24 +193,6 @@ export async function POST(req: NextRequest) {
       previousSpeeches: incomingPreviousSpeeches ?? [],
     };
 
-    // ── Generate actions ──
-    log.info(`Generating actions: "${outline.title}" (${outline.type}) [model=${modelString}]`);
-    phaseStartedAt = Date.now();
-    routeEventStart = collector.events.length;
-    log.info('[SceneGenerationTrace]', {
-      event: 'scene-actions-start',
-      stageId,
-      requestId: collector.requestId,
-      outlineId: outline.id,
-      sceneIndex: outline.order,
-      totalScenes: allOutlines.length,
-      sceneType: outline.type,
-      title: outline.title,
-      model: modelString,
-      phase: 'actions',
-      status: 'started',
-    });
-
     const generationContent = (
       'type' in content && content.type === 'pbl' ? normalizeLegacyPBLContent(content) : content
     ) as
@@ -193,68 +200,104 @@ export async function POST(req: NextRequest) {
       | GeneratedQuizContent
       | GeneratedInteractiveContent
       | GeneratedPBLContent;
+    const generateResolvedActions = async () => {
+      log.info(`Generating actions: "${outline.title}" (${outline.type}) [model=${modelString}]`);
+      phaseStartedAt = Date.now();
+      routeEventStart = collector.events.length;
+      log.info('[SceneGenerationTrace]', {
+        event: 'scene-actions-start',
+        stageId,
+        attemptId,
+        generationVersion,
+        requestId: collector.requestId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        totalScenes: allOutlines.length,
+        sceneType: outline.type,
+        title: outline.title,
+        model: modelString,
+        phase: 'actions',
+        status: 'started',
+      });
 
-    const actions = await generateSceneActions(outline, generationContent, aiCall, {
-      ctx,
-      agents,
-      userProfile,
-      languageDirective,
-      allowDiscussionActions: await resolveDiscussionActionsEnabled(),
-    });
+      const actions = await generateSceneActions(outline, generationContent, aiCall, {
+        ctx,
+        agents,
+        userProfile,
+        languageDirective,
+        allowDiscussionActions: await resolveDiscussionActionsEnabled(),
+      });
 
-    logSceneGenerationTiming(
-      withRouteTiming(
-        {
-          requestId: collector.requestId,
-          phase: 'actions',
-          stageId,
-          outlineId: outline.id,
-          sceneType: outline.type,
-          status: 'success',
-          durationMs: Date.now() - phaseStartedAt,
-          actionCount: actions.length,
-        },
-        collector.events.slice(routeEventStart),
-      ),
-    );
+      logSceneGenerationTiming(
+        withRouteTiming(
+          {
+            requestId: collector.requestId,
+            phase: 'actions',
+            stageId,
+            outlineId: outline.id,
+            sceneType: outline.type,
+            status: 'success',
+            durationMs: Date.now() - phaseStartedAt,
+            actionCount: actions.length,
+          },
+          collector.events.slice(routeEventStart),
+        ),
+      );
 
-    log.info(`Generated ${actions.length} actions for: "${outline.title}"`);
-    log.info('[SceneGenerationTrace]', {
-      event: 'scene-actions-complete',
-      stageId,
-      requestId: collector.requestId,
-      outlineId: outline.id,
-      sceneIndex: outline.order,
-      totalScenes: allOutlines.length,
-      sceneType: outline.type,
-      title: outline.title,
-      model: modelString,
-      phase: 'actions',
-      durationMs: Date.now() - phaseStartedAt,
-      status: 'completed',
-      actionCount: actions.length,
-    });
+      log.info(`Generated ${actions.length} actions for: "${outline.title}"`);
+      log.info('[SceneGenerationTrace]', {
+        event: 'scene-actions-complete',
+        stageId,
+        attemptId,
+        generationVersion,
+        requestId: collector.requestId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        totalScenes: allOutlines.length,
+        sceneType: outline.type,
+        title: outline.title,
+        model: modelString,
+        phase: 'actions',
+        durationMs: Date.now() - phaseStartedAt,
+        status: 'completed',
+        actionCount: actions.length,
+      });
 
-    // ── Build complete scene ──
-    const scene = buildCompleteScene(outline, generationContent, actions, stageId);
+      const builtScene = buildCompleteScene(outline, generationContent, actions, stageId);
+      if (!builtScene) throw new Error(`Failed to build scene: ${outline.title}`);
+      const scene = { ...builtScene, outlineId: outline.id };
+      const previousSpeeches = (scene.actions || [])
+        .filter((action: SpeechAction): action is SpeechAction => action.type === 'speech')
+        .map((action: SpeechAction) => action.text);
+      log.info(
+        `Scene assembled successfully: "${outline.title}" — ${scene.actions?.length ?? 0} actions`,
+      );
+      return { scene, previousSpeeches };
+    };
 
-    if (!scene) {
-      log.error(`Failed to build scene: "${outline.title}"`);
-
-      return apiError('GENERATION_FAILED', 500, `Failed to build scene: ${outline.title}`);
-    }
-
-    // ── Extract speeches for cross-scene coherence ──
-    const outputPreviousSpeeches = (scene.actions || [])
-      .filter((a): a is SpeechAction => a.type === 'speech')
-      .map((a) => a.text);
-
-    log.info(
-      `Scene assembled successfully: "${outline.title}" — ${scene.actions?.length ?? 0} actions`,
-    );
-
-    return apiSuccess({ scene, previousSpeeches: outputPreviousSpeeches });
+    const result =
+      attemptIdentity && ownerUserId
+        ? await runSceneAttemptActions(
+            ownerUserId,
+            attemptIdentity,
+            content,
+            generateResolvedActions,
+          )
+        : await generateResolvedActions();
+    return apiSuccess({ ...result, ...(attemptIdentity ?? {}) });
   } catch (error) {
+    if (error instanceof SceneGenerationAttemptError) {
+      log.info('[SceneGenerationTrace]', {
+        event: 'scene-attempt-stale-rejected',
+        stageId: stageIdForTiming,
+        outlineId: outlineIdForTiming,
+        errorCode: error.code,
+      });
+      return apiError(error.code, 409, error.message);
+    }
+    if (error instanceof Error && error.message.startsWith('Failed to build scene:')) {
+      return apiError('GENERATION_FAILED', 500, error.message);
+    }
     if (timingCollector) {
       logSceneGenerationTiming(
         withRouteTiming(

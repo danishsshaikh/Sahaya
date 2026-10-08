@@ -1289,8 +1289,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     // get scene information
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
     const pendingScene = useMemo(
-      () => selectNextRecoverableOutline(generatingOutlines, failedOutlines),
-      [failedOutlines, generatingOutlines],
+      () =>
+        generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
+      [failedOutlines, generationComplete, outlines, scenes],
     );
     const hasNextPending = pendingScene !== null;
     // True when every outline has materialized into a scene and nothing is

@@ -21,7 +21,7 @@ describe('scene recovery presentation', () => {
     const scene2 = outline('scene_2', 2);
     const scene3 = outline('scene_3', 3);
 
-    expect(selectNextRecoverableOutline([scene3], [scene2])).toEqual({
+    expect(selectNextRecoverableOutline([scene2, scene3], [], [scene2])).toEqual({
       outline: scene2,
       failed: true,
     });
@@ -29,7 +29,7 @@ describe('scene recovery presentation', () => {
 
   it('returns the next queued outline when no terminal failure exists', () => {
     const scene2 = outline('scene_2', 2);
-    expect(selectNextRecoverableOutline([scene2], [])).toEqual({
+    expect(selectNextRecoverableOutline([scene2], [], [])).toEqual({
       outline: scene2,
       failed: false,
     });
@@ -44,7 +44,7 @@ describe('scene recovery presentation', () => {
       restorePersistedSceneRecovery([scene1, scene2, scene3], [{ order: 1 }], ['scene_2']),
     ).toEqual({
       failedOutlines: [scene2],
-      generatingOutlines: [scene3],
+      pendingOutlines: [scene3],
     });
   });
 });

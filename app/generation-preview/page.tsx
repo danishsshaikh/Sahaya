@@ -35,6 +35,8 @@ import {
   fetchSceneActions,
   fetchSceneContent,
   generateTTSForScene,
+  commitSceneAttempt,
+  removeFreshTtsAllocations,
 } from '@/lib/hooks/use-scene-generator';
 import { isAbortError } from '@openmaic/generation';
 import { FOREGROUND_SCENE_RETRY_OPTIONS } from './foreground-retry';
@@ -87,6 +89,13 @@ import {
 } from './types';
 import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
+import {
+  mergeCompletedNarration,
+  narrationFailurePatch,
+  sceneForNarrationSynthesis,
+  sceneWithPendingNarration,
+} from '@/lib/generation/scene-narration';
+import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
 
 const log = createLogger('GenerationPreview');
 const OUTLINE_REVIEW_AUTO_CONTINUE_MS = 2500;
@@ -1202,6 +1211,8 @@ function GenerationPreviewContent() {
           previousSpeeches: [],
           userProfile,
           languageDirective,
+          attemptId: contentData.attemptId,
+          generationVersion: contentData.generationVersion,
         },
         signal,
         FOREGROUND_SCENE_RETRY_OPTIONS,
@@ -1210,66 +1221,108 @@ function GenerationPreviewContent() {
       if (!data.success || !data.scene) {
         throw new Error(sceneGenerationErrorMessage(data));
       }
-      const firstScene = data.scene;
-
-      // Generate TTS for first scene (part of actions step — blocking)
       if (
+        data.attemptId !== contentData.attemptId ||
+        data.generationVersion !== contentData.generationVersion
+      ) {
+        throw new Error('First scene generation attempt lost authority before commit.');
+      }
+      const narrationEnabled = Boolean(
         stage.teacherVoiceProfileId ||
         (settings.ttsEnabled &&
           settings.ttsProviderId !== 'browser-native-tts' &&
           isTTSProviderEnabled(
             settings.ttsProviderId,
             settings.ttsProvidersConfig?.[settings.ttsProviderId],
-          ))
-      ) {
-        updateGenerationProgress('phase-changed', {
-          stageId: stage.id,
-          sceneIndex: 1,
-          totalScenes: outlines.length,
-          phase: 'narration',
-          sceneType: firstOutline.type,
-          sceneStartedAt: firstSceneStartedAt,
-        });
-        const ttsResult = await generateTTSForScene(
-          firstScene,
-          languageDirective,
-          signal,
-          FOREGROUND_SCENE_RETRY_OPTIONS,
-        );
-        if (!ttsResult.success) throw new Error(t('generation.speechFailed'));
+          )),
+      );
+      const authoritativeScene = { ...data.scene, outlineId: firstOutline.id };
+      const firstScene = narrationEnabled
+        ? sceneWithPendingNarration(authoritativeScene)
+        : authoritativeScene;
+      const commitResult = await commitSceneAttempt({
+        attemptId: contentData.attemptId!,
+        generationVersion: contentData.generationVersion!,
+        stageId: stage.id,
+        outlineId: firstOutline.id,
+        sceneId: firstScene.id,
+      });
+      if (!commitResult.success || !commitResult.accepted) {
+        throw new Error(commitResult.error || 'First scene generation attempt could not commit.');
       }
 
-      // Add scene to store and navigate
-      store.addScene(firstScene);
-      store.setCurrentSceneId(firstScene.id);
-      updateGenerationProgress('scene-complete', {
-        stageId: stage.id,
-        sceneIndex: 1,
-        totalScenes: outlines.length,
-        phase: 'finalizing',
-        sceneType: firstOutline.type,
-        sceneStartedAt: firstSceneStartedAt,
-        completedSceneDurationsMs: [Date.now() - firstSceneStartedAt],
+      const scheduleFirstSceneNarration = narrationEnabled
+        ? () => {
+            const narrationScene = sceneForNarrationSynthesis(firstScene);
+            void generateTTSForScene(
+              narrationScene,
+              languageDirective,
+              undefined,
+              FOREGROUND_SCENE_RETRY_OPTIONS,
+              undefined,
+              firstOutline.id,
+            )
+              .then(async (ttsResult) => {
+                const current = useStageStore.getState();
+                const currentScene = current.getSceneById(firstScene.id);
+                if (current.stage?.id !== stage.id || !currentScene) {
+                  const allocations = (narrationScene.actions ?? []).flatMap(
+                    (action: { type: string; audioId?: string }) =>
+                      action.type === 'speech' && action.audioId ? [action.audioId] : [],
+                  );
+                  await removeFreshTtsAllocations(allocations);
+                  return;
+                }
+                current.updateScene(
+                  firstScene.id,
+                  ttsResult.success
+                    ? mergeCompletedNarration(currentScene, narrationScene)
+                    : narrationFailurePatch(),
+                );
+                await current.saveToStorage();
+              })
+              .catch(async (narrationError) => {
+                const current = useStageStore.getState();
+                if (current.stage?.id === stage.id && current.getSceneById(firstScene.id)) {
+                  current.updateScene(firstScene.id, narrationFailurePatch());
+                  await current.saveToStorage();
+                }
+                log.warn('[GenerationPreview] First scene narration failed:', narrationError);
+              });
+          }
+        : undefined;
+
+      // Visual readiness is content + actions + authoritative commit. Teaching
+      // Voice starts only after the visual scene is durable and navigable.
+      await finalizeFirstSceneVisual({
+        commitVisual: () => {
+          store.addScene(firstScene);
+          store.setCurrentSceneId(firstScene.id);
+          store.setGeneratingOutlines([]);
+          updateGenerationProgress('scene-complete', {
+            stageId: stage.id,
+            sceneIndex: 1,
+            totalScenes: outlines.length,
+            phase: 'finalizing',
+            sceneType: firstOutline.type,
+            sceneStartedAt: firstSceneStartedAt,
+            completedSceneDurationsMs: [Date.now() - firstSceneStartedAt],
+          });
+          sessionStorage.setItem(
+            'generationParams',
+            JSON.stringify({
+              pdfImages: currentSession.pdfImages,
+              agents,
+              userProfile,
+              languageDirective,
+            }),
+          );
+          sessionStorage.removeItem('generationSession');
+        },
+        persistVisual: () => store.saveToStorage(),
+        navigateToClassroom: () => router.push(`/classroom/${stage.id}`),
+        scheduleNarration: scheduleFirstSceneNarration,
       });
-
-      // Set remaining outlines as skeleton placeholders
-      const remaining = outlines.filter((o) => o.order !== firstScene.order);
-      store.setGeneratingOutlines(remaining);
-
-      // Store generation params for classroom to continue generation
-      sessionStorage.setItem(
-        'generationParams',
-        JSON.stringify({
-          pdfImages: currentSession.pdfImages,
-          agents,
-          userProfile,
-          languageDirective,
-        }),
-      );
-
-      sessionStorage.removeItem('generationSession');
-      await store.saveToStorage();
-      router.push(`/classroom/${stage.id}`);
     } catch (err) {
       setIsOutlineStreaming(false);
       // AbortError is expected when navigating away — don't show as error

@@ -4,6 +4,7 @@ import type { SceneOutline } from '@/lib/types/generation';
 
 const callLLMMock = vi.hoisted(() => vi.fn());
 const resolveModelFromRequestMock = vi.hoisted(() => vi.fn());
+const requireSessionUserMock = vi.hoisted(() => vi.fn());
 const VOCATIONAL_FLAG = 'OPENMAIC_ENABLE_VOCATIONAL';
 let originalVocationalFlag: string | undefined;
 
@@ -15,12 +16,21 @@ vi.mock('@/lib/server/resolve-model', () => ({
   resolveModelFromRequest: resolveModelFromRequestMock,
 }));
 
+vi.mock('@/lib/auth/server', () => ({
+  requireSessionUser: requireSessionUserMock,
+}));
+
+vi.mock('@/lib/persistence/resolve-vision-images', () => ({
+  resolveVisionImagesForPrompt: vi.fn().mockResolvedValue([]),
+}));
+
 describe('scene-content vocational gate', () => {
   beforeEach(() => {
     originalVocationalFlag = process.env[VOCATIONAL_FLAG];
     delete process.env[VOCATIONAL_FLAG];
     callLLMMock.mockReset();
     resolveModelFromRequestMock.mockReset();
+    requireSessionUserMock.mockReset().mockResolvedValue({ id: 'owner-1' });
     resolveModelFromRequestMock.mockResolvedValue({
       model: { provider: 'test.chat', modelId: 'test-model' },
       modelInfo: { outputWindow: 4096, capabilities: {} },

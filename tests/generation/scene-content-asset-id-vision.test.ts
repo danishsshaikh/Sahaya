@@ -5,6 +5,7 @@ import type { SceneOutline } from '@/lib/types/generation';
 const callLLMMock = vi.hoisted(() => vi.fn());
 const resolveModelFromRequestMock = vi.hoisted(() => vi.fn());
 const resolveVisionImagesMock = vi.hoisted(() => vi.fn());
+const requireSessionUserMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/ai/llm', () => ({
   callLLM: callLLMMock,
@@ -16,6 +17,10 @@ vi.mock('@/lib/server/resolve-model', () => ({
 
 vi.mock('@/lib/persistence/resolve-vision-images', () => ({
   resolveVisionImagesForPrompt: resolveVisionImagesMock,
+}));
+
+vi.mock('@/lib/auth/server', () => ({
+  requireSessionUser: requireSessionUserMock,
 }));
 
 /**
@@ -30,6 +35,7 @@ describe('scene-content route — asset-id image transport', () => {
     callLLMMock.mockReset();
     resolveModelFromRequestMock.mockReset();
     resolveVisionImagesMock.mockReset();
+    requireSessionUserMock.mockReset().mockResolvedValue({ id: 'owner-1' });
     resolveModelFromRequestMock.mockResolvedValue({
       model: { provider: 'test.chat', modelId: 'test-model' },
       modelInfo: { outputWindow: 4096, capabilities: { vision: true } },

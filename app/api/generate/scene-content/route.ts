@@ -47,6 +47,12 @@ import {
   shouldCollectLLMRouteTiming,
   withRouteTiming,
 } from '@/lib/server/generation-timing';
+import {
+  admitSceneGenerationAttempt,
+  createSceneGenerationVersion,
+  runSceneAttemptContent,
+  SceneGenerationAttemptError,
+} from '@/lib/server/scene-generation-attempts';
 
 const log = createLogger('Scene Content API');
 const SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
@@ -118,6 +124,7 @@ export async function POST(req: NextRequest) {
       agents,
       languageDirective,
       requirements,
+      attemptId: proposedAttemptId,
     } = body as {
       outline: SceneOutline;
       allOutlines: SceneOutline[];
@@ -132,6 +139,7 @@ export async function POST(req: NextRequest) {
       agents?: AgentInfo[];
       languageDirective?: string;
       requirements?: UserRequirements;
+      attemptId?: string;
     };
 
     // Validate required fields
@@ -148,6 +156,9 @@ export async function POST(req: NextRequest) {
     if (!stageId) {
       return apiError('MISSING_REQUIRED_FIELD', 400, 'stageId is required');
     }
+
+    const user = await requireSessionUser(req);
+    if (user instanceof Response) return user;
 
     const outline: SceneOutline = { ...rawOutline };
 
@@ -243,6 +254,20 @@ export async function POST(req: NextRequest) {
     const vocationalActive = resolveVocationalActive(requirements);
     const effectiveOutline = applyOutlineFallbacks(outline, !!languageModel, {
       allowProceduralSkill: vocationalActive,
+    });
+    const generationVersion = createSceneGenerationVersion({ outline, allOutlines });
+    const admission = admitSceneGenerationAttempt({
+      ownerUserId: user.id,
+      stageId,
+      outlineId: effectiveOutline.id,
+      generationVersion,
+      proposedAttemptId,
+    });
+    const attemptIdentity = admission.identity;
+    log.info('[SceneGenerationTrace]', {
+      event: admission.reused ? 'scene-attempt-reused' : 'scene-attempt-admitted',
+      ...attemptIdentity,
+      sceneIndex: effectiveOutline.order,
     });
 
     // ── Filter images assigned to this outline ──
@@ -392,6 +417,8 @@ export async function POST(req: NextRequest) {
           ? 'simulation-generation-start'
           : 'scene-content-start',
         stageId,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
         requestId: timingCollector.requestId,
         outlineId: effectiveOutline.id,
         sceneIndex: effectiveOutline.order,
@@ -487,6 +514,8 @@ export async function POST(req: NextRequest) {
           ? 'simulation-generation-complete'
           : 'scene-content-complete',
         stageId,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
         requestId: timingCollector.requestId,
         outlineId: effectiveOutline.id,
         sceneIndex: effectiveOutline.order,
@@ -500,11 +529,15 @@ export async function POST(req: NextRequest) {
 
       return { content, effectiveOutline };
     };
+    const generateAuthoritativeContent = async () => {
+      const result = await generateResolvedContent();
+      if (!result.content) {
+        throw new Error(`Failed to generate content: ${effectiveOutline.title}`);
+      }
+      return { content: result.content, effectiveOutline: result.effectiveOutline };
+    };
 
     if (isSimulationOutline(effectiveOutline)) {
-      const user = await requireSessionUser(req);
-      if (user instanceof Response) return user;
-
       const dedupeKey = createSceneContentDedupeKey({
         ownerUserId: user.id,
         stageId,
@@ -519,6 +552,7 @@ export async function POST(req: NextRequest) {
         thinkingConfig,
         userLocale,
         hasVision,
+        generationVersion,
       });
       const { job, reused } = createOrReuseSceneContentJob({
         ownerUserId: user.id,
@@ -526,6 +560,8 @@ export async function POST(req: NextRequest) {
         stageId,
         outlineId: effectiveOutline.id,
         outlineTitle: effectiveOutline.title,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
         widgetType: effectiveOutline.widgetType,
         modelString,
       });
@@ -533,10 +569,11 @@ export async function POST(req: NextRequest) {
       if (!reused) {
         after(() =>
           runSceneContentJob(job.id, async () => {
-            const result = await generateResolvedContent();
-            if (!result.content) {
-              throw new Error(`Failed to generate content: ${effectiveOutline.title}`);
-            }
+            const result = await runSceneAttemptContent(
+              user.id,
+              attemptIdentity,
+              generateAuthoritativeContent,
+            );
             return {
               content: result.content,
               effectiveOutline: result.effectiveOutline,
@@ -560,6 +597,8 @@ export async function POST(req: NextRequest) {
           status: job.status,
           stageId: job.stageId,
           outlineId: job.outlineId,
+          attemptId: job.attemptId,
+          generationVersion: job.generationVersion,
           pollUrl: `${buildRequestOrigin(req)}/api/generate/scene-content/status?jobId=${job.id}`,
           pollIntervalMs: SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS,
           done: job.status === 'completed' || job.status === 'failed',
@@ -575,17 +614,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { content } = await generateResolvedContent();
-    if (!content) {
-      return apiError(
-        'GENERATION_FAILED',
-        500,
-        `Failed to generate content: ${effectiveOutline.title}`,
-      );
-    }
+    const { content } = await runSceneAttemptContent(
+      user.id,
+      attemptIdentity,
+      generateAuthoritativeContent,
+    );
 
-    return apiSuccess({ content, effectiveOutline });
+    return apiSuccess({ content, effectiveOutline, ...attemptIdentity });
   } catch (error) {
+    if (error instanceof SceneGenerationAttemptError) {
+      log.info('[SceneGenerationTrace]', {
+        event: 'scene-attempt-stale-rejected',
+        errorCode: error.code,
+      });
+      return apiError(error.code, 409, error.message);
+    }
     log.error(
       `Scene content generation failed [scene="${outlineTitle ?? 'unknown'}", model=${resolvedModelString ?? 'unknown'}, durationMs=${Date.now() - startedAt}]:`,
       error,
