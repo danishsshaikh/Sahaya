@@ -197,6 +197,7 @@ async function mountGenerator(root: Root, onComplete = vi.fn()) {
 describe('scene generator visual and narration pipelines', () => {
   let root: Root;
   let container: HTMLDivElement;
+  const additionalRoots: Array<{ root: Root; container: HTMLDivElement }> = [];
 
   beforeEach(() => {
     mocks.stageState = makeStageState();
@@ -209,6 +210,10 @@ describe('scene generator visual and narration pipelines', () => {
   });
 
   afterEach(async () => {
+    for (const mounted of additionalRoots.splice(0)) {
+      await act(async () => mounted.root.unmount());
+      mounted.container.remove();
+    }
     await act(async () => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
@@ -278,6 +283,135 @@ describe('scene generator visual and narration pipelines', () => {
 
     generator.stop();
     expect(narrationSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('admits one authoritative attempt across two hook instances for the same outline', async () => {
+    const firstOutline = outlines[0];
+    mocks.stageState.outlines = [firstOutline];
+    const contentGate = Promise.withResolvers<void>();
+    const actionsGate = Promise.withResolvers<void>();
+    let admittedAttemptId: string | undefined;
+    let contentProviderCalls = 0;
+    let actionsProviderCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/scene-content') {
+          if (!body.attemptId) {
+            contentProviderCalls += 1;
+            await contentGate.promise;
+            return jsonResponse({ success: true, content: { elements: [] } });
+          }
+          if (!admittedAttemptId) {
+            admittedAttemptId = body.attemptId;
+            contentProviderCalls += 1;
+          }
+          await contentGate.promise;
+          return jsonResponse({
+            success: true,
+            content: { elements: [] },
+            attemptId: admittedAttemptId,
+            generationVersion: 'version-1',
+          });
+        }
+        if (url === '/api/generate/scene-actions') {
+          if (!body.attemptId || body.attemptId !== admittedAttemptId) {
+            actionsProviderCalls += 1;
+          } else if (actionsProviderCalls === 0) {
+            actionsProviderCalls += 1;
+          }
+          await actionsGate.promise;
+          return actionResponse(1);
+        }
+        if (url === '/api/generate/scene-attempt/commit') {
+          return jsonResponse({ success: true, accepted: true });
+        }
+        if (url === '/api/generate/tts') {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            statusText: 'Unavailable',
+            json: async () => ({}),
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const secondContainer = document.createElement('div');
+    document.body.appendChild(secondContainer);
+    const secondRoot = createRoot(secondContainer);
+    additionalRoots.push({ root: secondRoot, container: secondContainer });
+    const first = await mountGenerator(root);
+    const second = await mountGenerator(secondRoot);
+
+    const firstRun = first.generator.generateRemaining({ stageInfo: { name: 'Shared lesson' } });
+    const secondRun = second.generator.generateRemaining({ stageInfo: { name: 'Shared lesson' } });
+
+    await vi.waitFor(() => expect(contentProviderCalls).toBeGreaterThan(0));
+    expect(contentProviderCalls).toBe(1);
+    contentGate.resolve();
+    await vi.waitFor(() => expect(actionsProviderCalls).toBeGreaterThan(0));
+    expect(actionsProviderCalls).toBe(1);
+    actionsGate.resolve();
+    await Promise.all([firstRun, secondRun]);
+
+    expect(mocks.stageState.scenes.map((scene) => scene.order)).toEqual([1]);
+  });
+
+  it('keeps only dispatched outlines active while progressing through four queued scenes', async () => {
+    const fourOutlines: SceneOutline[] = [1, 2, 3, 4].map((order) => ({
+      id: `progress-outline-${order}`,
+      type: 'slide',
+      title: `Progress ${order}`,
+      description: `Progress scene ${order}`,
+      keyPoints: [`Point ${order}`],
+      order,
+    }));
+    mocks.stageState.outlines = fourOutlines;
+    const activeAtDispatch: string[][] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (url === '/api/generate/scene-content') {
+          activeAtDispatch.push(mocks.stageState.generatingOutlines.map((outline) => outline.id));
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              content: { elements: [] },
+              attemptId: `attempt-${body.outline.order}`,
+              generationVersion: 'version-1',
+            }),
+          );
+        }
+        if (url === '/api/generate/scene-actions') {
+          return Promise.resolve(actionResponse(body.outline.order as number));
+        }
+        if (url === '/api/generate/scene-attempt/commit') {
+          return Promise.resolve(jsonResponse({ success: true, accepted: true }));
+        }
+        if (url === '/api/generate/tts') {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            statusText: 'Unavailable',
+            json: async () => ({ success: false, error: 'Unavailable' }),
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generator } = await mountGenerator(root);
+    await generator.generateRemaining({ stageInfo: { name: 'Progressive lesson' } });
+
+    expect(activeAtDispatch).toEqual(fourOutlines.map((outline) => [outline.id]));
+    expect(mocks.stageState.scenes.map((scene) => scene.order)).toEqual([1, 2, 3, 4]);
+    expect(mocks.stageState.generatingOutlines).toEqual([]);
   });
 
   it('keeps all visual scenes usable when every narration request fails', async () => {
