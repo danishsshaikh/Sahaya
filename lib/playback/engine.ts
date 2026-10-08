@@ -597,6 +597,20 @@ export class PlaybackEngine {
 
     const { action } = current;
 
+    const currentScene = this.scenes[this.sceneIndex];
+    if (
+      action.type === 'speech' &&
+      !(action as SpeechAction).audioId &&
+      ['pending', 'queued', 'running'].includes(currentScene?.narrationStatus ?? '')
+    ) {
+      // Do not consume a generated narration line with a reading-time timer
+      // while its selected Teaching Voice is still being produced. Keep the
+      // cursor at this action so an explicit Play after completion starts audio.
+      this.setMode('idle');
+      this.callbacks.onNarrationPending?.();
+      return;
+    }
+
     // Notify progress BEFORE advancing the cursor so the snapshot points at
     // the current action.  On restore the same action will be replayed — this
     // is the desired behaviour for speech (user may have only heard half).

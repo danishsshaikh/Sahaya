@@ -14,7 +14,7 @@ import type {
 } from '@/lib/types/generation';
 import type { AgentInfo } from '@openmaic/generation';
 import type { Scene } from '@/lib/types/stage';
-import type { SpeechAction } from '@/lib/types/action';
+import type { Action, SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
 import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
@@ -620,9 +620,9 @@ async function resolveTeachingVoiceJob(
       audioBytes: new Uint8Array(await audioResponse.arrayBuffer()),
     };
   } catch (error) {
-    if (isAbortError(error) && current.status === 'queued') {
-      void fetch(statusUrl, { method: 'DELETE', keepalive: true }).catch(() => undefined);
-    }
+    // A component unmount only stops this observer. The owner-scoped server job
+    // remains authoritative and idempotent so a remounted classroom can rejoin
+    // it instead of cancelling useful queued work or starting another synthesis.
     throw error;
   } finally {
     onQueueStatus?.(null);
@@ -786,7 +786,6 @@ export async function generateAndStoreTTS(
           (((!result.base64 && !result.audioBytes) || !result.format) &&
             !(result.async && result.jobId)),
         ...retryOptions,
-        ...(teacherVoiceProfileId ? { maxRetries: 0 } : {}),
         signal,
       },
     );
@@ -1232,6 +1231,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
           if (!ttsResult.success) {
             store.getState().updateScene(scene.id, narrationFailurePatch());
+            await store.getState().saveToStorage();
             log.warn('[SceneNarration]', {
               event: 'failed',
               stageId,
@@ -1258,6 +1258,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             speechAllocationIds(narrationScene).filter((audioId) => !retainedAudioIds.has(audioId)),
           );
           store.getState().updateScene(scene.id, patch);
+          await store.getState().saveToStorage();
           log.info('[SceneNarration]', {
             event: patch.narrationStatus === 'completed' ? 'completed' : 'completed-stale',
             stageId,
@@ -1283,6 +1284,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             store.getState().getSceneById(scene.id)
           ) {
             store.getState().updateScene(scene.id, narrationFailurePatch());
+            await store.getState().saveToStorage();
           }
           log.warn('[SceneNarration]', {
             event: 'failed',
@@ -1303,6 +1305,43 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     },
     [options, store],
   );
+
+  // A visual scene is committed before Teaching Voice finishes. Refreshes and
+  // route remounts therefore hydrate a real scene whose narration may still be
+  // pending. Re-submit its deterministic action identity to rejoin the existing
+  // owner-scoped server job; completed jobs return their retained result.
+  useEffect(() => {
+    const state = store.getState();
+    const stage = state.stage;
+    if (!stage) return;
+    const resumableStatuses = new Set(['pending', 'queued', 'running']);
+    const settings = useSettingsStore.getState();
+    const provider = stage.teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId;
+
+    for (const scene of state.scenes) {
+      if (!scene.narrationStatus || !resumableStatuses.has(scene.narrationStatus)) continue;
+      if (
+        !scene.actions.some(
+          (action: Action) => action.type === 'speech' && !!action.text && !action.audioId,
+        )
+      ) {
+        continue;
+      }
+      const outline = state.outlines.find(
+        (candidate) => candidate.id === scene.outlineId || candidate.order === scene.order,
+      );
+      if (!outline) continue;
+      scheduleNarration({
+        scene,
+        outline,
+        stageId: stage.id,
+        generationRunId: `${stage.id}:${state.generationEpoch}:narration-resume`,
+        generationEpoch: state.generationEpoch,
+        language: stage.languageDirective,
+        provider,
+      });
+    }
+  }, [scheduleNarration, store]);
 
   const generateRemaining = useCallback(
     async (params: GenerationParams) => {

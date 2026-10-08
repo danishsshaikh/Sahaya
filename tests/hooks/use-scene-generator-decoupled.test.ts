@@ -137,6 +137,7 @@ function makeStageState() {
           state.scenes.some((scene) => scene.order === outline.order),
         );
     },
+    saveToStorage: vi.fn().mockResolvedValue(true),
   };
   return state;
 }
@@ -222,6 +223,7 @@ describe('scene generator visual and narration pipelines', () => {
     }
     await act(async () => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -299,6 +301,214 @@ describe('scene generator visual and narration pipelines', () => {
 
     generator.stop();
     expect(narrationSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('rejoins queued narration after unmount and durably attaches it to the committed scene', async () => {
+    const firstOutline = outlines[0];
+    const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
+    mocks.stageState.outlines = [firstOutline];
+    mocks.stageState.scenes = [{ ...committedScene, narrationStatus: 'pending' }];
+    mocks.stageState.currentSceneId = 'scene-1';
+    mocks.stageState.generationComplete = true;
+
+    let ttsAdmissions = 0;
+    const deleteRequests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/generate/tts') {
+          ttsAdmissions += 1;
+          if (ttsAdmissions === 1) {
+            return Promise.resolve(
+              jsonResponse({
+                success: true,
+                async: true,
+                teachingVoiceProvider: 'qwen3',
+                jobId: 'rq_shared_teaching_voice_job',
+                status: 'queued',
+                statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
+              }),
+            );
+          }
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_shared_teaching_voice_job',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
+              audioUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job/audio',
+            }),
+          );
+        }
+        if (
+          url === '/api/generate/tts/jobs/rq_shared_teaching_voice_job' &&
+          init?.method === 'DELETE'
+        ) {
+          deleteRequests.push(url);
+          return Promise.resolve(jsonResponse({ success: true, status: 'cancelled' }));
+        }
+        if (url === '/api/generate/tts/jobs/rq_shared_teaching_voice_job/audio') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({ 'content-type': 'audio/wav' }),
+            arrayBuffer: async () => new TextEncoder().encode('audible wav').buffer,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    await mountGenerator(root);
+    await vi.waitFor(() => expect(ttsAdmissions).toBe(1));
+    await act(async () => root.unmount());
+
+    const remountContainer = document.createElement('div');
+    document.body.appendChild(remountContainer);
+    const remountRoot = createRoot(remountContainer);
+    additionalRoots.push({ root: remountRoot, container: remountContainer });
+    await mountGenerator(remountRoot);
+
+    await vi.waitFor(() => {
+      const speech = mocks.stageState.scenes[0]?.actions[0] as { audioId?: string };
+      expect(speech.audioId).toBe('tts_s1_speech-1');
+      expect(mocks.stageState.scenes[0]?.narrationStatus).toBe('completed');
+    });
+    expect(ttsAdmissions).toBe(2);
+    expect(deleteRequests).toEqual([]);
+    expect(mocks.stageState.saveToStorage).toHaveBeenCalled();
+  });
+
+  it('retries a transient Teaching Voice request failure through server idempotency', async () => {
+    let admissions = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/generate/tts') {
+          admissions += 1;
+          if (admissions === 1) {
+            return Promise.resolve({
+              ok: false,
+              status: 503,
+              statusText: 'Request failed',
+              json: async () => {
+                throw new Error('non-JSON proxy response');
+              },
+            });
+          }
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_delayed_teaching_voice_job',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_delayed_teaching_voice_job',
+              audioUrl: '/api/generate/tts/jobs/rq_delayed_teaching_voice_job/audio',
+            }),
+          );
+        }
+        if (url === '/api/generate/tts/jobs/rq_delayed_teaching_voice_job/audio') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({ 'content-type': 'audio/wav' }),
+            arrayBuffer: async () => new TextEncoder().encode('delayed audible wav').buffer,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    await expect(
+      generateAndStoreTTS(
+        'tts_s1_speech-1',
+        'Delayed narration',
+        'en',
+        undefined,
+        { baseDelayMs: 0, maxDelayMs: 0 },
+        undefined,
+        'stage-1',
+        undefined,
+        0,
+        'scene-1',
+        undefined,
+        'outline-1',
+      ),
+    ).resolves.toBe('tts_s1_speech-1');
+    expect(admissions).toBe(2);
+  });
+
+  it('keeps polling a queue-delayed Teaching Voice job until audio is ready', async () => {
+    vi.useFakeTimers();
+    let statusChecks = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/generate/tts') {
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3',
+              jobId: 'rq_fifo_delayed_teaching_voice',
+              status: 'queued',
+              statusUrl: '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice',
+            }),
+          );
+        }
+        if (url === '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice') {
+          statusChecks += 1;
+          const completed = statusChecks === 4;
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              jobId: 'rq_fifo_delayed_teaching_voice',
+              status: completed ? 'completed' : 'queued',
+              ...(completed
+                ? { audioUrl: '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice/audio' }
+                : { queuePosition: 2, jobsAhead: 1, estimatedWaitMs: 45_000 }),
+            }),
+          );
+        }
+        if (url === '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice/audio') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({ 'content-type': 'audio/wav' }),
+            arrayBuffer: async () => new TextEncoder().encode('queued audible wav').buffer,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const result = generateAndStoreTTS(
+      'tts_s1_speech-1',
+      'Queued narration',
+      'en',
+      undefined,
+      undefined,
+      undefined,
+      'stage-1',
+      undefined,
+      0,
+      'scene-1',
+      undefined,
+      'outline-1',
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    await expect(result).resolves.toBe('tts_s1_speech-1');
+    expect(statusChecks).toBe(4);
   });
 
   it('admits one authoritative attempt across two hook instances for the same outline', async () => {

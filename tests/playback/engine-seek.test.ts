@@ -362,4 +362,27 @@ describe('generated narration completion ownership', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
     expect(AudioElement.instances).toHaveLength(0);
   });
+
+  it('does not consume pending generated narration as silent reading progress', async () => {
+    vi.useFakeTimers();
+    const onSpeechStart = vi.fn();
+    const onComplete = vi.fn();
+    const pendingScene = {
+      ...scene([speech('pending', 'Narration is still being generated.')]),
+      narrationStatus: 'pending',
+    } as Scene;
+    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(), {
+      onSpeechStart,
+      onComplete,
+    });
+    engines.push(engine);
+
+    engine.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(onSpeechStart).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(engine.getSnapshot().actionIndex).toBe(0);
+    expect(engine.getMode()).toBe('idle');
+  });
 });

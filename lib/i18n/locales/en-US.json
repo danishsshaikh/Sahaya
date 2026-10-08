@@ -261,6 +261,7 @@
     "generating": "Generating...",
     "paused": "Paused",
     "generationFailed": "Generation failed",
+    "narrationPreparing": "Teaching Voice narration is still being prepared.",
     "confirmSwitchTitle": "Switch Scene",
     "confirmSwitchMessage": "A topic is currently in progress. Switching scenes will end the current topic. Are you sure?",
     "generatingNextPage": "Scene is being generated, please wait...",

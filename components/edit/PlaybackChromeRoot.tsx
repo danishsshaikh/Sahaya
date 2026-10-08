@@ -881,6 +881,11 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             activeNarrationRef.current = null;
             setNarrationHighlight(null);
           },
+          onNarrationPending: () => {
+            setLectureSpeech(t('stage.narrationPreparing'));
+            activeNarrationRef.current = null;
+            setNarrationHighlight(null);
+          },
           onEffectFire: (effect: Effect) => {
             // Add to lecture session with incrementing index
             if (

@@ -59,6 +59,11 @@ export function mergeCompletedNarration(current: Scene, generated: Scene): Scene
       needsRetry = true;
       return action;
     }
+    // Another observer may have completed the same idempotent job, or faculty
+    // may have committed a pronunciation repair while this observer was still
+    // downloading. A completed current allocation is newer authority and must
+    // not be replaced by this late result.
+    if (current.narrationStatus === 'completed' && action.audioId) return action;
     return { ...action, audioId: generatedAction.audioId };
   });
 
