@@ -46,15 +46,22 @@ export function SceneSidebar({
 }: SceneSidebarProps) {
   const { t } = useI18n();
   const router = useRouter();
-  const { scenes, currentSceneId, setCurrentSceneId, generatingOutlines, generationStatus } =
-    useStageStore();
+  const {
+    scenes,
+    outlines,
+    currentSceneId,
+    setCurrentSceneId,
+    generationStatus,
+    generationComplete,
+  } = useStageStore();
   const failedOutlines = useStageStore.use.failedOutlines();
   const viewportSize = useCanvasStore.use.viewportSize();
   const viewportRatio = useCanvasStore.use.viewportRatio();
   const visibleScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
   const pendingScene = useMemo(
-    () => selectNextRecoverableOutline(generatingOutlines, failedOutlines),
-    [failedOutlines, generatingOutlines],
+    () =>
+      generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
+    [failedOutlines, generationComplete, outlines, scenes],
   );
 
   const [retryingOutlineId, setRetryingOutlineId] = useState<string | null>(null);

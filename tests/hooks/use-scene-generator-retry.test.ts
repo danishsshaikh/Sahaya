@@ -28,6 +28,7 @@ vi.mock('@/lib/store/settings', () => ({
 }));
 
 vi.mock('@/lib/store/stage', () => ({
+  flushStageSave: vi.fn().mockResolvedValue(undefined),
   useStageStore: {
     getState: mocks.stageState,
   },
@@ -144,7 +145,14 @@ describe('browser scene generation retry wrappers', () => {
     const { fetchSceneContent } = await import('@/lib/hooks/use-scene-generator');
     mockFetch
       .mockResolvedValueOnce(jsonResponse(429, { error: 'rate limited' }))
-      .mockResolvedValueOnce(jsonResponse(200, { success: true, content: { elements: [] } }));
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          content: { elements: [] },
+          attemptId: 'attempt-content',
+          generationVersion: 'version-1',
+        }),
+      );
 
     const result = await fetchSceneContent(
       {
@@ -220,6 +228,8 @@ describe('browser scene generation retry wrappers', () => {
           outlineId: simulationOutline.id,
           status: 'queued',
           pollIntervalMs: 1,
+          attemptId: 'attempt-simulation',
+          generationVersion: 'version-1',
         }),
       )
       .mockResolvedValueOnce(
@@ -230,6 +240,8 @@ describe('browser scene generation retry wrappers', () => {
           stageId: 'stage-1',
           outlineId: simulationOutline.id,
           status: 'generating',
+          attemptId: 'attempt-simulation',
+          generationVersion: 'version-1',
         }),
       )
       .mockResolvedValueOnce(
@@ -242,6 +254,8 @@ describe('browser scene generation retry wrappers', () => {
           status: 'completed',
           content: { html: '<html>Simulation</html>', widgetType: 'simulation' },
           effectiveOutline: simulationOutline,
+          attemptId: 'attempt-simulation',
+          generationVersion: 'version-1',
         }),
       );
 
@@ -278,6 +292,8 @@ describe('browser scene generation retry wrappers', () => {
           outlineId: simulationOutline.id,
           status: 'queued',
           pollIntervalMs: 1,
+          attemptId: 'attempt-failed',
+          generationVersion: 'version-1',
         }),
       )
       .mockResolvedValueOnce(
@@ -289,6 +305,8 @@ describe('browser scene generation retry wrappers', () => {
           outlineId: simulationOutline.id,
           status: 'failed',
           error: 'Simulation generation failed',
+          attemptId: 'attempt-failed',
+          generationVersion: 'version-1',
         }),
       );
 
@@ -322,6 +340,8 @@ describe('browser scene generation retry wrappers', () => {
         stageId: 'stage-1',
         outlineId: 'outline-other',
         status: 'queued',
+        attemptId: 'attempt-wrong-outline',
+        generationVersion: 'version-1',
       }),
     );
 
@@ -358,6 +378,8 @@ describe('browser scene generation retry wrappers', () => {
         outlineId: simulationOutline.id,
         status: 'queued',
         pollIntervalMs: 1,
+        attemptId: 'attempt-abort',
+        generationVersion: 'version-1',
       }),
     );
 
@@ -519,7 +541,14 @@ describe('browser scene generation retry wrappers', () => {
       stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready' },
     });
     const { fetchSceneContent } = await import('@/lib/hooks/use-scene-generator');
-    mockFetch.mockResolvedValue(jsonResponse(200, { success: true, content: { elements: [] } }));
+    mockFetch.mockResolvedValue(
+      jsonResponse(200, {
+        success: true,
+        content: { elements: [] },
+        attemptId: 'attempt-content',
+        generationVersion: 'version-1',
+      }),
+    );
 
     await fetchSceneContent(
       {

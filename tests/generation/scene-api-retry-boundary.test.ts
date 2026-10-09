@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   buildCompleteScene: vi.fn(),
   buildVisionUserContent: vi.fn(),
   resolveVocationalActive: vi.fn(),
+  requireSessionUser: vi.fn(),
 }));
 
 vi.mock('@/lib/ai/llm', () => ({
@@ -23,6 +24,14 @@ vi.mock('@/lib/server/resolve-model', () => ({
 
 vi.mock('@/lib/config/feature-flags', () => ({
   resolveVocationalActive: mocks.resolveVocationalActive,
+}));
+
+vi.mock('@/lib/auth/server', () => ({
+  requireSessionUser: mocks.requireSessionUser,
+}));
+
+vi.mock('@/lib/persistence/resolve-vision-images', () => ({
+  resolveVisionImagesForPrompt: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('@openmaic/generation', async (importOriginal) => ({
@@ -81,6 +90,7 @@ describe('scene API retry boundary', () => {
     mocks.applyOutlineFallbacks.mockImplementation((value) => value);
     mocks.callLLM.mockResolvedValue({ text: 'ok' });
     mocks.resolveVocationalActive.mockReturnValue(false);
+    mocks.requireSessionUser.mockResolvedValue({ id: 'owner-1' });
   });
 
   it('disables AI SDK retries for scene-content model calls', async () => {

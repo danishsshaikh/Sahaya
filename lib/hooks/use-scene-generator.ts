@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
-import { useStageStore } from '@/lib/store/stage';
+import { flushStageSave, useStageStore } from '@/lib/store/stage';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -14,7 +14,7 @@ import type {
 } from '@/lib/types/generation';
 import type { AgentInfo } from '@openmaic/generation';
 import type { Scene } from '@/lib/types/stage';
-import type { SpeechAction } from '@/lib/types/action';
+import type { Action, SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
 import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
@@ -57,6 +57,7 @@ import {
 } from '@/lib/generation/scene-narration';
 
 const log = createLogger('SceneGenerator');
+type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
 const SCENE_CONTENT_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
 
@@ -87,12 +88,25 @@ interface SceneContentResult {
   jobTerminal?: boolean;
   stageId?: string;
   outlineId?: string;
+  attemptId?: string;
+  generationVersion?: string;
 }
 
 interface SceneActionsResult {
   success: boolean;
   scene?: Scene;
   previousSpeeches?: string[];
+  error?: string;
+  errorCode?: string;
+  statusCode?: number;
+  attemptId?: string;
+  generationVersion?: string;
+}
+
+interface SceneAttemptCommitResult {
+  success: boolean;
+  accepted?: boolean;
+  alreadyCommitted?: boolean;
   error?: string;
   errorCode?: string;
   statusCode?: number;
@@ -181,6 +195,20 @@ function errorMeta(error: unknown): Pick<SceneContentResult, 'errorCode' | 'stat
   };
 }
 
+function createSceneAttemptId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `scene_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function attemptIdentity(result: SceneContentResult) {
+  return {
+    attemptId: result.attemptId,
+    generationVersion: result.generationVersion,
+  };
+}
+
 function isAsyncSceneContentStart(result: SceneContentResult): result is SceneContentResult & {
   async: true;
   jobId: string;
@@ -226,6 +254,7 @@ async function pollSceneContentJob(
       jobId: initial.jobId,
       status: initial.status,
       jobTerminal: true,
+      ...attemptIdentity(initial),
     };
   }
   if (initial.status === 'failed') {
@@ -236,6 +265,7 @@ async function pollSceneContentJob(
       jobId: initial.jobId,
       status: initial.status,
       jobTerminal: true,
+      ...attemptIdentity(initial),
     };
   }
 
@@ -282,6 +312,7 @@ async function pollSceneContentJob(
           jobId: initial.jobId,
           status: data.status,
           jobTerminal: true,
+          ...attemptIdentity(initial),
         };
       }
       return {
@@ -291,6 +322,7 @@ async function pollSceneContentJob(
         jobId: initial.jobId,
         status: data.status,
         jobTerminal: true,
+        ...attemptIdentity(initial),
       };
     }
 
@@ -302,6 +334,7 @@ async function pollSceneContentJob(
         jobId: initial.jobId,
         status: data.status,
         jobTerminal: true,
+        ...attemptIdentity(initial),
       };
     }
   }
@@ -313,6 +346,7 @@ async function pollSceneContentJob(
     jobId: initial.jobId,
     status: initial.status,
     jobTerminal: true,
+    ...attemptIdentity(initial),
   };
 }
 
@@ -333,17 +367,19 @@ export async function fetchSceneContent(
     agents?: AgentInfo[];
     languageDirective?: string;
     requirements?: UserRequirements;
+    attemptId?: string;
   },
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneContentResult>,
 ): Promise<SceneContentResult> {
+  const proposedAttemptId = params.attemptId ?? createSceneAttemptId();
   try {
     return await withGenerationRetry(
       async () => {
         const response = await fetch('/api/generate/scene-content', {
           method: 'POST',
           headers: getApiHeaders(),
-          body: JSON.stringify(withThinkingConfig(params)),
+          body: JSON.stringify(withThinkingConfig({ ...params, attemptId: proposedAttemptId })),
           signal,
         });
 
@@ -353,6 +389,14 @@ export async function fetchSceneContent(
         }
 
         const result = data as unknown as SceneContentResult;
+        if (!result.attemptId || !result.generationVersion) {
+          return {
+            success: false,
+            error: 'Scene content response is missing authoritative attempt identity',
+            errorCode: 'GENERATION_ATTEMPT_INVALID',
+            statusCode: 409,
+          };
+        }
         if (isAsyncSceneContentStart(result)) {
           if (result.stageId !== params.stageId || result.outlineId !== params.outline.id) {
             return {
@@ -402,6 +446,8 @@ export async function fetchSceneActions(
     previousSpeeches?: string[];
     userProfile?: string;
     languageDirective?: string;
+    attemptId?: string;
+    generationVersion?: string;
   },
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneActionsResult>,
@@ -440,6 +486,33 @@ export async function fetchSceneActions(
   }
 }
 
+export async function commitSceneAttempt(params: {
+  attemptId: string;
+  generationVersion: string;
+  stageId: string;
+  outlineId: string;
+  sceneId: string;
+}): Promise<SceneAttemptCommitResult> {
+  try {
+    const response = await fetch('/api/generate/scene-attempt/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok) {
+      throw createHttpError(response, data, 'Scene attempt commit failed');
+    }
+    return data as unknown as SceneAttemptCommitResult;
+  } catch (error) {
+    return {
+      success: false,
+      error: messageFromError(error, 'Scene attempt commit failed'),
+      ...errorMeta(error),
+    };
+  }
+}
+
 interface TTSApiResponse {
   success?: boolean;
   base64?: string;
@@ -456,6 +529,15 @@ interface TTSApiResponse {
   statusUrl?: string;
   audioUrl?: string;
   teachingVoiceProvider?: string;
+}
+
+interface NarrationTraceContext {
+  stageId?: string;
+  outlineId?: string;
+  sceneId?: string;
+  actionId?: string;
+  startedAt: number;
+  onJobIdentified?: (jobId: string) => void;
 }
 
 const TEACHING_VOICE_JOB_POLL_INTERVAL_MS = 1500;
@@ -483,6 +565,7 @@ async function resolveTeachingVoiceJob(
   signal: AbortSignal | undefined,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   teachingVoiceExpected = false,
+  traceContext?: NarrationTraceContext,
 ): Promise<TTSApiResponse> {
   if (teachingVoiceExpected && !initial.teachingVoiceProvider) {
     throw new Error('Teaching Voice response is missing provider metadata.');
@@ -494,6 +577,7 @@ async function resolveTeachingVoiceJob(
     return initial;
   }
   const statusUrl = initial.statusUrl;
+  traceContext?.onJobIdentified?.(initial.jobId);
   let current = initial;
   let lastLoggedStatus: TTSApiResponse['status'];
   traceSceneGeneration('teaching-voice-async-job-received', {
@@ -536,21 +620,42 @@ async function resolveTeachingVoiceJob(
       throw new Error('Teaching Voice job returned an invalid completion state.');
     }
 
+    log.info('[SceneNarration]', {
+      event: 'narration-tts-job-completed',
+      stageId: traceContext?.stageId,
+      outlineId: traceContext?.outlineId,
+      sceneId: traceContext?.sceneId,
+      actionId: traceContext?.actionId,
+      jobId: initial.jobId,
+      elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+    });
+
     const audioResponse = await fetch(current.audioUrl, { signal });
     if (!audioResponse.ok) {
       const error = (await readJsonResponse(audioResponse)) as TTSApiResponse;
       throw createHttpError(audioResponse, error, 'Teaching Voice audio retrieval failed');
     }
     const contentType = audioResponse.headers.get('content-type') || 'audio/wav';
+    const audioBytes = new Uint8Array(await audioResponse.arrayBuffer());
+    log.info('[SceneNarration]', {
+      event: 'narration-audio-downloaded',
+      stageId: traceContext?.stageId,
+      outlineId: traceContext?.outlineId,
+      sceneId: traceContext?.sceneId,
+      actionId: traceContext?.actionId,
+      jobId: initial.jobId,
+      elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+    });
     return {
       success: true,
       format: contentType.split('/')[1]?.split(';')[0] || 'wav',
-      audioBytes: new Uint8Array(await audioResponse.arrayBuffer()),
+      audioBytes,
+      jobId: initial.jobId,
     };
   } catch (error) {
-    if (isAbortError(error) && current.status === 'queued') {
-      void fetch(statusUrl, { method: 'DELETE', keepalive: true }).catch(() => undefined);
-    }
+    // A component unmount only stops this observer. The owner-scoped server job
+    // remains authoritative and idempotent so a remounted classroom can rejoin
+    // it instead of cancelling useful queued work or starting another synthesis.
     throw error;
   } finally {
     onQueueStatus?.(null);
@@ -585,6 +690,7 @@ export async function generateAndStoreTTS(
   sceneId?: string,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   outlineId?: string,
+  traceContext?: NarrationTraceContext,
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
@@ -705,7 +811,13 @@ export async function generateAndStoreTTS(
         if (!response.ok) {
           throw createHttpError(response, data, 'TTS request failed');
         }
-        return resolveTeachingVoiceJob(data, signal, onQueueStatus, Boolean(teacherVoiceProfileId));
+        return resolveTeachingVoiceJob(
+          data,
+          signal,
+          onQueueStatus,
+          Boolean(teacherVoiceProfileId),
+          traceContext,
+        );
       },
       {
         label: `tts "${requestId}"`,
@@ -714,7 +826,6 @@ export async function generateAndStoreTTS(
           (((!result.base64 && !result.audioBytes) || !result.format) &&
             !(result.async && result.jobId)),
         ...retryOptions,
-        ...(teacherVoiceProfileId ? { maxRetries: 0 } : {}),
         signal,
       },
     );
@@ -759,6 +870,7 @@ export async function generateAndStoreTTS(
             sceneId,
             onQueueStatus,
             outlineId,
+            traceContext,
           );
         }
         // Bound == global (pinned narrator): a retry would hit the same missing
@@ -780,6 +892,7 @@ export async function generateAndStoreTTS(
               sceneId,
               onQueueStatus,
               outlineId,
+              traceContext,
             );
           }
         }
@@ -851,6 +964,15 @@ export async function generateAndStoreTTS(
   } else {
     await cacheWrite;
   }
+  log.info('[SceneNarration]', {
+    event: 'narration-audio-asset-ready',
+    stageId,
+    outlineId,
+    sceneId,
+    actionId: traceContext?.actionId,
+    jobId: data.jobId,
+    elapsedMs: traceContext ? Date.now() - traceContext.startedAt : undefined,
+  });
   return audioId;
 }
 
@@ -909,12 +1031,6 @@ export async function removeFreshTtsAllocations(assetIds: readonly string[]): Pr
   }
 }
 
-function speechAllocationIds(scene: Scene): string[] {
-  return (scene.actions ?? []).flatMap((action) =>
-    action.type === 'speech' && action.audioId ? [action.audioId] : [],
-  );
-}
-
 /** Generate TTS for all speech actions in a scene. Returns result. */
 export async function generateTTSForScene(
   scene: Scene,
@@ -923,12 +1039,21 @@ export async function generateTTSForScene(
   retryOptions?: ClientRetryOptions<TTSApiResponse>,
   onQueueStatus?: (progress: TeachingVoiceQueueProgress | null) => void,
   outlineId?: string,
+  options: {
+    skipReadyActions?: boolean;
+    onActionReady?: (
+      action: SpeechAction,
+      audioId: string,
+      trace: { jobId?: string; elapsedMs: number },
+    ) => boolean | Promise<boolean>;
+  } = {},
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
   scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
   const speechActions = scene.actions.filter(
-    (a): a is SpeechAction => a.type === 'speech' && !!a.text,
+    (a): a is SpeechAction =>
+      a.type === 'speech' && !!a.text && (!options.skipReadyActions || !a.audioId),
   );
   if (speechActions.length === 0) return { success: true, failedCount: 0 };
 
@@ -944,6 +1069,8 @@ export async function generateTTSForScene(
   // one bad clip never aborts the rest of the scene.
   const generateOne = async (action: SpeechAction) => {
     const requestId = `tts_s${sceneOrder}_${action.id}`;
+    const startedAt = Date.now();
+    let jobId: string | undefined;
     try {
       const assetId = await generateAndStoreTTS(
         requestId,
@@ -958,10 +1085,30 @@ export async function generateTTSForScene(
         scene.id,
         onQueueStatus,
         outlineId,
+        {
+          stageId: scene.stageId,
+          outlineId,
+          sceneId: scene.id,
+          actionId: action.id,
+          startedAt,
+          onJobIdentified: (identifiedJobId) => {
+            jobId = identifiedJobId;
+          },
+        },
       );
       if (assetId) {
         action.audioId = assetId;
-        freshAllocations.push(assetId);
+        const retained =
+          (await options.onActionReady?.(action, assetId, {
+            jobId,
+            elapsedMs: Date.now() - startedAt,
+          })) ?? true;
+        if (retained) {
+          freshAllocations.push(assetId);
+        } else {
+          delete action.audioId;
+          await removeFreshTtsAllocations([assetId]);
+        }
       }
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -1002,12 +1149,14 @@ export async function generateTTSForScene(
       }
     }
   } catch (error) {
-    await removeFreshTtsAllocations(freshAllocations);
-    for (const action of speechActions) delete action.audioId;
+    if (!options.onActionReady) {
+      await removeFreshTtsAllocations(freshAllocations);
+      for (const action of speechActions) delete action.audioId;
+    }
     throw error;
   }
 
-  if (failedCount > 0) {
+  if (failedCount > 0 && !options.onActionReady) {
     await removeFreshTtsAllocations(freshAllocations);
     for (const action of speechActions) delete action.audioId;
   }
@@ -1053,6 +1202,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const retryTasksRef = useRef(new Map<string, AbortController>());
   const lastParamsRef = useRef<GenerationParams | null>(null);
   const generateRemainingRef = useRef<((params: GenerationParams) => Promise<void>) | null>(null);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   const store = useStageStore;
 
@@ -1114,6 +1265,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       const controller = new AbortController();
       const narrationScene = sceneForNarrationSynthesis(scene);
+      const attachedAudioIds = new Set<string>();
       const narrationStartedAt = Date.now();
       log.info('[SceneNarration]', {
         event: 'scheduled',
@@ -1126,8 +1278,24 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       });
 
       const promise = (async () => {
+        let persistence = Promise.resolve();
+        const queuePersistence = () => {
+          persistence = persistence
+            .then(async () => {
+              await flushStageSave();
+            })
+            .catch((error) => {
+              log.warn('[SceneNarration]', {
+                event: 'narration-action-persistence-failed',
+                stageId,
+                outlineId: outline.id,
+                sceneId: scene.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        };
         try {
-          options.onPhaseChange?.('narration', outline);
+          optionsRef.current.onPhaseChange?.('narration', outline);
           const ttsResult = await generateTTSForScene(
             narrationScene,
             language,
@@ -1141,13 +1309,60 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               ) {
                 store.getState().updateScene(scene.id, narrationProgressPatch(progress.status));
               }
-              options.onNarrationQueueChange?.(progress, outline);
+              optionsRef.current.onNarrationQueueChange?.(progress, outline);
             },
             outline.id,
+            {
+              skipReadyActions: true,
+              onActionReady: (generatedAction, audioId, trace) => {
+                if (
+                  controller.signal.aborted ||
+                  store.getState().stage?.id !== stageId ||
+                  store.getState().generationEpoch !== generationEpoch
+                ) {
+                  return false;
+                }
+                const currentScene = store.getState().getSceneById(scene.id);
+                const currentAction = currentScene?.actions.find(
+                  (action: Action) => action.id === generatedAction.id && action.type === 'speech',
+                ) as RuntimeSpeechAction | undefined;
+                if (
+                  !currentScene ||
+                  !currentAction ||
+                  currentAction.text !== generatedAction.text
+                ) {
+                  return false;
+                }
+                if (currentAction.audioId || currentAction.audioInvalidated) {
+                  return false;
+                }
+                const actions = currentScene.actions.map((action: Action) =>
+                  action.id === generatedAction.id && action.type === 'speech'
+                    ? { ...action, audioId }
+                    : action,
+                );
+                store.getState().updateScene(scene.id, {
+                  actions,
+                  narrationStatus: 'running',
+                  narrationError: undefined,
+                });
+                attachedAudioIds.add(audioId);
+                queuePersistence();
+                log.info('[SceneNarration]', {
+                  event: 'narration-action-attached',
+                  stageId,
+                  outlineId: outline.id,
+                  sceneId: scene.id,
+                  actionId: generatedAction.id,
+                  jobId: trace.jobId,
+                  elapsedMs: trace.elapsedMs,
+                });
+                return true;
+              },
+            },
           );
 
           if (controller.signal.aborted || store.getState().generationEpoch !== generationEpoch) {
-            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
             log.info('[SceneNarration]', {
               event: 'cancelled-stale',
               stageId,
@@ -1160,6 +1375,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
           if (!ttsResult.success) {
             store.getState().updateScene(scene.id, narrationFailurePatch());
+            await persistence;
+            await store.getState().saveToStorage();
             log.warn('[SceneNarration]', {
               event: 'failed',
               stageId,
@@ -1173,19 +1390,21 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
           const currentScene = store.getState().getSceneById(scene.id);
           if (!currentScene) {
-            await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+            await removeFreshTtsAllocations([...attachedAudioIds]);
             return;
           }
           const patch = mergeCompletedNarration(currentScene, narrationScene);
           const retainedAudioIds = new Set(
-            (patch.actions ?? []).flatMap((action) =>
+            (patch.actions ?? []).flatMap((action: Action) =>
               action.type === 'speech' && action.audioId ? [action.audioId] : [],
             ),
           );
           await removeFreshTtsAllocations(
-            speechAllocationIds(narrationScene).filter((audioId) => !retainedAudioIds.has(audioId)),
+            [...attachedAudioIds].filter((audioId) => !retainedAudioIds.has(audioId)),
           );
           store.getState().updateScene(scene.id, patch);
+          await persistence;
+          await store.getState().saveToStorage();
           log.info('[SceneNarration]', {
             event: patch.narrationStatus === 'completed' ? 'completed' : 'completed-stale',
             stageId,
@@ -1195,7 +1414,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             durationMs: Date.now() - narrationStartedAt,
           });
         } catch (error) {
-          await removeFreshTtsAllocations(speechAllocationIds(narrationScene));
+          await persistence;
           if (isAbortError(error) || controller.signal.aborted) {
             log.info('[SceneNarration]', {
               event: 'aborted',
@@ -1211,6 +1430,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             store.getState().getSceneById(scene.id)
           ) {
             store.getState().updateScene(scene.id, narrationFailurePatch());
+            await store.getState().saveToStorage();
           }
           log.warn('[SceneNarration]', {
             event: 'failed',
@@ -1229,8 +1449,64 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
       narrationTasksRef.current.set(taskKey, { controller, promise });
     },
-    [options, store],
+    [store],
   );
+
+  // A visual scene is committed before Teaching Voice finishes. Refreshes and
+  // route remounts therefore hydrate a real scene whose narration may still be
+  // pending. Re-submit its deterministic action identity to rejoin the existing
+  // owner-scoped server job; completed jobs return their retained result.
+  useEffect(() => {
+    let previousSignature = '';
+    const reconcilePendingNarration = () => {
+      const state = store.getState();
+      const stage = state.stage;
+      if (!stage) return;
+      const resumableStatuses = new Set(['pending', 'queued', 'running']);
+      const candidates = state.scenes.flatMap((scene) => {
+        if (!scene.narrationStatus || !resumableStatuses.has(scene.narrationStatus)) return [];
+        const missingActions = scene.actions.filter(
+          (action: Action): action is SpeechAction =>
+            action.type === 'speech' && !!action.text && !action.audioId,
+        );
+        if (missingActions.length === 0) return [];
+        const outline = state.outlines.find(
+          (candidate) => candidate.id === scene.outlineId || candidate.order === scene.order,
+        );
+        return outline ? [{ scene, outline, missingActions }] : [];
+      });
+      const signature = JSON.stringify({
+        stageId: stage.id,
+        generationEpoch: state.generationEpoch,
+        pending: candidates.map(({ scene, missingActions }) => [
+          scene.id,
+          missingActions.map((action: SpeechAction) => [action.id, action.text]),
+        ]),
+      });
+      if (signature === previousSignature) return;
+      previousSignature = signature;
+      const settings = useSettingsStore.getState();
+      const provider = stage.teacherVoiceProfileId ? 'teaching-voice' : settings.ttsProviderId;
+
+      for (const { scene, outline } of candidates) {
+        const taskKey = `${state.generationEpoch}:${scene.id}`;
+        if (narrationTasksRef.current.has(taskKey)) continue;
+        scheduleNarration({
+          scene,
+          outline,
+          stageId: stage.id,
+          generationRunId: `${stage.id}:${state.generationEpoch}:narration-resume`,
+          generationEpoch: state.generationEpoch,
+          language: stage.languageDirective,
+          provider,
+        });
+      }
+    };
+
+    reconcilePendingNarration();
+    const unsubscribe = store.subscribe(reconcilePendingNarration);
+    return unsubscribe;
+  }, [scheduleNarration, store]);
 
   const generateRemaining = useCallback(
     async (params: GenerationParams) => {
@@ -1242,6 +1518,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         const current = store.getState().generatingOutlines;
         if (!current.some((o) => o.id === outlineId)) return;
         store.getState().setGeneratingOutlines(current.filter((o) => o.id !== outlineId));
+      };
+      const addGeneratingOutline = (outline: SceneOutline) => {
+        const current = store.getState().generatingOutlines;
+        if (current.some((candidate) => candidate.id === outline.id)) return;
+        store.getState().setGeneratingOutlines([...current, outline]);
       };
 
       // Create a new AbortController for this generation run
@@ -1282,7 +1563,6 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         return;
       }
 
-      store.getState().setGeneratingOutlines(pending);
       traceSceneGeneration('lesson-generation-start', {
         stageId: stage.id,
         generationRunId,
@@ -1348,8 +1628,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       // and bounded provider load. With parallelism off this retains the original
       // one-at-a-time dispatch order.
       try {
-        const fetchContent = (outline: SceneOutline) =>
-          fetchSceneContent(
+        const fetchContent = (outline: SceneOutline) => {
+          addGeneratingOutline(outline);
+          traceSceneGeneration('scene-attempt-dispatch', {
+            stageId: stage.id,
+            generationRunId,
+            outlineId: outline.id,
+            generationEpoch: startEpoch,
+          });
+          return fetchSceneContent(
             {
               outline,
               allOutlines: outlines,
@@ -1362,6 +1649,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             },
             signal,
           );
+        };
 
         // Pre-warm content fetches (<= parallelConcurrency in flight), keyed by
         // outline id. Each promise resolves to a result and never rejects, so an
@@ -1398,6 +1686,16 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
             break;
+          }
+          if (store.getState().scenes.some((scene) => scene.order === outline.order)) {
+            removeGeneratingOutline(outline.id);
+            traceSceneGeneration('scene-attempt-skipped-committed', {
+              stageId: stage.id,
+              generationRunId,
+              outlineId: outline.id,
+              generationEpoch: startEpoch,
+            });
+            continue;
           }
 
           store.getState().setCurrentGeneratingOrder(outline.order);
@@ -1448,6 +1746,18 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             });
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
               pausedByFailureOrAbort = true;
+              break;
+            }
+            if (contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) {
+              removeGeneratingOutline(outline.id);
+              pausedByFailureOrAbort = true;
+              traceSceneGeneration('scene-attempt-stale-rejected', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                generationEpoch: startEpoch,
+                errorCode: contentResult.errorCode,
+              });
               break;
             }
             store.getState().addFailedOutline(outline);
@@ -1501,6 +1811,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               previousSpeeches,
               userProfile: params.userProfile,
               languageDirective: params.languageDirective,
+              attemptId: contentResult.attemptId,
+              generationVersion: contentResult.generationVersion,
             },
             signal,
           );
@@ -1515,7 +1827,22 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               durationMs: Date.now() - actionsStartedAt,
               status: 'completed',
             });
-            const assembledScene = actionsResult.scene;
+            if (
+              actionsResult.attemptId !== contentResult.attemptId ||
+              actionsResult.generationVersion !== contentResult.generationVersion
+            ) {
+              removeGeneratingOutline(outline.id);
+              pausedByFailureOrAbort = true;
+              traceSceneGeneration('scene-attempt-stale-rejected', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                generationEpoch: startEpoch,
+                errorCode: 'GENERATION_ATTEMPT_INVALID',
+              });
+              break;
+            }
+            const assembledScene = { ...actionsResult.scene, outlineId: outline.id };
             const settings = useSettingsStore.getState();
             const teacherVoiceProfileId = store.getState().stage?.teacherVoiceProfileId;
             const narrationEnabled = Boolean(
@@ -1538,8 +1865,34 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               pausedByFailureOrAbort = true;
               break;
             }
+            const commitResult = await commitSceneAttempt({
+              attemptId: contentResult.attemptId!,
+              generationVersion: contentResult.generationVersion!,
+              stageId: stage.id,
+              outlineId: outline.id,
+              sceneId: scene.id,
+            });
+            if (!commitResult.success || !commitResult.accepted) {
+              removeGeneratingOutline(outline.id);
+              pausedByFailureOrAbort = true;
+              traceSceneGeneration('scene-attempt-stale-rejected', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                attemptId: contentResult.attemptId,
+                generationEpoch: startEpoch,
+                errorCode: commitResult.errorCode,
+              });
+              break;
+            }
             removeGeneratingOutline(outline.id);
-            useStageStore.getState().addScene(scene);
+            const existingScene = store
+              .getState()
+              .scenes.find(
+                (candidate) =>
+                  candidate.outlineId === outline.id || candidate.order === outline.order,
+              );
+            if (!existingScene) useStageStore.getState().addScene(scene);
             traceSceneGeneration('scene-complete', {
               stageId: stage.id,
               generationRunId,
@@ -1550,9 +1903,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               durationMs: Date.now() - sceneStartedAt,
               status: 'completed',
             });
-            options.onSceneGenerated?.(scene, outline.order);
+            if (!existingScene) options.onSceneGenerated?.(scene, outline.order);
 
-            if (narrationEnabled) {
+            if (narrationEnabled && !existingScene) {
               scheduleNarration({
                 scene,
                 outline,
@@ -1592,6 +1945,19 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             });
             if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
               pausedByFailureOrAbort = true;
+              break;
+            }
+            if (actionsResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) {
+              removeGeneratingOutline(outline.id);
+              pausedByFailureOrAbort = true;
+              traceSceneGeneration('scene-attempt-stale-rejected', {
+                stageId: stage.id,
+                generationRunId,
+                outlineId: outline.id,
+                attemptId: contentResult.attemptId,
+                generationEpoch: startEpoch,
+                errorCode: actionsResult.errorCode,
+              });
               break;
             }
             store.getState().addFailedOutline(outline);
@@ -1730,6 +2096,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         );
 
         if (!contentResult.success || !contentResult.content) {
+          if (contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) return;
           store.getState().addFailedOutline(outline);
           options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
           return;
@@ -1757,11 +2124,22 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             previousSpeeches,
             userProfile: params.userProfile,
             languageDirective: params.languageDirective,
+            attemptId: contentResult.attemptId,
+            generationVersion: contentResult.generationVersion,
           },
           signal,
         );
 
-        if (!actionsResult.success || !actionsResult.scene) {
+        const actionsIdentityMismatch =
+          actionsResult.attemptId !== contentResult.attemptId ||
+          actionsResult.generationVersion !== contentResult.generationVersion;
+        if (!actionsResult.success || !actionsResult.scene || actionsIdentityMismatch) {
+          if (
+            actionsIdentityMismatch ||
+            actionsResult.errorCode?.startsWith('GENERATION_ATTEMPT_')
+          ) {
+            return;
+          }
           store.getState().addFailedOutline(outline);
           options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
           return;
@@ -1778,17 +2156,35 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               settings.ttsProvidersConfig?.[settings.ttsProviderId],
             )),
         );
+        const authoritativeScene = { ...actionsResult.scene, outlineId: outline.id };
         const scene = narrationEnabled
-          ? sceneWithPendingNarration(actionsResult.scene)
-          : actionsResult.scene;
+          ? sceneWithPendingNarration(authoritativeScene)
+          : authoritativeScene;
 
         if (store.getState().generationEpoch !== retryEpoch) return;
+        const commitResult = await commitSceneAttempt({
+          attemptId: contentResult.attemptId!,
+          generationVersion: contentResult.generationVersion!,
+          stageId: state.stage.id,
+          outlineId: outline.id,
+          sceneId: scene.id,
+        });
+        if (!commitResult.success || !commitResult.accepted) return;
         removeGeneratingOutline();
-        useStageStore.getState().addScene(scene);
-        committedSceneId = scene.id;
-        options.onSceneGenerated?.(scene, outline.order);
+        const existingScene = store
+          .getState()
+          .scenes.find(
+            (candidate) => candidate.outlineId === outline.id || candidate.order === outline.order,
+          );
+        if (!existingScene) {
+          useStageStore.getState().addScene(scene);
+          committedSceneId = scene.id;
+          options.onSceneGenerated?.(scene, outline.order);
+        } else {
+          committedSceneId = existingScene.id;
+        }
 
-        if (narrationEnabled) {
+        if (narrationEnabled && !existingScene) {
           scheduleNarration({
             scene,
             outline,
@@ -1804,8 +2200,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           return;
         }
 
-        // Resume remaining generation if there are pending outlines
-        if (store.getState().generatingOutlines.length > 0 && lastParamsRef.current) {
+        // Resume from derived queued work. `generatingOutlines` contains only
+        // requests actually dispatched, so it must never stand in for pending.
+        const latest = store.getState();
+        const completedOrders = new Set(latest.scenes.map((candidate) => candidate.order));
+        const failedIds = new Set(latest.failedOutlines.map((candidate) => candidate.id));
+        const hasPending = latest.outlines.some(
+          (candidate) => !completedOrders.has(candidate.order) && !failedIds.has(candidate.id),
+        );
+        if (hasPending && lastParamsRef.current) {
           generateRemainingRef.current?.(lastParamsRef.current);
         } else if (store.getState().failedOutlines.length > 0) {
           store.getState().setGenerationStatus('paused');

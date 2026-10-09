@@ -19,7 +19,13 @@ import { SceneSidebar } from '@/components/stage/scene-sidebar';
 import { Header } from '@/components/header';
 import { CanvasArea } from '@/components/canvas/canvas-area';
 import { Roundtable } from '@/components/roundtable';
-import { PlaybackEngine, computePlaybackView, shouldAutoResumeLecture } from '@/lib/playback';
+import {
+  PlaybackEngine,
+  computePlaybackView,
+  pendingNarrationIntentState,
+  shouldAutoResumeLecture,
+  type PendingNarrationIntent,
+} from '@/lib/playback';
 import type { EngineMode, TriggerEvent, Effect } from '@/lib/playback';
 import {
   canJumpWithinReconstructablePrefix,
@@ -319,6 +325,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const lectureActionCounterRef = useRef(0);
     const currentPlaybackActionIndexRef = useRef<number | null>(currentPlaybackActionIndex);
     const activeSceneIdRef = useRef<string | null>(currentSceneId);
+    const pendingNarrationPlayRef = useRef<PendingNarrationIntent | null>(null);
     const discussionAbortRef = useRef<AbortController | null>(null);
     const presentationIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cursorSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -590,6 +597,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       ref,
       () => ({
         teardown: async () => {
+          pendingNarrationPlayRef.current = null;
           await chatAreaRef.current?.endActiveSession();
           if (discussionAbortRef.current) {
             discussionAbortRef.current.abort();
@@ -707,6 +715,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       const initializeScene = async () => {
         const previousSceneId = activeSceneIdRef.current;
         if (previousSceneId && previousSceneId !== currentScene?.id) {
+          pendingNarrationPlayRef.current = null;
           saveSceneResumePosition(previousSceneId, currentPlaybackActionIndexRef.current);
         }
 
@@ -840,7 +849,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           onSpeechStart: (text) => {
             setLectureSpeech(text);
             const actionIndex = currentPlaybackActionIndexRef.current;
-            const action = actionIndex === null ? undefined : currentScene.actions?.[actionIndex];
+            const playbackScene = useStageStore.getState().getSceneById(currentScene.id);
+            const action = actionIndex === null ? undefined : playbackScene?.actions?.[actionIndex];
             activeNarrationRef.current =
               typeof actionIndex === 'number' &&
               action?.type === 'speech' &&
@@ -878,6 +888,12 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             // onSpeechStart replaces it or the scene transitions.
             // Clearing here causes fallback to idleText (first sentence).
             setActiveBubbleId(null);
+            activeNarrationRef.current = null;
+            setNarrationHighlight(null);
+          },
+          onNarrationPending: (sceneId, actionIndex) => {
+            pendingNarrationPlayRef.current = { sceneId, actionIndex };
+            setLectureSpeech(t('stage.narrationPreparing'));
             activeNarrationRef.current = null;
             setNarrationHighlight(null);
           },
@@ -949,6 +965,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
           getPlaybackSpeed: () => useSettingsStore.getState().playbackSpeed || 1,
           onComplete: () => {
+            pendingNarrationPlayRef.current = null;
             // lectureSpeech intentionally NOT cleared — last sentence stays visible
             // until scene transition (auto-play) or user restarts. Scene change
             // effect handles the reset.
@@ -1002,8 +1019,25 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
         });
 
+        const latestCurrentScene = useStageStore.getState().getSceneById(currentScene.id);
+        if (latestCurrentScene) engine.replaceScene(latestCurrentScene);
         engineRef.current = engine;
         activeSceneIdRef.current = currentScene.id;
+
+        const pendingNarration = pendingNarrationPlayRef.current;
+        const pendingNarrationState = pendingNarrationIntentState(
+          latestCurrentScene ?? currentScene,
+          pendingNarration,
+        );
+        if (pendingNarrationState !== 'unrelated' && pendingNarration) {
+          if (pendingNarrationState === 'ready') {
+            pendingNarrationPlayRef.current = null;
+          }
+          if (!engine.continuePendingNarration(pendingNarration.actionIndex)) {
+            pendingNarrationPlayRef.current = null;
+          }
+          return;
+        }
 
         // Auto-start if triggered by auto-play scene advance
         if (autoStartRef.current) {
@@ -1037,8 +1071,26 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       return () => {
         cancelled = true;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- Only re-run when scene changes, functions are stable refs
-    }, [currentScene, currentSceneEnabled]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- Scene data updates are synchronized into the installed engine below without interrupting playback.
+    }, [currentScene?.id, currentSceneEnabled]);
+
+    useEffect(() => {
+      const engine = engineRef.current;
+      if (!engine || !currentScene || activeSceneIdRef.current !== currentScene.id) return;
+      if (!engine.replaceScene(currentScene)) return;
+
+      const pendingNarration = pendingNarrationPlayRef.current;
+      if (
+        !pendingNarration ||
+        pendingNarrationIntentState(currentScene, pendingNarration) !== 'ready'
+      ) {
+        return;
+      }
+      pendingNarrationPlayRef.current = null;
+      if (!engine.continuePendingNarration(pendingNarration.actionIndex)) {
+        pendingNarrationPlayRef.current = pendingNarration;
+      }
+    }, [currentScene]);
 
     useEffect(() => {
       return audioPlayerRef.current.subscribePlayback((progress) => {
@@ -1088,6 +1140,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       const audioPlayer = audioPlayerRef.current;
       const chatArea = chatAreaRef.current;
       return () => {
+        pendingNarrationPlayRef.current = null;
         if (cursorSaveTimerRef.current) clearTimeout(cursorSaveTimerRef.current);
         cursorSaveTimerRef.current = null;
         const pendingCursor = pendingCursorRef.current;
@@ -1255,6 +1308,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
       const mode = engine.getMode();
       if (mode === 'playing' || mode === 'live') {
+        pendingNarrationPlayRef.current = null;
         saveSceneResumePosition(currentScene?.id, currentPlaybackActionIndexRef.current);
         engine.pause();
         // Pause lecture buffer so text stops immediately
@@ -1289,8 +1343,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     // get scene information
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
     const pendingScene = useMemo(
-      () => selectNextRecoverableOutline(generatingOutlines, failedOutlines),
-      [failedOutlines, generatingOutlines],
+      () =>
+        generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
+      [failedOutlines, generationComplete, outlines, scenes],
     );
     const hasNextPending = pendingScene !== null;
     // True when every outline has materialized into a scene and nothing is
@@ -1936,6 +1991,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                   }
                   // Also pause playback engine
                   if (engineRef.current && (engineMode === 'playing' || engineMode === 'live')) {
+                    pendingNarrationPlayRef.current = null;
                     engineRef.current.pause();
                   }
                 }}

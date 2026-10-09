@@ -53,6 +53,7 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PlaybackEngine');
 export const AUTO_NARRATION_GAP_MS = 1000;
+type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
 
 /**
  * If more than 30% of characters are CJK, treat the text as Chinese.
@@ -149,6 +150,13 @@ export class PlaybackEngine {
     this.consumedDiscussions = new Set(snapshot.consumedDiscussions);
   }
 
+  /** Refresh the active scene data without interrupting current playback. */
+  replaceScene(scene: Scene): boolean {
+    if (this.scenes.length !== 1 || this.scenes[0]?.id !== scene.id) return false;
+    this.scenes[0] = scene;
+    return true;
+  }
+
   /** idle → playing (from beginning) */
   start(): void {
     if (this.mode !== 'idle') {
@@ -218,6 +226,19 @@ export class PlaybackEngine {
       this.setMode('paused');
     }
 
+    return true;
+  }
+
+  /** Resume an explicit Play request that stopped at an unready narration action. */
+  continuePendingNarration(actionIndex: number): boolean {
+    const action = this.scenes[0]?.actions?.[actionIndex];
+    if ((this.mode !== 'idle' && this.mode !== 'playing') || action?.type !== 'speech')
+      return false;
+    this.sceneIndex = 0;
+    this.actionIndex = actionIndex;
+    this.invalidatePlaybackGeneration();
+    if (this.mode === 'idle') this.setMode('playing');
+    this.processNext();
     return true;
   }
 
@@ -597,6 +618,21 @@ export class PlaybackEngine {
 
     const { action } = current;
 
+    const currentScene = this.scenes[this.sceneIndex];
+    if (
+      action.type === 'speech' &&
+      (!(action as RuntimeSpeechAction).audioId ||
+        (action as RuntimeSpeechAction).audioInvalidated) &&
+      ['pending', 'queued', 'running'].includes(currentScene?.narrationStatus ?? '')
+    ) {
+      // Do not consume a generated narration line with a reading-time timer
+      // while its selected Teaching Voice is still being produced. Keep the
+      // cursor at this action and retain the user's active Play intent. The UI
+      // may pause that intent before the clip becomes ready.
+      this.callbacks.onNarrationPending?.(current.sceneId, this.actionIndex);
+      return;
+    }
+
     // Notify progress BEFORE advancing the cursor so the snapshot points at
     // the current action.  On restore the same action will be replayed — this
     // is the desired behaviour for speech (user may have only heard half).
@@ -639,6 +675,7 @@ export class PlaybackEngine {
         // empty SpeechSynthesisUtterance doesn't reliably fire onend in Chromium,
         // which would hang playback on that slide.
         const hasText = !!speechAction.text.trim();
+        const playbackRequestedAt = Date.now();
 
         this.audioPlayer
           // The legacy URL of an unconverted pair rides along as the
@@ -646,6 +683,16 @@ export class PlaybackEngine {
           .play(speechAction.audioId || '', (speechAction as LegacySpeechAction).audioUrl)
           .then((audioStarted) => {
             if (!this.isCurrentGeneration(generation)) return;
+            if (audioStarted) {
+              log.info('[SceneNarration]', {
+                event: 'narration-playback-started',
+                stageId: currentScene.stageId,
+                outlineId: currentScene.outlineId,
+                sceneId: current.sceneId,
+                actionId: speechAction.id,
+                elapsedMs: Date.now() - playbackRequestedAt,
+              });
+            }
             if (!audioStarted) {
               // No pre-generated audio — try browser-native TTS only when it is
               // the selected provider AND actually enabled (opt-in, #665).

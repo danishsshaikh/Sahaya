@@ -86,4 +86,21 @@ describe('scene narration lifecycle', () => {
     expect(patch.actions?.[0]).toMatchObject({ text: 'Faculty-edited narration' });
     expect(patch.actions?.[0]).not.toHaveProperty('audioId');
   });
+
+  it('does not overwrite a newer completed audio allocation', () => {
+    const generated = sceneForNarrationSynthesis(sceneWithPendingNarration(makeScene()));
+    const generatedSpeech = generated.actions[0];
+    if (generatedSpeech.type !== 'speech') throw new Error('Expected speech action');
+    generatedSpeech.audioId = 'ast_old_completion';
+    const current = {
+      ...makeScene(),
+      narrationStatus: 'completed' as const,
+      actions: [{ ...makeScene().actions[0], audioId: 'ast_pronunciation_repair' }],
+    } as Scene;
+
+    const patch = mergeCompletedNarration(current, generated);
+
+    expect(patch.actions?.[0]).toMatchObject({ audioId: 'ast_pronunciation_repair' });
+    expect(patch.narrationStatus).toBe('completed');
+  });
 });

@@ -98,4 +98,15 @@ describe('progressive scene generation store behavior', () => {
     expect(useStageStore.getState().getSceneById(first.id)?.title).toBe('Faculty edited title');
     expect(useStageStore.getState().getSceneById(second.id)?.title).toBe(second.title);
   });
+
+  it('commits one logical scene when overlapping attempts return the same outline order', () => {
+    const authoritative = { ...scene('scene-authoritative', 1), outlineId: 'outline-1' };
+    const staleDuplicate = { ...scene('scene-stale', 1), outlineId: 'outline-1' };
+
+    useStageStore.getState().addScene(authoritative);
+    useStageStore.getState().addScene(staleDuplicate);
+
+    expect(useStageStore.getState().scenes).toEqual([authoritative]);
+    expect(useStageStore.getState().currentSceneId).toBe(authoritative.id);
+  });
 });

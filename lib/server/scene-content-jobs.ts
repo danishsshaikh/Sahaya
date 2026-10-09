@@ -24,6 +24,8 @@ export interface SceneContentJob {
   stageId: string;
   outlineId?: string;
   outlineTitle: string;
+  attemptId?: string;
+  generationVersion?: string;
   widgetType?: string;
   modelString?: string;
   result?: SceneContentJobResult;
@@ -36,6 +38,8 @@ export interface SceneContentJobStartInput {
   stageId: string;
   outlineId?: string;
   outlineTitle: string;
+  attemptId?: string;
+  generationVersion?: string;
   widgetType?: string;
   modelString?: string;
 }
@@ -130,6 +134,8 @@ export function createOrReuseSceneContentJob(input: SceneContentJobStartInput): 
     stageId: input.stageId,
     outlineId: input.outlineId,
     outlineTitle: input.outlineTitle,
+    attemptId: input.attemptId,
+    generationVersion: input.generationVersion,
     widgetType: input.widgetType,
     modelString: input.modelString,
   };
