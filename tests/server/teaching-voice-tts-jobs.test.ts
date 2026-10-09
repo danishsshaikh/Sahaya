@@ -23,7 +23,7 @@ vi.mock('@/lib/voice-cloning/synthesis', () => ({
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 vi.mock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-  enqueueQwenTeachingVoiceJob: mocks.enqueue,
+  enqueueChatterboxTeachingVoiceJob: mocks.enqueue,
   readTeachingVoiceJob: mocks.read,
   readTeachingVoiceJobResult: mocks.result,
   cancelTeachingVoiceJob: mocks.cancel,
@@ -55,7 +55,7 @@ function postRequest() {
 function snapshot(status: 'queued' | 'running' | 'completed' = 'queued') {
   return {
     id: jobId,
-    resourceKey: 'teaching-voice:qwen3',
+    resourceKey: 'teaching-voice:chatterbox',
     status,
     enqueuedAt: 1,
     queuePosition: status === 'queued' ? 2 : null,
@@ -63,7 +63,7 @@ function snapshot(status: 'queued' | 'running' | 'completed' = 'queued') {
     queueDepth: 2,
     estimatedWaitMs: status === 'queued' ? 90_000 : null,
     attemptCount: status === 'running' ? 1 : 0,
-    metadata: { provider: 'qwen3' },
+    metadata: { provider: 'chatterbox' },
   };
 }
 
@@ -71,18 +71,18 @@ describe('Teaching Voice async TTS routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireSessionUser.mockResolvedValue(user);
-    mocks.resolveProvider.mockResolvedValue('qwen3');
+    mocks.resolveProvider.mockResolvedValue('chatterbox');
     mocks.enqueue.mockReturnValue({ job: snapshot(), reused: false });
     mocks.generateTTS.mockResolvedValue({ audio: new Uint8Array([4, 5]), format: 'mp3' });
   });
 
-  it('returns Qwen queue admission immediately as HTTP 202', async () => {
+  it('returns Chatterbox queue admission immediately as HTTP 202', async () => {
     const response = await POST(postRequest());
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
       async: true,
-      teachingVoiceProvider: 'qwen3',
+      teachingVoiceProvider: 'chatterbox',
       jobId,
       status: 'queued',
       queuePosition: 2,
@@ -106,7 +106,7 @@ describe('Teaching Voice async TTS routes', () => {
     });
   });
 
-  it('preserves synchronous behavior for non-Qwen Teaching Voice', async () => {
+  it('preserves synchronous behavior for Indic Teaching Voice', async () => {
     mocks.resolveProvider.mockResolvedValue('indicf5');
     mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
     const response = await POST(postRequest());
@@ -120,7 +120,7 @@ describe('Teaching Voice async TTS routes', () => {
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
   });
 
-  it('does not send Standard Voice through the Qwen resource queue', async () => {
+  it('does not send Standard Voice through the Chatterbox resource queue', async () => {
     const response = await POST(
       new NextRequest('http://localhost/api/generate/tts', {
         method: 'POST',

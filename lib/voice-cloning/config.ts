@@ -1,5 +1,10 @@
 import path from 'path';
 import { isVoiceCloningEnabled } from '@/lib/config/feature-flags';
+import {
+  DEFAULT_CHATTERBOX_MODEL_VARIANT,
+  isChatterboxModelVariant,
+  type ChatterboxModelVariant,
+} from '@/lib/voice-cloning/types';
 
 export function isVoiceCloningServerEnabled(): boolean {
   return isVoiceCloningEnabled();
@@ -27,21 +32,15 @@ export function getVoiceCloningTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
 }
 
-export function getChatterboxDefaultModelVariant(): string {
-  return (process.env.CHATTERBOX_T3_MODEL || 'v3').trim().toLowerCase() || 'v3';
+export function getChatterboxDefaultModelVariant(): ChatterboxModelVariant {
+  const configured = (process.env.CHATTERBOX_T3_MODEL || '').trim().toLowerCase();
+  return isChatterboxModelVariant(configured) ? configured : DEFAULT_CHATTERBOX_MODEL_VARIANT;
 }
 
-export function getTeachingVoiceServiceConfig(provider: 'qwen3' | 'indicf5') {
-  const qwen = provider === 'qwen3';
-  const baseUrl = qwen
-    ? process.env.QWEN3_VOICE_CLONING_BASE_URL || 'http://127.0.0.1:8771'
-    : process.env.INDICF5_VOICE_CLONING_BASE_URL || 'http://127.0.0.1:8772';
-  const defaultTimeout = qwen ? 600000 : 900000;
-  const parsed = Number(
-    qwen
-      ? process.env.QWEN3_VOICE_CLONING_TIMEOUT_MS || defaultTimeout
-      : process.env.INDICF5_VOICE_CLONING_TIMEOUT_MS || defaultTimeout,
-  );
+export function getTeachingVoiceServiceConfig(_provider: 'indicf5') {
+  const baseUrl = process.env.INDICF5_VOICE_CLONING_BASE_URL || 'http://127.0.0.1:8772';
+  const defaultTimeout = 900000;
+  const parsed = Number(process.env.INDICF5_VOICE_CLONING_TIMEOUT_MS || defaultTimeout);
   return {
     baseUrl: baseUrl.trim().replace(/\/$/, ''),
     timeoutMs: Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : defaultTimeout,

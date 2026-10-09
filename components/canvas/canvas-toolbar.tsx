@@ -6,7 +6,7 @@ import {
   ChevronRight,
   Play,
   Pause,
-  PencilLine,
+  Presentation,
   LayoutList,
   MessageSquare,
   Volume1,
@@ -407,25 +407,39 @@ export function CanvasToolbar({
           )}
 
           {/* Whiteboard */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onWhiteboardClose();
-            }}
-            className={cn(
-              ctrlBtn,
-              'w-6 h-6',
-              whiteboardOpen
-                ? 'text-violet-600 dark:text-violet-400'
-                : 'text-gray-500 dark:text-gray-400',
-            )}
-            title={whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
-          >
-            <PencilLine className="w-3.5 h-3.5" />
-            {!whiteboardOpen && whiteboardElementCount > 0 && (
-              <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-violet-500 dark:bg-violet-400 rounded-full" />
-            )}
-          </button>
+          <TooltipProvider delayDuration={0}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onWhiteboardClose();
+                  }}
+                  className={cn(
+                    ctrlBtn,
+                    'h-6 w-6 gap-1 px-0 xl:w-auto xl:px-1.5',
+                    whiteboardOpen
+                      ? 'bg-violet-500/10 text-violet-600 dark:bg-violet-400/10 dark:text-violet-400'
+                      : 'text-gray-500 dark:text-gray-400',
+                  )}
+                  aria-label={whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+                  aria-pressed={whiteboardOpen}
+                >
+                  <Presentation className="w-3.5 h-3.5" />
+                  <span className="hidden text-[11px] font-medium xl:inline">
+                    {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+                  </span>
+                  {!whiteboardOpen && whiteboardElementCount > 0 && (
+                    <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-violet-500 dark:bg-violet-400 rounded-full" />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">
+                {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
 
           {showElementReference && (
             <button

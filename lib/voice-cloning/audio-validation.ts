@@ -63,6 +63,24 @@ const GENERATED_AUDIO_MASTERING_FILTER = [
   `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
 ].join(',');
 
+const CHATTERBOX_CLARITY_MASTERING_FILTER = [
+  [
+    'silenceremove=start_periods=1:start_duration=0.2',
+    `start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    'stop_periods=-1:stop_duration=0.2',
+    `stop_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    `stop_silence=${VOICE_AUDIO_PROCESSING_CONFIG.generatedTrailingSilenceSeconds}`,
+  ].join(':'),
+  'highpass=f=70',
+  'equalizer=f=250:t=q:w=1:g=-1.5',
+  'equalizer=f=3000:t=q:w=1:g=1.25',
+  'acompressor=threshold=0.125:ratio=2:attack=20:release=200:makeup=1.1',
+  `loudnorm=I=${VOICE_AUDIO_PROCESSING_CONFIG.outputLoudnessTarget}:TP=${VOICE_AUDIO_PROCESSING_CONFIG.outputPeakCeiling}:LRA=11`,
+  `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
+].join(',');
+
+export type GeneratedVoiceMasteringPreset = 'standard' | 'chatterbox-clarity';
+
 export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/webm',
   'audio/webm;codecs=opus',
@@ -540,6 +558,7 @@ export async function normalizeVoiceEnrollmentClips(clips: IncomingVoiceClip[]):
 export async function masterGeneratedVoiceAudio(
   audio: Uint8Array,
   format: string,
+  preset: GeneratedVoiceMasteringPreset = 'standard',
 ): Promise<{ audio: Uint8Array; format: 'wav' }> {
   if (audio.byteLength < MIN_RECORDING_SIZE_BYTES) {
     throw new Error('Generated voice audio is empty');
@@ -561,7 +580,9 @@ export async function masterGeneratedVoiceAudio(
       '-ar',
       String(VOICE_REFERENCE_SAMPLE_RATE),
       '-af',
-      GENERATED_AUDIO_MASTERING_FILTER,
+      preset === 'chatterbox-clarity'
+        ? CHATTERBOX_CLARITY_MASTERING_FILTER
+        : GENERATED_AUDIO_MASTERING_FILTER,
       outputPath,
     ]);
     await probeDuration(outputPath);

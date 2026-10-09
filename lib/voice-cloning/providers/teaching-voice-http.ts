@@ -10,14 +10,14 @@ import {
 type Registration = Parameters<VoiceCloningProvider['createProfile']>[0];
 type Synthesis = Parameters<VoiceCloningProvider['synthesize']>[0];
 
-// Qwen3 and IndicF5 expose the same isolated service contract.
+// IndicF5 uses the isolated transcript-conditioned service contract.
 export abstract class TeachingVoiceHttpProvider implements VoiceCloningProvider {
-  constructor(private readonly provider: 'qwen3' | 'indicf5') {}
+  constructor(private readonly provider: 'indicf5') {}
 
   protected abstract prepareText(text: string, language: string): string;
 
   private validateLanguage(language: string): void {
-    if (this.provider === 'qwen3' ? language !== 'en' : !['hi', 'mr'].includes(language)) {
+    if (!['hi', 'mr'].includes(language)) {
       throw new TeachingVoiceError(
         'Unsupported language for the selected Teaching Voice provider.',
       );

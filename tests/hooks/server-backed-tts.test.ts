@@ -149,7 +149,7 @@ describe('server-backed narration storage', () => {
     mocks.requireSessionUser.mockReset().mockImplementation(async (request: Request) => ({
       id: request.headers.get('x-test-user') || 'faculty-a',
     }));
-    mocks.resolveFacultyVoiceProviderId.mockReset().mockResolvedValue('qwen3');
+    mocks.resolveFacultyVoiceProviderId.mockReset().mockResolvedValue('chatterbox');
     mocks.synthesizeFacultyVoice.mockReset();
   });
 
@@ -265,7 +265,7 @@ describe('server-backed narration storage', () => {
         json: async () => ({
           success: true,
           async: true,
-          teachingVoiceProvider: 'qwen3',
+          teachingVoiceProvider: 'chatterbox',
           jobId: 'rq_test',
           status: 'queued',
           queuePosition: 2,
@@ -337,7 +337,7 @@ describe('server-backed narration storage', () => {
     }
   });
 
-  it('runs the production scene narration caller through queued Qwen jobs for two faculty', async () => {
+  it('runs the production scene narration caller through queued Chatterbox jobs for two faculty', async () => {
     vi.useFakeTimers();
     const [{ generateAndStoreTTS }, { POST }, { GET: getJob }, { GET: getAudio }] =
       await Promise.all([
@@ -458,7 +458,7 @@ describe('server-backed narration storage', () => {
       expect(duplicate.status).toBe(202);
       await expect(duplicate.json()).resolves.toMatchObject({
         async: true,
-        teachingVoiceProvider: 'qwen3',
+        teachingVoiceProvider: 'chatterbox',
         jobId: postAdmissions[1].jobId,
         status: 'queued',
       });
@@ -494,7 +494,7 @@ describe('server-backed narration storage', () => {
     }
   });
 
-  it('rejects a synchronous Qwen response instead of silently accepting legacy audio JSON', async () => {
+  it('rejects a synchronous Chatterbox response instead of accepting legacy audio JSON', async () => {
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
     const { useStageStore } = await import('@/lib/store/stage');
     const previousStage = useStageStore.getState().stage;
@@ -507,15 +507,15 @@ describe('server-backed narration storage', () => {
       ...ttsResponse(),
       json: async () => ({
         success: true,
-        teachingVoiceProvider: 'qwen3',
+        teachingVoiceProvider: 'chatterbox',
         base64: btoa('legacy-audio'),
         format: 'wav',
       }),
     });
 
     try {
-      await expect(generateAndStoreTTS('tts_qwen_legacy', 'Narration')).rejects.toThrow(
-        'Qwen Teaching Voice must use the asynchronous synthesis job API.',
+      await expect(generateAndStoreTTS('tts_chatterbox_legacy', 'Narration')).rejects.toThrow(
+        'Chatterbox Teaching Voice must use the asynchronous synthesis job API.',
       );
       expect(mocks.poolPut).not.toHaveBeenCalled();
     } finally {

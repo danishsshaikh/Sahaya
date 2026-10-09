@@ -571,8 +571,8 @@ async function resolveTeachingVoiceJob(
     throw new Error('Teaching Voice response is missing provider metadata.');
   }
   if (!initial.async || !initial.jobId || !initial.statusUrl) {
-    if (initial.teachingVoiceProvider === 'qwen3') {
-      throw new Error('Qwen Teaching Voice must use the asynchronous synthesis job API.');
+    if (initial.teachingVoiceProvider === 'chatterbox') {
+      throw new Error('Chatterbox Teaching Voice must use the asynchronous synthesis job API.');
     }
     return initial;
   }

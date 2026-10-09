@@ -35,7 +35,7 @@ beforeEach(() => {
     id: 'vcp_example',
     ownerId: 'usr_example',
     displayName: 'Teaching Voice',
-    provider: 'qwen3',
+    provider: 'chatterbox',
     language: 'en',
     status: 'ready',
     profileVersion: 1,
@@ -70,7 +70,7 @@ function busyError() {
     'Teaching Voice service is busy. Try again after the current generation finishes.',
     429,
     {
-      provider: 'qwen3',
+      provider: 'chatterbox',
       endpoint: '/synthesize',
       operation: 'synthesis',
       providerStatus: 429,
@@ -80,7 +80,7 @@ function busyError() {
 
 describe('profile-specific synthesis and recovery', () => {
   it.each([
-    ['qwen3', 'en'],
+    ['chatterbox', 'en'],
     ['indicf5', 'hi'],
     ['indicf5', 'mr'],
   ])('recreates only %s once with exact reference metadata', async (provider, language) => {
@@ -88,12 +88,13 @@ describe('profile-specific synthesis and recovery', () => {
     mocks.synthesize.mockRejectedValueOnce(new VoiceProviderProfileNotFoundError('missing'));
     await synthesizeFacultyVoice({ ...request, language });
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith(provider);
-    expect(mocks.register).toHaveBeenCalledExactlyOnceWith({
-      profileId: profile.id,
-      referenceAudioKey: '/shared/reference.wav',
-      referenceText: profile.referenceText,
-      language,
-    });
+    expect(mocks.register).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        profileId: profile.id,
+        referenceAudioKey: '/shared/reference.wav',
+        language,
+      }),
+    );
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
   });
 
@@ -102,7 +103,7 @@ describe('profile-specific synthesis and recovery', () => {
     await expect(synthesizeFacultyVoice(request)).rejects.toThrow('missing');
     expect(mocks.register).toHaveBeenCalledTimes(1);
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3');
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
   });
 
   it('surfaces a failed same-provider registration without retrying synthesis', async () => {
@@ -111,7 +112,7 @@ describe('profile-specific synthesis and recovery', () => {
     await expect(synthesizeFacultyVoice(request)).rejects.toThrow('registration unavailable');
     expect(mocks.register).toHaveBeenCalledTimes(1);
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3');
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
   });
 
   it('surfaces ordinary failure without recreation or switching provider', async () => {
@@ -119,15 +120,17 @@ describe('profile-specific synthesis and recovery', () => {
     await expect(synthesizeFacultyVoice(request)).rejects.toThrow('service unavailable');
     expect(mocks.register).not.toHaveBeenCalled();
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3');
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
   });
 
   it('rejects language mismatch and absent transcript before service access', async () => {
     await expect(synthesizeFacultyVoice({ ...request, language: 'hi' })).rejects.toThrow(
       'does not match',
     );
-    profile.referenceText = undefined;
-    await expect(synthesizeFacultyVoice(request)).rejects.toThrow('transcript');
+    profile = { ...profile, provider: 'indicf5', language: 'hi', referenceText: undefined };
+    await expect(synthesizeFacultyVoice({ ...request, language: 'hi' })).rejects.toThrow(
+      'transcript',
+    );
     expect(mocks.resolve).not.toHaveBeenCalled();
   });
 
@@ -138,7 +141,7 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.synthesize).toHaveBeenCalledWith(expect.objectContaining({ modelVariant: 'v2' }));
   });
 
-  it('retries a temporary Qwen provider-busy response and then succeeds', async () => {
+  it('retries a temporary Chatterbox provider-busy response and then succeeds', async () => {
     vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
     vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '2');
     mocks.synthesize
@@ -149,7 +152,7 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
   });
 
-  it('fails deterministically when Qwen stays busy beyond the retry budget', async () => {
+  it('fails deterministically when Chatterbox stays busy beyond the retry budget', async () => {
     vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
     vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '1');
     mocks.synthesize.mockRejectedValue(busyError());
@@ -158,14 +161,14 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
   });
 
-  it('does not duplicate a successful Qwen synthesis request', async () => {
+  it('does not duplicate a successful Chatterbox synthesis request', async () => {
     await synthesizeFacultyVoice(request);
     expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ providerReferenceId: 'vcp_example' }),
     );
   });
 
-  it('does not serialize legacy Chatterbox synthesis behind the Qwen queue', async () => {
+  it('leaves serialization to the resource queue rather than direct synthesis', async () => {
     profile = { ...profile, provider: 'chatterbox', referenceText: undefined };
     const first = deferred<{ audio: Uint8Array; format: string }>();
     const second = deferred<{ audio: Uint8Array; format: string }>();
@@ -181,5 +184,27 @@ describe('profile-specific synthesis and recovery', () => {
     first.resolve({ audio: new Uint8Array([1]), format: 'wav' });
     second.resolve({ audio: new Uint8Array([2]), format: 'wav' });
     await expect(Promise.all([firstRequest, secondRequest])).resolves.toHaveLength(2);
+  });
+
+  it('migrates retained Qwen metadata to Chatterbox before new synthesis', async () => {
+    profile = { ...profile, provider: 'qwen3', modelVariant: undefined };
+
+    await synthesizeFacultyVoice(request);
+
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
+    expect(mocks.register).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        profileId: 'vcp_example',
+        referenceAudioKey: '/shared/reference.wav',
+        language: 'en',
+        modelVariant: 'v3',
+      }),
+    );
+    expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ providerReferenceId: 'vcp_example' }),
+    );
+    expect(mocks.write).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'chatterbox', providerReferenceId: 'vcp_example' }),
+    );
   });
 });

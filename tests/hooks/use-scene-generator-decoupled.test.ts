@@ -343,7 +343,7 @@ describe('scene generator visual and narration pipelines', () => {
               jsonResponse({
                 success: true,
                 async: true,
-                teachingVoiceProvider: 'qwen3',
+                teachingVoiceProvider: 'chatterbox',
                 jobId: 'rq_shared_teaching_voice_job',
                 status: 'queued',
                 statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
@@ -354,7 +354,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_shared_teaching_voice_job',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
@@ -434,7 +434,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: `rq_${actionId}`,
               status: 'completed',
               statusUrl: `/api/generate/tts/jobs/rq_${actionId}`,
@@ -499,7 +499,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_stale_completion',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_stale_completion',
@@ -554,7 +554,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_delayed_teaching_voice_job',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_delayed_teaching_voice_job',
@@ -606,7 +606,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_fifo_delayed_teaching_voice',
               status: 'queued',
               statusUrl: '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice',
@@ -685,7 +685,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_first_clip_ready_immediately',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_first_clip_ready_immediately',
@@ -740,7 +740,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_missing_only',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_missing_only',

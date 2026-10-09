@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { getResourceJobQueue, type ResourceJobSnapshot } from '@/lib/server/resource-job-queue';
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 
-export const QWEN_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:qwen3';
+export const CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:chatterbox';
 
 export interface TeachingVoiceJobResult {
   audio: Uint8Array;
@@ -38,17 +38,17 @@ export function createTeachingVoiceIdempotencyKey(input: TeachingVoiceJobInput):
     .digest('hex');
 }
 
-export function enqueueQwenTeachingVoiceJob(input: TeachingVoiceJobInput): {
+export function enqueueChatterboxTeachingVoiceJob(input: TeachingVoiceJobInput): {
   job: ResourceJobSnapshot;
   reused: boolean;
 } {
   return getResourceJobQueue().enqueue<TeachingVoiceJobResult>({
-    resourceKey: QWEN_TEACHING_VOICE_RESOURCE_KEY,
+    resourceKey: CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY,
     concurrency: 1,
     ownerId: input.ownerId,
     idempotencyKey: createTeachingVoiceIdempotencyKey(input),
     metadata: {
-      provider: 'qwen3',
+      provider: 'chatterbox',
       profileId: input.profileId,
       stageId: input.stageId,
       outlineId: input.outlineId,

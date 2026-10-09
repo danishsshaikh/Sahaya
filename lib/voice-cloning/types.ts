@@ -149,8 +149,11 @@ export function isChatterboxModelVariant(value: unknown): value is ChatterboxMod
 }
 
 export function resolveVoiceProfileProvider(profile: { provider?: string }): string {
-  // Only absent legacy metadata implies Chatterbox; unknown explicit IDs fail.
-  return profile.provider === undefined ? 'chatterbox' : profile.provider;
+  // Profiles enrolled during the retired Qwen3 period retain their reference WAV.
+  // Resolve them to Chatterbox for new synthesis while preserving the stored
+  // metadata until a successful Chatterbox registration migrates the profile.
+  if (profile.provider === undefined || profile.provider === 'qwen3') return 'chatterbox';
+  return profile.provider;
 }
 
 export class TeachingVoiceError extends Error {
@@ -175,7 +178,7 @@ export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
     message: string,
     status: number,
     readonly metadata: {
-      provider: 'qwen3' | 'indicf5';
+      provider: 'chatterbox' | 'indicf5';
       endpoint: string;
       operation: TeachingVoiceProviderOperation;
       providerStatus?: number;
@@ -189,8 +192,12 @@ export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
 }
 
 export function resolveVoiceProfileModelVariant(profile: {
+  provider?: string | null;
   modelVariant?: string | null;
 }): ChatterboxModelVariant {
+  if (profile.provider === 'qwen3' && !isChatterboxModelVariant(profile.modelVariant)) {
+    return DEFAULT_CHATTERBOX_MODEL_VARIANT;
+  }
   return isChatterboxModelVariant(profile.modelVariant)
     ? profile.modelVariant
     : LEGACY_CHATTERBOX_MODEL_VARIANT;
@@ -284,6 +291,7 @@ export function isVoiceProviderProfileNotFoundError(
 
 export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceProfile | null {
   if (!profile || profile.status === 'deleted') return null;
+  const legacyQwenProfile = profile.provider === 'qwen3';
   return {
     id: profile.id,
     displayName: profile.displayName,
@@ -302,9 +310,11 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     consentTimestamp: profile.consentTimestamp,
     consentVersion: profile.consentVersion,
     profileVersion: profile.profileVersion,
-    ...(profile.preview ? { preview: profile.preview } : {}),
-    ...(profile.previewVariants ? { previewVariants: profile.previewVariants } : {}),
-    ...(profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
+    ...(!legacyQwenProfile && profile.preview ? { preview: profile.preview } : {}),
+    ...(!legacyQwenProfile && profile.previewVariants
+      ? { previewVariants: profile.previewVariants }
+      : {}),
+    ...(!legacyQwenProfile && profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
 }

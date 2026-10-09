@@ -13,9 +13,7 @@ import {
   MessageSquare,
   Focus,
   Play,
-  Maximize2,
 } from 'lucide-react';
-import { useI18n } from '@/lib/hooks/use-i18n';
 import { cn } from '@/lib/utils';
 import type { SceneOutline } from '@/lib/types/generation';
 
@@ -24,12 +22,10 @@ export function StepVisualizer({
   stepId,
   outlines,
   webSearchSources,
-  onExpandOutline,
 }: {
   stepId: string;
   outlines?: SceneOutline[] | null;
   webSearchSources?: Array<{ title: string; url: string }>;
-  onExpandOutline?: () => void;
 }) {
   switch (stepId) {
     case 'pdf-analysis':
@@ -37,7 +33,7 @@ export function StepVisualizer({
     case 'web-search':
       return <WebSearchVisualizer sources={webSearchSources || []} />;
     case 'outline':
-      return <StreamingOutlineVisualizer outlines={outlines || []} onExpand={onExpandOutline} />;
+      return <StreamingOutlineVisualizer outlines={outlines || []} />;
     case 'agent-generation':
       return <AgentGenerationVisualizer />;
     case 'slide-content':
@@ -243,49 +239,13 @@ function WebSearchVisualizer({ sources }: { sources: Array<{ title: string; url:
 }
 
 // Outline: Streams real outline data as it arrives from SSE
-function StreamingOutlineVisualizer({
-  outlines,
-  onExpand,
-}: {
-  outlines: SceneOutline[];
-  onExpand?: () => void;
-}) {
-  const { t } = useI18n();
-  const isInteractive = !!onExpand;
-
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!isInteractive) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      onExpand?.();
-    }
-  };
-
+function StreamingOutlineVisualizer({ outlines }: { outlines: SceneOutline[] }) {
   return (
     <motion.div
       layoutId="outline-review-surface"
       transition={{ type: 'spring', stiffness: 220, damping: 28 }}
-      // Slight tilt to suggest a tossed-down sticky note; straightens on hover.
-      // Layout-shared morph into the editor surface explicitly targets rotate: 0,
-      // so the rotation is interpolated as the surface grows.
-      initial={isInteractive ? { rotate: -3 } : false}
-      animate={isInteractive ? { rotate: -3 } : { rotate: 0 }}
-      whileHover={isInteractive ? { y: -3, scale: 1.04, rotate: 0 } : undefined}
-      whileTap={isInteractive ? { scale: 0.97, rotate: 0 } : undefined}
-      role={isInteractive ? 'button' : undefined}
-      tabIndex={isInteractive ? 0 : undefined}
-      aria-label={isInteractive ? t('generation.outlineExpandHint') : undefined}
-      onClick={onExpand}
-      onKeyDown={handleKeyDown}
-      style={{ transformOrigin: 'center center' }}
-      className={cn(
-        'group/outline-card relative h-52 w-44 overflow-hidden rounded-2xl border p-3 text-left',
-        'bg-white/90 shadow-xl shadow-slate-900/10 backdrop-blur',
-        'dark:bg-slate-900/80',
-        isInteractive
-          ? 'cursor-pointer border-blue-400/40 shadow-blue-500/10 transition-shadow hover:border-blue-500/60 hover:shadow-2xl hover:shadow-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 dark:border-blue-400/30 dark:hover:border-blue-400/50'
-          : 'border-slate-200/70 dark:border-white/10',
-      )}
+      className="relative h-52 w-44 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/90 p-3 text-left shadow-xl shadow-slate-900/10 backdrop-blur dark:border-white/10 dark:bg-slate-900/80"
+      aria-hidden="true"
     >
       <div className="mb-3 flex items-center justify-between">
         <div className="h-1.5 w-12 rounded-full bg-slate-200 dark:bg-slate-700" />
@@ -352,32 +312,6 @@ function StreamingOutlineVisualizer({
         className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-10 bg-gradient-to-t from-white via-white/80 to-transparent dark:from-slate-900 dark:via-slate-900/80"
         aria-hidden
       />
-
-      {/* Expand affordance — always visible to telegraph clickability */}
-      {isInteractive && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex items-center justify-center px-2">
-          <motion.span
-            className="inline-flex items-center gap-1 rounded-full bg-blue-500 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-white shadow-lg shadow-blue-500/50 backdrop-blur"
-            animate={{ y: [0, -1.5, 0] }}
-            transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            <Maximize2 className="size-3" />
-            {t('generation.outlineExpandHint')}
-          </motion.span>
-        </div>
-      )}
-
-      {/* Subtle expand icon in top-right corner — pulses gently */}
-      {isInteractive && (
-        <motion.div
-          className="absolute right-2 top-2 z-10 flex size-5 items-center justify-center rounded-md text-blue-500/80 group-hover/outline-card:text-blue-600 dark:text-blue-400/80 dark:group-hover/outline-card:text-blue-300"
-          animate={{ opacity: [0.6, 1, 0.6] }}
-          transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-          aria-hidden
-        >
-          <Maximize2 className="size-3" />
-        </motion.div>
-      )}
     </motion.div>
   );
 }

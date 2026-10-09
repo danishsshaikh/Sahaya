@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Qwen3VoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3';
+import { ChatterboxVoiceCloningProvider } from '@/lib/voice-cloning/providers/chatterbox';
 import { IndicF5VoiceCloningProvider } from '@/lib/voice-cloning/providers/indicf5';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import { getTeachingVoiceServiceConfig } from '@/lib/voice-cloning/config';
@@ -55,19 +55,23 @@ describe('Teaching Voice language boundary', () => {
   });
 
   it('routes new enrollments while retaining absent legacy provider metadata', () => {
-    expect(newTeachingVoiceProvider('en')).toBe('qwen3');
+    expect(newTeachingVoiceProvider('en')).toBe('chatterbox');
     expect(newTeachingVoiceProvider('hi')).toBe('indicf5');
     expect(newTeachingVoiceProvider('mr')).toBe('indicf5');
     expect(() => newTeachingVoiceProvider('fr')).toThrow();
     expect(resolveVoiceProfileProvider({})).toBe('chatterbox');
+    expect(resolveVoiceProfileProvider({ provider: 'qwen3' })).toBe('chatterbox');
     expect(() => getVoiceCloningProvider('unknown')).toThrow('Unsupported');
     vi.stubEnv('VOICE_CLONING_PROVIDER', 'chatterbox');
-    expect(getVoiceCloningProvider('qwen3')).toBeInstanceOf(Qwen3VoiceCloningProvider);
+    expect(getVoiceCloningProvider('chatterbox')).toBeInstanceOf(ChatterboxVoiceCloningProvider);
+    expect(() => getVoiceCloningProvider('qwen3')).toThrow('Unsupported');
   });
 
   it('rejects cross-language references, missing transcripts and missing target language', () => {
     expect(() => validateTeachingVoiceLanguage(profile(), 'mr')).toThrow('does not match');
-    expect(() => validateTeachingVoiceLanguage(profile('qwen3', 'hi'), 'hi')).toThrow('English');
+    expect(() => validateTeachingVoiceLanguage(profile('chatterbox', 'hi'), 'hi')).toThrow(
+      'English',
+    );
     expect(() => validateTeachingVoiceLanguage(profile('indicf5', 'en'), 'en')).toThrow(
       'Hindi or Marathi',
     );
@@ -112,97 +116,47 @@ describe('Indic outgoing text only', () => {
 });
 
 describe('isolated Teaching Voice adapters', () => {
-  it('accepts reachable lazy health but surfaces a model-load error', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(Response.json({ ok: false, modelLoaded: false, error: null }))
-      .mockResolvedValueOnce(
-        Response.json({ ok: false, modelLoaded: false, error: 'private error' }),
-      );
-    vi.stubGlobal('fetch', fetchMock);
-    const provider = new Qwen3VoiceCloningProvider();
-    await expect(provider.healthCheck()).resolves.toMatchObject({ ok: true, modelLoaded: false });
-    await expect(provider.healthCheck()).rejects.toThrow('model failed to load');
-  });
-
-  it('sends the exact reference transcript and no Chatterbox settings', async () => {
+  it('sends the retained reference and selected Chatterbox configuration', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://voice.local');
     const fetchMock = vi
       .fn()
       .mockResolvedValue(Response.json({ providerReferenceId: 'vcp_example' }));
     vi.stubGlobal('fetch', fetchMock);
-    await new Qwen3VoiceCloningProvider().createProfile({
+    await new ChatterboxVoiceCloningProvider().createProfile({
       profileId: 'vcp_example',
       referenceAudioKey: '/shared/reference.wav',
-      referenceText: ' Exact transcript. ',
       language: 'en',
       modelVariant: 'v3',
     });
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       profileId: 'vcp_example',
       referenceAudioPath: '/shared/reference.wav',
-      referenceText: ' Exact transcript. ',
       language: 'en',
+      modelVariant: 'v3',
     });
   });
 
-  it('classifies rejected Qwen profile registration with safe provider metadata', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        Response.json({ detail: 'reference must be a readable, nonempty WAV' }, { status: 400 }),
-      );
-    vi.stubGlobal('fetch', fetchMock);
-    const provider = new Qwen3VoiceCloningProvider();
-
-    await expect(
-      provider.createProfile({
-        profileId: 'vcp_example',
-        referenceAudioKey: '/shared/reference.wav',
-        referenceText: 'Exact transcript.',
-        language: 'en',
+  it('sends only target narration text to Chatterbox synthesis', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://voice.local');
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array([1]), {
+        headers: { 'Content-Type': 'audio/wav' },
       }),
-    ).rejects.toMatchObject({
-      name: 'TeachingVoiceProviderOperationError',
-      metadata: {
-        provider: 'qwen3',
-        endpoint: '/profiles',
-        operation: 'provider_registration',
-        providerStatus: 400,
-        providerContentType: 'application/json',
-        providerDetail: 'reference must be a readable, nonempty WAV',
-      },
-    } satisfies Partial<TeachingVoiceProviderOperationError>);
-  });
-
-  it('never folds reference-tail words into the Qwen target narration payload', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(Response.json({ providerReferenceId: 'vcp_class_tail' }))
-      .mockResolvedValueOnce(
-        new Response(new Uint8Array([1]), {
-          headers: { 'Content-Type': 'audio/wav' },
-        }),
-      );
+    );
     vi.stubGlobal('fetch', fetchMock);
-    const provider = new Qwen3VoiceCloningProvider();
 
-    await provider.createProfile({
-      profileId: 'vcp_class_tail',
-      referenceAudioKey: '/shared/reference.wav',
-      referenceText:
-        'Today we will take a simple idea and keep the explanation clear for the class.',
-      language: 'en',
-    });
-    await provider.synthesize({
+    await new ChatterboxVoiceCloningProvider().synthesize({
       providerReferenceId: 'vcp_class_tail',
       text: 'Today we are going to understand neural networks.',
       language: 'en',
+      modelVariant: 'v3',
     });
 
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
       profileId: 'vcp_class_tail',
       text: 'Today we are going to understand neural networks.',
       language: 'en',
+      modelVariant: 'v3',
     });
   });
 
@@ -218,51 +172,63 @@ describe('isolated Teaching Voice adapters', () => {
     await new IndicF5VoiceCloningProvider().synthesize(input);
     expect(input.text).toBe('training process');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).text).toBe('ट्रेनिंग प्रक्रिया');
-    await new Qwen3VoiceCloningProvider().synthesize({ ...input, language: 'en' });
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body).text).toBe('training process');
     await expect(
       new IndicF5VoiceCloningProvider().synthesize({ ...input, language: 'en' }),
     ).rejects.toThrow('Unsupported');
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('classifies only a missing profile as recoverable and never retries transport errors', async () => {
+  it('classifies a missing Chatterbox profile as recoverable', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://voice.local');
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ detail: 'voice profile not found' }, { status: 404 }))
-      .mockRejectedValueOnce(new Error('private server path'));
+      .mockResolvedValueOnce(new Response('voice profile not found', { status: 404 }));
     vi.stubGlobal('fetch', fetchMock);
-    const provider = new Qwen3VoiceCloningProvider();
-    const request = { providerReferenceId: 'vcp_example', text: 'Hello', language: 'en' };
-    await expect(provider.synthesize(request)).rejects.toBeInstanceOf(
-      VoiceProviderProfileNotFoundError,
-    );
-    await expect(provider.synthesize(request)).rejects.toThrow('unreachable');
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('uses provider-specific overrides and times out without another provider request', async () => {
-    vi.stubEnv('QWEN3_VOICE_CLONING_BASE_URL', 'http://127.0.0.1:9871');
-    vi.stubEnv('QWEN3_VOICE_CLONING_TIMEOUT_MS', '10');
-    vi.stubEnv('INDICF5_VOICE_CLONING_TIMEOUT_MS', '900000');
-    expect(getTeachingVoiceServiceConfig('indicf5').timeoutMs).toBe(900000);
-    vi.useFakeTimers();
-    const fetchMock = vi.fn(
-      (_url: string, init: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-        }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    const result = new Qwen3VoiceCloningProvider().synthesize({
+    const provider = new ChatterboxVoiceCloningProvider();
+    const request = {
       providerReferenceId: 'vcp_example',
       text: 'Hello',
       language: 'en',
-    });
-    const assertion = expect(result).rejects.toThrow('timed out');
-    await vi.advanceTimersByTimeAsync(10);
-    await assertion;
+      modelVariant: 'v3' as const,
+    };
+    await expect(provider.synthesize(request)).rejects.toBeInstanceOf(
+      VoiceProviderProfileNotFoundError,
+    );
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:9871/synthesize');
+  });
+
+  it('classifies a busy Chatterbox response for bounded queue retry', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://voice.local');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('busy', {
+          status: 429,
+          headers: { 'Content-Type': 'text/plain' },
+        }),
+      ),
+    );
+
+    await expect(
+      new ChatterboxVoiceCloningProvider().synthesize({
+        providerReferenceId: 'vcp_example',
+        text: 'Hello class',
+        language: 'en',
+        modelVariant: 'v3',
+      }),
+    ).rejects.toMatchObject({
+      status: 429,
+      metadata: {
+        provider: 'chatterbox',
+        endpoint: '/synthesize',
+        operation: 'synthesis',
+        providerStatus: 429,
+      },
+    } satisfies Partial<TeachingVoiceProviderOperationError>);
+  });
+
+  it('keeps the IndicF5 timeout override', () => {
+    vi.stubEnv('INDICF5_VOICE_CLONING_TIMEOUT_MS', '900000');
+    expect(getTeachingVoiceServiceConfig('indicf5').timeoutMs).toBe(900000);
   });
 });

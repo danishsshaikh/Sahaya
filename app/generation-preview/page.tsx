@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   Bot,
   FileText,
+  ListTree,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -1714,9 +1715,6 @@ function GenerationPreviewContent() {
                         stepId={activeStep.id}
                         outlines={session.sceneOutlines ?? streamingOutlines}
                         webSearchSources={webSearchSources}
-                        onExpandOutline={
-                          activeStep.id === 'outline' ? handleExpandStreamingOutline : undefined
-                        }
                       />
                     </motion.div>
                   )}
@@ -1816,6 +1814,19 @@ function GenerationPreviewContent() {
                   )}
                 </AnimatePresence>
               </div>
+
+              {activeStep.id === 'outline' && !error ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full max-w-xs"
+                  onClick={handleExpandStreamingOutline}
+                >
+                  <ListTree className="size-4" />
+                  {t('generation.outlineExpandHint')}
+                </Button>
+              ) : null}
 
               {isReviewingSources ? (
                 <div className="w-full max-w-sm border-t border-border/70 pt-4 text-left">

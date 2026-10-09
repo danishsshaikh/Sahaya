@@ -236,7 +236,10 @@ export async function PATCH(req: NextRequest) {
     const { providerReferenceId, preview } = generated;
     const next = {
       ...profile,
+      provider: resolveVoiceProfileProvider(profile),
       providerReferenceId,
+      preview: profile.provider === 'qwen3' ? undefined : profile.preview,
+      previewVariants: profile.provider === 'qwen3' ? undefined : profile.previewVariants,
       draftPreview: { config, preview },
       updatedAt: new Date().toISOString(),
     };

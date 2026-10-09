@@ -210,7 +210,11 @@ export async function synthesizeFacultyVoice(input: {
     traceTeachingVoiceSynthesis('mastering-start', {
       ...metadata,
     });
-    const mastered = await masterGeneratedVoiceAudio(result.audio, result.format);
+    const mastered = await masterGeneratedVoiceAudio(
+      result.audio,
+      result.format,
+      providerId === 'chatterbox' ? 'chatterbox-clarity' : 'standard',
+    );
     traceTeachingVoiceSynthesis('mastering-complete', {
       profileId: profile.id,
       provider: providerId,
@@ -220,6 +224,27 @@ export async function synthesizeFacultyVoice(input: {
     });
     return mastered;
   };
+
+  if (profile.provider === 'qwen3') {
+    const { providerReferenceId } = await provider.createProfile({
+      profileId: profile.id,
+      referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
+      language,
+      ...settings,
+    });
+    await writeVoiceProfile({
+      ...profile,
+      provider: 'chatterbox',
+      providerReferenceId,
+      modelVariant: settings.modelVariant,
+      generationSettings: settings.generationSettings,
+      preview: undefined,
+      previewVariants: undefined,
+      draftPreview: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    return synthesize(providerReferenceId);
+  }
 
   try {
     return await synthesize(profile.providerReferenceId);

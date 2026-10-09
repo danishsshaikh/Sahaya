@@ -30,6 +30,7 @@ import {
 } from '@/lib/voice-cloning/audio-validation';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
+  RECOMMENDED_VOICE_GENERATION_SETTINGS,
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
   resolveVoiceProfileProvider,
@@ -40,6 +41,7 @@ import {
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { createLogger } from '@/lib/logger';
+import { getChatterboxDefaultModelVariant } from '@/lib/voice-cloning/config';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -65,7 +67,7 @@ export interface VoiceEnrollmentJob {
   startedAt?: number;
   completedAt?: number;
   languageId?: string;
-  provider?: 'qwen3' | 'indicf5';
+  provider?: 'chatterbox' | 'indicf5';
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
@@ -87,7 +89,7 @@ interface VoiceEnrollmentInput {
   ownerUserId: string;
   displayName: string;
   languageId: string;
-  providerId: 'qwen3' | 'indicf5';
+  providerId: 'chatterbox' | 'indicf5';
   referenceText: string;
   recording: IncomingVoiceClip;
 }
@@ -255,7 +257,11 @@ export async function generateVariantPreview(
     format: preview.format,
   });
   options.onPhase?.('mastering');
-  const mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format);
+  const mastered = await masterGeneratedVoiceAudio(
+    preview.audio,
+    preview.format,
+    providerId === 'chatterbox' ? 'chatterbox-clarity' : 'standard',
+  );
   log.info('voice output mastering completed', {
     attemptId: options.attemptId,
     profileId: profile.id,
@@ -275,7 +281,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
   attemptId: string;
   ownerUserId: string;
   languageId: string;
-  provider: 'qwen3' | 'indicf5';
+  provider: 'chatterbox' | 'indicf5';
 }): { job: VoiceEnrollmentJob; reused: boolean } {
   const now = nowMs();
   cleanupVoiceEnrollmentJobs(now);
@@ -360,6 +366,8 @@ export async function readVoiceEnrollmentStatus(
 
 async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<VoiceProfile> {
   const startedAt = nowMs();
+  const chatterboxModelVariant =
+    input.providerId === 'chatterbox' ? getChatterboxDefaultModelVariant() : undefined;
   let profile: VoiceProfile | null = null;
   let currentPhase: VoiceEnrollmentJobPhase = 'queued';
   try {
@@ -408,6 +416,12 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       provider: input.providerId,
       language: input.languageId,
       languageId: input.languageId,
+      ...(input.providerId === 'chatterbox'
+        ? {
+            modelVariant: chatterboxModelVariant,
+            generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+          }
+        : { modelVariant: undefined, generationSettings: undefined }),
       referenceText: input.referenceText,
       status: 'processing',
       createdAt: existingAttemptProfile?.createdAt ?? now,
@@ -452,7 +466,15 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       qualityDecision: normalizedReference.qualityDecision.severity,
     });
 
-    const config: VoiceConfiguration = { languageId: input.languageId };
+    const config: VoiceConfiguration = {
+      languageId: input.languageId,
+      ...(input.providerId === 'chatterbox'
+        ? {
+            modelVariant: chatterboxModelVariant,
+            generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+          }
+        : {}),
+    };
     const { providerReferenceId, preview } = await generateVariantPreview(profile, config, {
       attemptId: input.attemptId,
       onPhase: (phase) => {

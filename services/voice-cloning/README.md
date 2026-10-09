@@ -50,8 +50,11 @@ cleanliness and playback consistency, but they do not guarantee accent identity
 or speaker similarity and must not be treated as voice conversion.
 
 Generated Chatterbox preview and classroom/editor narration audio pass through
-the same light output mastering stage before the application stores or returns it.
-Export should reuse already generated audio and not process it again.
+the same clarity mastering preset before the application stores or returns it:
+a 70 Hz high-pass, gentle low-mid reduction, subtle presence lift, light
+compression, loudness normalization, and peak limiting. IndicF5 keeps the
+standard mastering preset. Export reuses generated audio and does not process it
+again.
 
 Set the Next.js app environment:
 

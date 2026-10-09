@@ -128,6 +128,28 @@ describe('voice profile privacy', () => {
     expect(profile).not.toHaveProperty('providerReferenceId');
   });
 
+  it('maps retained Qwen metadata to Chatterbox without exposing its stale preview', () => {
+    const profile = toPublicVoiceProfile({
+      id: 'vcp_qwen_legacy',
+      ownerId: 'local-faculty',
+      displayName: 'Legacy Teaching Voice',
+      provider: 'qwen3',
+      language: 'en',
+      status: 'ready',
+      createdAt: '2026-08-11T00:00:00.000Z',
+      updatedAt: '2026-08-11T00:00:00.000Z',
+      consentTimestamp: '2026-08-11T00:00:00.000Z',
+      consentVersion: 'faculty-self-voice-v1',
+      referenceAudioKey: '/private/reference.wav',
+      providerReferenceId: 'qwen-reference',
+      profileVersion: 1,
+      preview: { format: 'wav', base64: 'old-qwen-preview', createdAt: '2026-08-11' },
+    });
+
+    expect(profile).toMatchObject({ provider: 'chatterbox', modelVariant: 'v3' });
+    expect(profile).not.toHaveProperty('preview');
+  });
+
   it('hides deleted profiles', () => {
     expect(
       toPublicVoiceProfile({
@@ -155,7 +177,10 @@ describe('explicit cloned voice TTS routing', () => {
     vi.resetModules();
     synthesizeFacultyVoice.mockReset();
     generateTTS.mockReset();
-    vi.doMock('@/lib/voice-cloning/synthesis', () => ({ synthesizeFacultyVoice }));
+    vi.doMock('@/lib/voice-cloning/synthesis', () => ({
+      resolveFacultyVoiceProviderId: vi.fn(async () => 'indicf5'),
+      synthesizeFacultyVoice,
+    }));
     vi.doMock('@/lib/audio/tts-providers', () => ({
       generateTTS,
       QwenTTSError: class QwenTTSError extends Error {},
@@ -203,7 +228,7 @@ describe('explicit cloned voice TTS routing', () => {
     const { POST } = await import('@/app/api/generate/tts/route');
 
     const response = await POST(
-      request({ teacherVoiceProfileId: 'vcp_ready', language: 'en' }) as never,
+      request({ teacherVoiceProfileId: 'vcp_ready', language: 'hi' }) as never,
     );
     const data = await response.json();
 
@@ -213,7 +238,7 @@ describe('explicit cloned voice TTS routing', () => {
       profileId: 'vcp_ready',
       ownerId: 'usr_faculty_a',
       text: 'Hello class',
-      language: 'en',
+      language: 'hi',
     });
     expect(generateTTS).not.toHaveBeenCalled();
   });
@@ -265,10 +290,10 @@ describe('faculty voice synthesis language resolution', () => {
         ownerId: 'local-faculty',
         displayName: 'Faculty Voice',
         provider: 'chatterbox',
-        language: 'hi',
+        language: 'en',
         status: 'ready',
         modelVariant: 'v3',
-        languageId: 'hi',
+        languageId: 'en',
         generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         createdAt: '2026-08-11T00:00:00.000Z',
         updatedAt: '2026-08-11T00:00:00.000Z',
@@ -325,7 +350,7 @@ describe('faculty voice synthesis language resolution', () => {
       profileId: 'vcp_ready',
       ownerId: 'local-faculty',
       text: 'Hello class',
-      language: 'hi-IN',
+      language: 'en-US',
     });
 
     expect(result).toEqual({ audio: new Uint8Array([1, 8]), format: 'wav' });
@@ -334,7 +359,7 @@ describe('faculty voice synthesis language resolution', () => {
     expect(createProfile).toHaveBeenCalledWith({
       profileId: 'vcp_ready',
       referenceAudioKey: '/private/reference.wav',
-      language: 'hi',
+      language: 'en',
       modelVariant: 'v3',
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
     });
@@ -343,14 +368,14 @@ describe('faculty voice synthesis language resolution', () => {
     expect(synthesize).toHaveBeenNthCalledWith(1, {
       providerReferenceId: 'ref-1',
       text: 'Hello class',
-      language: 'hi',
+      language: 'en',
       modelVariant: 'v3',
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
     });
     expect(synthesize).toHaveBeenNthCalledWith(2, {
       providerReferenceId: 'ref-1',
       text: 'Hello class',
-      language: 'hi',
+      language: 'en',
       modelVariant: 'v3',
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
     });
@@ -776,7 +801,7 @@ describe('voice profile model preview API', () => {
     return { promise, resolve, reject };
   }
 
-  it('creates new English profiles with Qwen and the exact approved transcript', async () => {
+  it('creates new English profiles with Chatterbox and the exact approved transcript', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
     const formData = enrollmentForm();
     formData.set(
@@ -815,20 +840,22 @@ describe('voice profile model preview API', () => {
         fileName: 'voice.webm',
       }),
     );
-    expect(completed.profile.provider).toBe('qwen3');
-    expect(completed.profile.modelVariant).toBeUndefined();
+    expect(completed.profile.provider).toBe('chatterbox');
+    expect(completed.profile.modelVariant).toBe('v3');
     expect(completed.profile.languageId).toBe('en');
-    expect(completed.profile.generationSettings).toBeUndefined();
+    expect(completed.profile.generationSettings).toEqual(RECOMMENDED_VOICE_GENERATION_SETTINGS);
     expect(completed.profile.referenceText).toBeUndefined();
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
-        provider: 'qwen3',
+        provider: 'chatterbox',
         referenceText: VOICE_ENROLLMENT_PARAGRAPH,
       }),
     );
     expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', 'en', true);
     expect(completed.profile.draftPreview.config).toEqual({
       languageId: 'en',
+      modelVariant: 'v3',
+      generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
     });
     expect(completed.profile.draftPreview.preview.base64).toBe(
       Buffer.from([1, 2, 9]).toString('base64'),
@@ -851,14 +878,18 @@ describe('voice profile model preview API', () => {
         language: 'en',
       }),
     );
-    expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(new Uint8Array([1, 2]), 'wav');
+    expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(
+      new Uint8Array([1, 2]),
+      'wav',
+      'chatterbox-clarity',
+    );
     expect(
       writeVoiceProfile.mock.calls.filter(([profile]) => profile.status === 'preview-ready'),
     ).toHaveLength(1);
     expect(writeVoiceProfile).toHaveBeenLastCalledWith(
       expect.objectContaining({
         id: 'vcp_new',
-        provider: 'qwen3',
+        provider: 'chatterbox',
         languageId: 'en',
         enrollmentAttemptId: 'attempt-voice-test',
         referenceText: VOICE_ENROLLMENT_PARAGRAPH,
@@ -1221,7 +1252,7 @@ describe('voice profile model preview API', () => {
         'Teaching Voice service rejected the request or failed to generate audio.',
         502,
         {
-          provider: 'qwen3',
+          provider: 'chatterbox',
           endpoint: '/profiles',
           operation: 'provider_registration',
           providerStatus: 400,
@@ -1264,7 +1295,7 @@ describe('voice profile model preview API', () => {
         'Teaching Voice service rejected the request or failed to generate audio.',
         502,
         {
-          provider: 'qwen3',
+          provider: 'chatterbox',
           endpoint: '/synthesize',
           operation: 'preview_generation',
           providerStatus: 500,

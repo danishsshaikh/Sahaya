@@ -34,7 +34,7 @@ import {
   synthesizeFacultyVoice,
 } from '@/lib/voice-cloning/synthesis';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
-import { enqueueQwenTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import { enqueueChatterboxTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
 import { isQwenCloneVoice } from '@/lib/audio/constants';
@@ -93,8 +93,8 @@ export async function POST(req: NextRequest) {
     if (teacherVoiceProfileId) {
       try {
         const providerId = await resolveFacultyVoiceProviderId(teacherVoiceProfileId, user.id);
-        if (providerId === 'qwen3') {
-          const { job } = enqueueQwenTeachingVoiceJob({
+        if (providerId === 'chatterbox') {
+          const { job } = enqueueChatterboxTeachingVoiceJob({
             ownerId: user.id,
             profileId: teacherVoiceProfileId,
             text,

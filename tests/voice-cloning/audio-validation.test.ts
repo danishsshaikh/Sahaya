@@ -66,4 +66,29 @@ describe.skipIf(!ffmpegAvailable)('masterGeneratedVoiceAudio', () => {
     expect(duration).toBeGreaterThanOrEqual(0.62);
     expect(duration).toBeLessThan(0.9);
   });
+
+  it('produces valid, unclipped Chatterbox clarity-mastered PCM', async () => {
+    const raw = synthesizeSegmentedWav([
+      { seconds: 0.2, amplitude: 0 },
+      { seconds: 0.8, amplitude: 30_000, frequency: 240 },
+      { seconds: 0.2, amplitude: 0 },
+    ]);
+
+    const mastered = await masterGeneratedVoiceAudio(raw, 'wav', 'chatterbox-clarity');
+    expect(Buffer.from(mastered.audio.subarray(0, 4)).toString('ascii')).toBe('RIFF');
+    expect(measureWavDuration(mastered.audio)).toBeGreaterThan(0.7);
+
+    const pcm = Buffer.from(mastered.audio);
+    let peak = 0;
+    for (let offset = 44; offset + 1 < pcm.length; offset += 2) {
+      peak = Math.max(peak, Math.abs(pcm.readInt16LE(offset)));
+    }
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThan(32_767);
+  });
+
+  it('rejects an all-silent generated clip without returning corrupt audio', async () => {
+    const silence = synthesizeSegmentedWav([{ seconds: 0.8, amplitude: 0 }]);
+    await expect(masterGeneratedVoiceAudio(silence, 'wav', 'chatterbox-clarity')).rejects.toThrow();
+  });
 });

@@ -1139,6 +1139,12 @@ export function TeachingVoiceCard({
               )}
               {renderPreviewError()}
               <div className="flex flex-wrap gap-2">
+                {!selectedPreview && (
+                  <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
+                    <Play className="size-4" />
+                    Generate Preview
+                  </Button>
+                )}
                 <Button
                   type="button"
                   size="sm"
@@ -1203,18 +1209,12 @@ export function TeachingVoiceCard({
                   <Check className="size-4" />
                   {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use This Voice'}
                 </Button>
-                {!draftMatchesAccepted &&
-                  (selectedPreview ? (
-                    <Button type="button" size="sm" onClick={acceptPreview} disabled={busy}>
-                      <Check className="size-4" />
-                      Use These Settings
-                    </Button>
-                  ) : (
-                    <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
-                      <Play className="size-4" />
-                      Generate Preview
-                    </Button>
-                  ))}
+                {!draftMatchesAccepted && selectedPreview && (
+                  <Button type="button" size="sm" onClick={acceptPreview} disabled={busy}>
+                    <Check className="size-4" />
+                    Use These Settings
+                  </Button>
+                )}
                 {isChatterboxProfile && (
                   <Button
                     type="button"
