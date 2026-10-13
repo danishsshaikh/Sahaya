@@ -1,6 +1,7 @@
 export type VoiceProfileStatus = 'processing' | 'preview-ready' | 'ready' | 'failed' | 'deleted';
 export type ChatterboxModelVariant = 'v2' | 'v3';
 export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'custom';
+export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
 
 export const CHATTERBOX_MODEL_VARIANTS = ['v2', 'v3'] as const;
 export const DEFAULT_CHATTERBOX_MODEL_VARIANT: ChatterboxModelVariant = 'v3';
@@ -50,6 +51,8 @@ export interface VoiceConfiguration {
   /** Chatterbox generation language. This is independent of the recorded reference language. */
   languageId: string;
   generationSettings?: VoiceGenerationSettings;
+  /** Optional post-processing preference. Legacy profiles resolve to standard. */
+  enhancementMode?: VoiceEnhancementMode;
 }
 
 export type VoicePreviewTextLanguage = 'en' | 'hi';
@@ -64,9 +67,16 @@ export interface VoicePreview {
   createdAt: string;
 }
 
+export interface VoicePreviewComparison {
+  original: VoicePreview;
+  enhanced?: VoicePreview;
+  enhancementError?: string;
+}
+
 export interface VoiceDraftPreview {
   config: VoicePreviewConfiguration;
   preview: VoicePreview;
+  comparison?: VoicePreviewComparison;
 }
 
 export interface VoiceEnrollmentQualitySummary {
@@ -92,10 +102,12 @@ export interface VoiceProfile {
   modelVariant?: ChatterboxModelVariant;
   languageId?: string;
   generationSettings?: VoiceGenerationSettings;
+  enhancementMode?: VoiceEnhancementMode;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
   profileVersion: number;
   preview?: VoicePreview;
+  previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
@@ -118,8 +130,10 @@ export interface PublicVoiceProfile {
   modelVariant?: ChatterboxModelVariant;
   languageId: string;
   generationSettings?: VoiceGenerationSettings;
+  enhancementMode?: VoiceEnhancementMode;
   profileVersion: number;
   preview?: VoicePreview;
+  previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
@@ -227,6 +241,16 @@ export function resolveVoiceProfileGenerationSettings(profile: {
   return validateVoiceGenerationSettings(profile.generationSettings ?? undefined);
 }
 
+export function isVoiceEnhancementMode(value: unknown): value is VoiceEnhancementMode {
+  return value === 'standard' || value === 'resemble-enhance';
+}
+
+export function resolveVoiceProfileEnhancementMode(profile: {
+  enhancementMode?: string | null;
+}): VoiceEnhancementMode {
+  return isVoiceEnhancementMode(profile.enhancementMode) ? profile.enhancementMode : 'standard';
+}
+
 export function resolveNewVoiceProfileModelVariant(value: unknown): ChatterboxModelVariant | null {
   if (value === undefined || value === null || value === '')
     return DEFAULT_CHATTERBOX_MODEL_VARIANT;
@@ -314,6 +338,7 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
       ? {
           modelVariant: resolveVoiceProfileModelVariant(profile),
           generationSettings: resolveVoiceProfileGenerationSettings(profile),
+          enhancementMode: resolveVoiceProfileEnhancementMode(profile),
         }
       : {}),
     createdAt: profile.createdAt,
@@ -322,6 +347,9 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     consentVersion: profile.consentVersion,
     profileVersion: profile.profileVersion,
     ...(!legacyQwenProfile && profile.preview ? { preview: profile.preview } : {}),
+    ...(!legacyQwenProfile && profile.previewComparison
+      ? { previewComparison: profile.previewComparison }
+      : {}),
     ...(!legacyQwenProfile && profile.previewTextLanguageId
       ? { previewTextLanguageId: profile.previewTextLanguageId }
       : {}),

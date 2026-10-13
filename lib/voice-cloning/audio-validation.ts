@@ -79,7 +79,23 @@ const CHATTERBOX_CLARITY_MASTERING_FILTER = [
   `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
 ].join(',');
 
-export type GeneratedVoiceMasteringPreset = 'standard' | 'chatterbox-clarity';
+const CHATTERBOX_ENHANCED_MASTERING_FILTER = [
+  [
+    'silenceremove=start_periods=1:start_duration=0.2',
+    `start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    'stop_periods=-1:stop_duration=0.2',
+    `stop_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    `stop_silence=${VOICE_AUDIO_PROCESSING_CONFIG.generatedTrailingSilenceSeconds}`,
+  ].join(':'),
+  'highpass=f=60',
+  `loudnorm=I=${VOICE_AUDIO_PROCESSING_CONFIG.outputLoudnessTarget}:TP=${VOICE_AUDIO_PROCESSING_CONFIG.outputPeakCeiling}:LRA=11`,
+  `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
+].join(',');
+
+export type GeneratedVoiceMasteringPreset =
+  | 'standard'
+  | 'chatterbox-clarity'
+  | 'chatterbox-enhanced';
 
 export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/webm',
@@ -582,11 +598,59 @@ export async function masterGeneratedVoiceAudio(
       '-af',
       preset === 'chatterbox-clarity'
         ? CHATTERBOX_CLARITY_MASTERING_FILTER
-        : GENERATED_AUDIO_MASTERING_FILTER,
+        : preset === 'chatterbox-enhanced'
+          ? CHATTERBOX_ENHANCED_MASTERING_FILTER
+          : GENERATED_AUDIO_MASTERING_FILTER,
       outputPath,
     ]);
     await probeDuration(outputPath);
     return { audio: new Uint8Array(await fs.readFile(outputPath)), format: 'wav' };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function validateEnhancedVoiceAudio(input: {
+  originalAudio: Uint8Array;
+  originalFormat: string;
+  enhancedAudio: Uint8Array;
+  enhancedFormat: string;
+}): Promise<{ originalDurationSeconds: number; enhancedDurationSeconds: number }> {
+  if (input.enhancedAudio.byteLength < MIN_RECORDING_SIZE_BYTES) {
+    throw new Error('Enhanced voice audio is empty');
+  }
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openmaic-voice-enhanced-check-'));
+  try {
+    const originalPath = path.join(
+      tempDir,
+      `original.${extensionForMime(`audio/${input.originalFormat}`)}`,
+    );
+    const enhancedPath = path.join(
+      tempDir,
+      `enhanced.${extensionForMime(`audio/${input.enhancedFormat}`)}`,
+    );
+    await Promise.all([
+      fs.writeFile(originalPath, input.originalAudio),
+      fs.writeFile(enhancedPath, input.enhancedAudio),
+    ]);
+    const [originalDurationSeconds, enhancedDurationSeconds, clipping] = await Promise.all([
+      probeDuration(originalPath),
+      probeDuration(enhancedPath),
+      analyzeClipping(enhancedPath),
+    ]);
+    const durationRatio = enhancedDurationSeconds / originalDurationSeconds;
+    if (durationRatio < 0.8 || durationRatio > 1.2) {
+      throw new Error(
+        `Enhanced voice duration changed unexpectedly (${durationRatio.toFixed(3)}x)`,
+      );
+    }
+    if (
+      clipping.clippedSampleRatio >= VOICE_AUDIO_PROCESSING_CONFIG.clippingRejectSampleRatio ||
+      clipping.maxConsecutiveClippingMs >= VOICE_AUDIO_PROCESSING_CONFIG.clippingRejectConsecutiveMs
+    ) {
+      throw new Error('Enhanced voice audio contains sustained clipping');
+    }
+    return { originalDurationSeconds, enhancedDurationSeconds };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }

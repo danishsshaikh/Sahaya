@@ -1,0 +1,2 @@
+# Official Resemble Enhance source, pinned for reproducible deployment.
+resemble-enhance @ git+https://github.com/resemble-ai/resemble-enhance.git@8e978149bfe8abab3eb77d965d579a111afdb0ff

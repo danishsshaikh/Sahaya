@@ -39,6 +39,7 @@ import {
   type ChatterboxModelVariant,
   type PublicVoiceProfile,
   type VoiceConfiguration,
+  type VoiceEnhancementMode,
   type VoiceGenerationSettings,
   type VoicePreviewTextLanguage,
   type VoiceSettingsPreset,
@@ -187,13 +188,18 @@ function profileConfiguration(profile: PublicVoiceProfile): VoiceConfiguration {
       ? {
           modelVariant: profile.modelVariant,
           generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
+          enhancementMode: profile.enhancementMode ?? 'standard',
         }
       : {}),
   };
 }
 
 function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
-  if (left.modelVariant !== right.modelVariant || left.languageId !== right.languageId)
+  if (
+    left.modelVariant !== right.modelVariant ||
+    left.languageId !== right.languageId ||
+    (left.enhancementMode ?? 'standard') !== (right.enhancementMode ?? 'standard')
+  )
     return false;
   const a = left.generationSettings;
   const b = right.generationSettings;
@@ -202,6 +208,16 @@ function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfigur
     const typedKey = key as keyof VoiceGenerationSettings;
     return Math.abs(a[typedKey] - b[typedKey]) < 0.000001;
   });
+}
+
+function voiceSynthesisConfigurationsEqual(
+  left: VoiceConfiguration,
+  right: VoiceConfiguration,
+): boolean {
+  return voiceConfigurationsEqual(
+    { ...left, enhancementMode: 'standard' },
+    { ...right, enhancementMode: 'standard' },
+  );
 }
 
 function chooseMimeType(): string {
@@ -243,6 +259,8 @@ export function TeachingVoiceCard({
     useState<VoicePreviewTextLanguage>('en');
   const [draftGenerationSettings, setDraftGenerationSettings] =
     useState<VoiceGenerationSettings>(cloneRecommendedSettings);
+  const [draftEnhancementMode, setDraftEnhancementMode] =
+    useState<VoiceEnhancementMode>('standard');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [expertOpen, setExpertOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -275,6 +293,7 @@ export function TeachingVoiceCard({
       ? {
           modelVariant: draftModelVariant,
           generationSettings: draftGenerationSettings,
+          enhancementMode: draftEnhancementMode,
         }
       : {}),
   };
@@ -286,11 +305,24 @@ export function TeachingVoiceCard({
   const acceptedConfiguration = readyProfile ? profileConfiguration(readyProfile) : null;
   const draftMatchesAccepted =
     acceptedConfiguration && voiceConfigurationsEqual(draftConfiguration, acceptedConfiguration);
-  const selectedPreview =
-    profile?.draftPreview &&
-    voiceConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
-    (!isChatterboxProfile ||
-      (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId)
+  const selectedComparison =
+    profile?.draftPreview?.comparison &&
+    voiceSynthesisConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
+    (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId
+      ? profile.draftPreview.comparison
+      : acceptedConfiguration &&
+          voiceSynthesisConfigurationsEqual(draftConfiguration, acceptedConfiguration) &&
+          (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId
+        ? readyProfile?.previewComparison
+        : undefined;
+  const selectedPreview = selectedComparison
+    ? draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
+      ? selectedComparison.enhanced
+      : selectedComparison.original
+    : profile?.draftPreview &&
+        voiceConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
+        (!isChatterboxProfile ||
+          (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId)
       ? profile.draftPreview.preview
       : draftMatchesAccepted &&
           (!isChatterboxProfile ||
@@ -365,12 +397,14 @@ export function TeachingVoiceCard({
           setDraftGenerationSettings(
             next.draftPreview.config.generationSettings ?? cloneRecommendedSettings(),
           );
+          setDraftEnhancementMode(next.draftPreview.config.enhancementMode ?? 'standard');
         } else if (next) {
           const config = profileConfiguration(next);
           setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
           setDraftLanguageId(config.languageId);
           setPreviewTextLanguageId(next.previewTextLanguageId ?? 'en');
           setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
+          setDraftEnhancementMode(config.enhancementMode ?? 'standard');
         }
         if (next?.status === 'ready' && !selectedProfileIdRef.current) {
           onSelectedProfileIdChangeRef.current(next.id);
@@ -459,6 +493,7 @@ export function TeachingVoiceCard({
     setDraftLanguageId(config.languageId);
     setPreviewTextLanguageId(next.draftPreview?.config.previewTextLanguageId ?? 'en');
     setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
+    setDraftEnhancementMode(config.enhancementMode ?? 'standard');
   };
 
   const finishEnrollmentAttempt = (attemptId: string) => {
@@ -552,6 +587,7 @@ export function TeachingVoiceCard({
     );
     setPreviewTextLanguageId('en');
     setDraftGenerationSettings(cloneRecommendedSettings());
+    setDraftEnhancementMode('standard');
   };
 
   const renderSettingSlider = (key: keyof VoiceGenerationSettings) => {
@@ -701,6 +737,41 @@ export function TeachingVoiceCard({
           </p>
         </div>
       </div>
+
+      <fieldset className="space-y-2">
+        <legend className="text-xs font-medium text-foreground">Narration Audio</legend>
+        <div className="inline-flex rounded-md border border-border/70 p-0.5">
+          {(
+            [
+              ['standard', 'Original'],
+              ['resemble-enhance', 'Enhanced'],
+            ] as const
+          ).map(([value, label]) => {
+            const selected = draftEnhancementMode === value;
+            const unavailable =
+              value === 'resemble-enhance' && !!selectedComparison && !selectedComparison.enhanced;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={selected}
+                disabled={unavailable}
+                onClick={() => setDraftEnhancementMode(value)}
+                className={cn(
+                  'rounded px-3 py-1.5 text-xs font-medium transition-colors',
+                  selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground',
+                  unavailable && 'cursor-not-allowed opacity-50',
+                )}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {selectedComparison?.enhancementError && (
+          <p className="text-xs text-muted-foreground">{selectedComparison.enhancementError}</p>
+        )}
+      </fieldset>
 
       <div className="rounded-lg border border-border/70">
         <button
@@ -918,6 +989,7 @@ export function TeachingVoiceCard({
       setDraftLanguageId(config.languageId);
       setPreviewTextLanguageId(data.profile.previewTextLanguageId ?? 'en');
       setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
+      setDraftEnhancementMode(config.enhancementMode ?? 'standard');
       onSelectedProfileIdChange(data.profile.id);
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Could not accept preview.');
@@ -1060,6 +1132,56 @@ export function TeachingVoiceCard({
       </div>
     ) : null;
 
+  const renderVoicePreview = () => {
+    if (!selectedComparison) {
+      return selectedPreview ? (
+        <audio
+          controls
+          ref={candidateAudioRef}
+          className="w-full"
+          src={`data:audio/${selectedPreview.format};base64,${selectedPreview.base64}`}
+        />
+      ) : null;
+    }
+    return (
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="border border-border/70 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
+            <span>Original</span>
+            {draftEnhancementMode === 'standard' && <span className="text-primary">Selected</span>}
+          </div>
+          <audio
+            controls
+            ref={candidateAudioRef}
+            className="w-full"
+            aria-label="Original Chatterbox preview"
+            src={`data:audio/${selectedComparison.original.format};base64,${selectedComparison.original.base64}`}
+          />
+        </div>
+        <div className="border border-border/70 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
+            <span>Enhanced</span>
+            {draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced && (
+              <span className="text-primary">Selected</span>
+            )}
+          </div>
+          {selectedComparison.enhanced ? (
+            <audio
+              controls
+              className="w-full"
+              aria-label="Resemble Enhance preview"
+              src={`data:audio/${selectedComparison.enhanced.format};base64,${selectedComparison.enhanced.base64}`}
+            />
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {selectedComparison.enhancementError || 'Enhanced preview is not available.'}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -1166,12 +1288,7 @@ export function TeachingVoiceCard({
                   </div>
                 )}
               {selectedPreview ? (
-                <audio
-                  controls
-                  ref={candidateAudioRef}
-                  className="w-full"
-                  src={`data:audio/${selectedPreview.format};base64,${selectedPreview.base64}`}
-                />
+                renderVoicePreview()
               ) : (
                 <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
                   <Play className="size-4" />
@@ -1231,13 +1348,7 @@ export function TeachingVoiceCard({
           ) : readyProfile ? (
             <div className="space-y-3">
               {renderStepHeader('review', 'Use Voice')}
-              {selectedPreview && (
-                <audio
-                  controls
-                  className="w-full"
-                  src={`data:audio/${selectedPreview.format};base64,${selectedPreview.base64}`}
-                />
-              )}
+              {selectedPreview && renderVoicePreview()}
               {isChatterboxProfile && customizeOpen && (
                 <div className="rounded-lg border border-border/70 p-3">
                   {renderVoiceConfigurationControls()}

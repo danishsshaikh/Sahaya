@@ -1,4 +1,4 @@
-import { isVoiceCloningServerEnabled } from '@/lib/voice-cloning/config';
+import { isVoiceCloningServerEnabled, isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
   readVoiceProfile,
@@ -8,10 +8,12 @@ import {
 } from '@/lib/voice-cloning/storage';
 import { validateTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 import { masterGeneratedVoiceAudio } from '@/lib/voice-cloning/audio-validation';
+import { processChatterboxAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
 import { createLogger } from '@/lib/logger';
 import {
   isVoiceProviderProfileNotFoundError,
   resolveVoiceProfileGenerationSettings,
+  resolveVoiceProfileEnhancementMode,
   resolveVoiceProfileLanguageId,
   resolveVoiceProfileProvider,
   resolveVoiceProfileModelVariant,
@@ -232,11 +234,28 @@ export async function synthesizeFacultyVoice(input: {
     traceTeachingVoiceSynthesis('mastering-start', {
       ...metadata,
     });
-    const mastered = await masterGeneratedVoiceAudio(
-      result.audio,
-      result.format,
-      providerId === 'chatterbox' ? 'chatterbox-clarity' : 'standard',
-    );
+    let mastered: { audio: Uint8Array; format: string };
+    if (providerId === 'chatterbox') {
+      const enhancementRequested =
+        resolveVoiceProfileEnhancementMode(profile) === 'resemble-enhance';
+      const enhancementAllowed =
+        enhancementRequested && isVoiceEnhancementAllowed(language, 'classroom');
+      const variants = await processChatterboxAudioVariants(result, {
+        attemptEnhancement: enhancementRequested && enhancementAllowed,
+        context: 'classroom',
+        profileId: profile.id,
+        languageId: language,
+      });
+      mastered = variants.enhanced ?? variants.original;
+      if (enhancementRequested && !enhancementAllowed) {
+        traceTeachingVoiceSynthesis('enhancement-bypassed', {
+          ...metadata,
+          reason: 'disabled-for-classroom-or-language',
+        });
+      }
+    } else {
+      mastered = await masterGeneratedVoiceAudio(result.audio, result.format, 'standard');
+    }
     traceTeachingVoiceSynthesis('mastering-complete', {
       profileId: profile.id,
       provider: providerId,
@@ -260,7 +279,9 @@ export async function synthesizeFacultyVoice(input: {
       providerReferenceId,
       modelVariant: settings.modelVariant,
       generationSettings: settings.generationSettings,
+      enhancementMode: 'standard',
       preview: undefined,
+      previewComparison: undefined,
       previewTextLanguageId: undefined,
       previewVariants: undefined,
       draftPreview: undefined,

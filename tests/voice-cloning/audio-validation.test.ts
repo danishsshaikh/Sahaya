@@ -3,7 +3,10 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { measureWavDuration } from '@/lib/audio/audio-duration';
-import { masterGeneratedVoiceAudio } from '@/lib/voice-cloning/audio-validation';
+import {
+  masterGeneratedVoiceAudio,
+  validateEnhancedVoiceAudio,
+} from '@/lib/voice-cloning/audio-validation';
 
 const ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).error === undefined;
 
@@ -85,6 +88,40 @@ describe.skipIf(!ffmpegAvailable)('masterGeneratedVoiceAudio', () => {
     }
     expect(peak).toBeGreaterThan(0);
     expect(peak).toBeLessThan(32_767);
+  });
+
+  it('validates and converts enhanced output to Sahaya mono WAV', async () => {
+    const original = synthesizeSegmentedWav([{ seconds: 1, amplitude: 10_000 }], 24_000);
+    const enhanced = synthesizeSegmentedWav([{ seconds: 1, amplitude: 8_000 }], 44_100);
+
+    await expect(
+      validateEnhancedVoiceAudio({
+        originalAudio: original,
+        originalFormat: 'wav',
+        enhancedAudio: enhanced,
+        enhancedFormat: 'wav',
+      }),
+    ).resolves.toMatchObject({ originalDurationSeconds: 1, enhancedDurationSeconds: 1 });
+
+    const mastered = await masterGeneratedVoiceAudio(enhanced, 'wav', 'chatterbox-enhanced');
+    const wav = Buffer.from(mastered.audio);
+    expect(wav.toString('ascii', 0, 4)).toBe('RIFF');
+    expect(wav.readUInt16LE(22)).toBe(1);
+    expect(wav.readUInt32LE(24)).toBe(24_000);
+  });
+
+  it('rejects enhanced output with an unexpected duration change', async () => {
+    const original = synthesizeSegmentedWav([{ seconds: 1, amplitude: 10_000 }]);
+    const enhanced = synthesizeSegmentedWav([{ seconds: 1.5, amplitude: 8_000 }]);
+
+    await expect(
+      validateEnhancedVoiceAudio({
+        originalAudio: original,
+        originalFormat: 'wav',
+        enhancedAudio: enhanced,
+        enhancedFormat: 'wav',
+      }),
+    ).rejects.toThrow(/duration changed unexpectedly/i);
   });
 
   it('rejects an all-silent generated clip without returning corrupt audio', async () => {

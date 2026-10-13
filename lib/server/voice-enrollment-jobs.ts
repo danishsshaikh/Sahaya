@@ -29,6 +29,7 @@ import {
   normalizeVoiceEnrollmentRecording,
   type IncomingVoiceClip,
 } from '@/lib/voice-cloning/audio-validation';
+import { processChatterboxAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
   RECOMMENDED_VOICE_GENERATION_SETTINGS,
@@ -39,10 +40,14 @@ import {
   type TeachingVoiceProviderOperation,
   type VoiceConfiguration,
   type VoicePreview,
+  type VoicePreviewComparison,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { createLogger } from '@/lib/logger';
-import { getChatterboxDefaultModelVariant } from '@/lib/voice-cloning/config';
+import {
+  getChatterboxDefaultModelVariant,
+  isVoiceEnhancementAllowed,
+} from '@/lib/voice-cloning/config';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -217,7 +222,11 @@ export async function generateVariantPreview(
     attemptId?: string;
     previewTextLanguageId?: 'en' | 'hi';
   } = {},
-): Promise<{ providerReferenceId: string; preview: VoicePreview }> {
+): Promise<{
+  providerReferenceId: string;
+  preview: VoicePreview;
+  comparison?: VoicePreviewComparison;
+}> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new Error('Voice profile reference audio not found');
   }
@@ -263,11 +272,36 @@ export async function generateVariantPreview(
     format: preview.format,
   });
   options.onPhase?.('mastering');
-  const mastered = await masterGeneratedVoiceAudio(
-    preview.audio,
-    preview.format,
-    providerId === 'chatterbox' ? 'chatterbox-clarity' : 'standard',
-  );
+  let mastered: { audio: Uint8Array; format: string };
+  let comparison: VoicePreviewComparison | undefined;
+  if (providerId === 'chatterbox') {
+    const enhancementAllowed = isVoiceEnhancementAllowed(config.languageId, 'preview');
+    const variants = await processChatterboxAudioVariants(preview, {
+      attemptEnhancement: enhancementAllowed,
+      context: 'preview',
+      profileId: profile.id,
+      languageId: config.languageId,
+    });
+    const original = voicePreviewFromAudio(variants.original.audio, variants.original.format);
+    const enhanced = variants.enhanced
+      ? voicePreviewFromAudio(variants.enhanced.audio, variants.enhanced.format)
+      : undefined;
+    comparison = {
+      original,
+      ...(enhanced ? { enhanced } : {}),
+      ...(variants.enhancementError
+        ? { enhancementError: variants.enhancementError }
+        : !enhancementAllowed
+          ? { enhancementError: 'Enhanced preview is disabled for this language or deployment.' }
+          : {}),
+    };
+    mastered =
+      config.enhancementMode === 'resemble-enhance' && variants.enhanced
+        ? variants.enhanced
+        : variants.original;
+  } else {
+    mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format, 'standard');
+  }
   log.info('voice output mastering completed', {
     attemptId: options.attemptId,
     profileId: profile.id,
@@ -280,6 +314,7 @@ export async function generateVariantPreview(
   return {
     providerReferenceId,
     preview: voicePreviewFromAudio(mastered.audio, mastered.format),
+    ...(comparison ? { comparison } : {}),
   };
 }
 
@@ -426,6 +461,7 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
         ? {
             modelVariant: chatterboxModelVariant,
             generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+            enhancementMode: 'standard' as const,
           }
         : { modelVariant: undefined, generationSettings: undefined }),
       referenceText: input.referenceText,
@@ -439,6 +475,7 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       enrollmentAttemptId: input.attemptId,
       providerReferenceId: undefined,
       preview: undefined,
+      previewComparison: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
       failureReason: undefined,
@@ -478,16 +515,21 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
         ? {
             modelVariant: chatterboxModelVariant,
             generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+            enhancementMode: 'standard' as const,
           }
         : {}),
     };
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config, {
-      attemptId: input.attemptId,
-      onPhase: (phase) => {
-        currentPhase = phase;
-        updateJob(input.attemptId, { phase });
+    const { providerReferenceId, preview, comparison } = await generateVariantPreview(
+      profile,
+      config,
+      {
+        attemptId: input.attemptId,
+        onPhase: (phase) => {
+          currentPhase = phase;
+          updateJob(input.attemptId, { phase });
+        },
       },
-    });
+    );
     currentPhase = 'finalizing';
     updateJob(input.attemptId, { phase: currentPhase });
     profile = {
@@ -495,7 +537,7 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       providerReferenceId,
       status: 'preview-ready',
       updatedAt: new Date().toISOString(),
-      draftPreview: { config, preview },
+      draftPreview: { config, preview, ...(comparison ? { comparison } : {}) },
     };
     await writeVoiceProfile(profile);
 
@@ -723,7 +765,9 @@ export async function acceptVoiceProfilePreview(
     languageId: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
+    enhancementMode: config.enhancementMode ?? 'standard',
     preview: profile.draftPreview?.preview,
+    previewComparison: profile.draftPreview?.comparison,
     previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
     draftPreview: undefined,
     updatedAt: new Date().toISOString(),
@@ -752,6 +796,7 @@ export async function acceptVoiceProfilePreview(
         referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,
+        previewComparison: undefined,
         previewTextLanguageId: undefined,
         previewVariants: undefined,
         draftPreview: undefined,

@@ -12,8 +12,12 @@ const mocks = vi.hoisted(() => ({
   synthesize: vi.fn(),
   register: vi.fn(),
   resolve: vi.fn(),
+  processAudio: vi.fn(),
 }));
-vi.mock('@/lib/voice-cloning/config', () => ({ isVoiceCloningServerEnabled: () => true }));
+vi.mock('@/lib/voice-cloning/config', () => ({
+  isVoiceCloningServerEnabled: () => true,
+  isVoiceEnhancementAllowed: () => true,
+}));
 vi.mock('@/lib/voice-cloning/storage', () => ({
   readVoiceProfile: mocks.read,
   writeVoiceProfile: mocks.write,
@@ -23,6 +27,9 @@ vi.mock('@/lib/voice-cloning/storage', () => ({
 vi.mock('@/lib/voice-cloning/provider', () => ({ getVoiceCloningProvider: mocks.resolve }));
 vi.mock('@/lib/voice-cloning/audio-validation', () => ({
   masterGeneratedVoiceAudio: async (audio: Uint8Array, format: string) => ({ audio, format }),
+}));
+vi.mock('@/lib/voice-cloning/audio-enhancement', () => ({
+  processChatterboxAudioVariants: mocks.processAudio,
 }));
 
 let profile: VoiceProfile;
@@ -51,6 +58,9 @@ beforeEach(() => {
   mocks.resolve.mockReturnValue({ synthesize: mocks.synthesize, createProfile: mocks.register });
   mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
   mocks.register.mockResolvedValue({ providerReferenceId: 'vcp_example' });
+  mocks.processAudio.mockImplementation(async (raw: { audio: Uint8Array; format: string }) => ({
+    original: raw,
+  }));
 });
 
 const request = { profileId: 'vcp_example', ownerId: 'usr_example', text: 'Hello', language: 'en' };
@@ -184,6 +194,32 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ providerReferenceId: 'vcp_example' }),
     );
+  });
+
+  it('keeps standard profiles on original mastering without enhancement', async () => {
+    await synthesizeFacultyVoice(request);
+
+    expect(mocks.processAudio).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: new Uint8Array([1]) }),
+      expect.objectContaining({ attemptEnhancement: false, context: 'classroom' }),
+    );
+  });
+
+  it('selects enhanced audio when the saved profile opts in', async () => {
+    profile = { ...profile, enhancementMode: 'resemble-enhance' };
+    mocks.processAudio.mockResolvedValue({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+
+    const result = await synthesizeFacultyVoice(request);
+
+    expect(result.audio).toEqual(new Uint8Array([9]));
+    expect(mocks.processAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptEnhancement: true, languageId: 'en' }),
+    );
+    expect(mocks.synthesize).toHaveBeenCalledTimes(1);
   });
 
   it('leaves serialization to the resource queue rather than direct synthesis', async () => {

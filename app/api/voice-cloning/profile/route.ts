@@ -19,9 +19,11 @@ import {
 } from '@/lib/voice-cloning/storage';
 import {
   isChatterboxModelVariant,
+  isVoiceEnhancementMode,
   resolveVoiceProfileProvider,
   TeachingVoiceError,
   resolveVoiceProfileGenerationSettings,
+  resolveVoiceProfileEnhancementMode,
   resolveVoiceProfileLanguageId,
   resolveVoiceProfileModelVariant,
   toPublicVoiceProfile,
@@ -86,6 +88,7 @@ function resolveVoiceConfiguration(input: {
   modelVariant?: unknown;
   languageId?: unknown;
   generationSettings?: unknown;
+  enhancementMode?: unknown;
   fallbackProfile?: VoiceProfile;
 }): VoiceConfiguration {
   const profile = input.fallbackProfile;
@@ -98,7 +101,11 @@ function resolveVoiceConfiguration(input: {
     );
     if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
       getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
-      if (input.modelVariant !== undefined || input.generationSettings !== undefined) {
+      if (
+        input.modelVariant !== undefined ||
+        input.generationSettings !== undefined ||
+        input.enhancementMode !== undefined
+      ) {
         throw new TeachingVoiceError('Chatterbox settings do not apply to this Teaching Voice.');
       }
       return { languageId };
@@ -124,14 +131,35 @@ function resolveVoiceConfiguration(input: {
       ? resolveVoiceProfileGenerationSettings(profile)
       : parseGenerationSettings(input.generationSettings);
 
-  return { modelVariant, languageId, generationSettings };
+  const enhancementMode =
+    input.enhancementMode === undefined
+      ? profile
+        ? resolveVoiceProfileEnhancementMode(profile)
+        : 'standard'
+      : isVoiceEnhancementMode(input.enhancementMode)
+        ? input.enhancementMode
+        : null;
+  if (!enhancementMode) throw new Error('Unsupported voice enhancement mode');
+
+  return { modelVariant, languageId, generationSettings, enhancementMode };
 }
 
 function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
   return (
     left.modelVariant === right.modelVariant &&
     left.languageId === right.languageId &&
+    (left.enhancementMode ?? 'standard') === (right.enhancementMode ?? 'standard') &&
     JSON.stringify(left.generationSettings) === JSON.stringify(right.generationSettings)
+  );
+}
+
+function voiceSynthesisConfigurationsEqual(
+  left: VoiceConfiguration,
+  right: VoiceConfiguration,
+): boolean {
+  return voiceConfigurationsEqual(
+    { ...left, enhancementMode: 'standard' },
+    { ...right, enhancementMode: 'standard' },
   );
 }
 
@@ -211,6 +239,7 @@ export async function PATCH(req: NextRequest) {
     modelVariant?: string;
     languageId?: string;
     generationSettings?: unknown;
+    enhancementMode?: string;
     previewTextLanguageId?: string;
   };
   if (!body.profileId || !body.action) {
@@ -226,6 +255,7 @@ export async function PATCH(req: NextRequest) {
       modelVariant: body.modelVariant,
       languageId: body.languageId,
       generationSettings: body.generationSettings,
+      enhancementMode: body.enhancementMode,
       fallbackProfile: profile,
     });
   } catch (error) {
@@ -255,7 +285,7 @@ export async function PATCH(req: NextRequest) {
         error instanceof TeachingVoiceError ? error.message : 'Teaching Voice preview failed',
       );
     }
-    const { providerReferenceId, preview } = generated;
+    const { providerReferenceId, preview, comparison } = generated;
     const next = {
       ...profile,
       provider: resolveVoiceProfileProvider(profile),
@@ -265,6 +295,7 @@ export async function PATCH(req: NextRequest) {
       draftPreview: {
         config: { ...config, ...(previewTextLanguageId ? { previewTextLanguageId } : {}) },
         preview,
+        ...(comparison ? { comparison } : {}),
       },
       updatedAt: new Date().toISOString(),
     };
@@ -276,11 +307,47 @@ export async function PATCH(req: NextRequest) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
   }
 
-  const acceptedDraft = profile.draftPreview;
-  if (!acceptedDraft || !voiceConfigurationsEqual(acceptedDraft.config, config)) {
+  let profileForAcceptance = profile;
+  const draft = profile.draftPreview;
+  if (draft && voiceSynthesisConfigurationsEqual(draft.config, config) && draft.comparison) {
+    const selected =
+      config.enhancementMode === 'resemble-enhance'
+        ? draft.comparison.enhanced
+        : draft.comparison.original;
+    if (!selected) {
+      return apiError('INVALID_REQUEST', 400, 'Enhanced preview is unavailable');
+    }
+    profileForAcceptance = {
+      ...profile,
+      draftPreview: { ...draft, config: { ...draft.config, ...config }, preview: selected },
+    };
+  } else if (!draft && profile.previewComparison) {
+    const current = resolveVoiceConfiguration({ fallbackProfile: profile });
+    if (voiceSynthesisConfigurationsEqual(current, config)) {
+      const selected =
+        config.enhancementMode === 'resemble-enhance'
+          ? profile.previewComparison.enhanced
+          : profile.previewComparison.original;
+      if (!selected) {
+        return apiError('INVALID_REQUEST', 400, 'Enhanced preview is unavailable');
+      }
+      profileForAcceptance = {
+        ...profile,
+        draftPreview: {
+          config: { ...config, previewTextLanguageId: profile.previewTextLanguageId },
+          preview: selected,
+          comparison: profile.previewComparison,
+        },
+      };
+    }
+  }
+  if (
+    !profileForAcceptance.draftPreview ||
+    !voiceConfigurationsEqual(profileForAcceptance.draftPreview.config, config)
+  ) {
     return apiError('INVALID_REQUEST', 400, 'Preview must be generated before accepting');
   }
-  const next = await acceptVoiceProfilePreview(profile, config, user.id);
+  const next = await acceptVoiceProfilePreview(profileForAcceptance, config, user.id);
   return apiSuccess({ profile: toPublicVoiceProfile(next) });
 }
 
@@ -309,6 +376,7 @@ export async function DELETE(req: NextRequest) {
       referenceText: undefined,
       providerReferenceId: undefined,
       preview: undefined,
+      previewComparison: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
       updatedAt: new Date().toISOString(),

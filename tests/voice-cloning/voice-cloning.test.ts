@@ -95,6 +95,7 @@ describe('voice profile privacy', () => {
       modelVariant: 'v3',
       languageId: 'hi',
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
+      enhancementMode: 'standard',
       createdAt: '2026-08-11T00:00:00.000Z',
       updatedAt: '2026-08-11T00:00:00.000Z',
       consentTimestamp: '2026-08-11T00:00:00.000Z',
@@ -659,6 +660,8 @@ describe('voice profile model preview API', () => {
   const referenceAudioExists = vi.fn();
   const normalizeVoiceEnrollmentRecording = vi.fn();
   const masterGeneratedVoiceAudio = vi.fn();
+  const processChatterboxAudioVariants = vi.fn();
+  const isVoiceEnhancementAllowed = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
   beforeEach(async () => {
@@ -675,6 +678,8 @@ describe('voice profile model preview API', () => {
     referenceAudioExists.mockReset();
     normalizeVoiceEnrollmentRecording.mockReset();
     masterGeneratedVoiceAudio.mockReset();
+    processChatterboxAudioVariants.mockReset();
+    isVoiceEnhancementAllowed.mockReset();
     createVoiceProfileId.mockClear();
     referenceAudioExists.mockResolvedValue(true);
     createProfile.mockImplementation(async ({ profileId }) => ({ providerReferenceId: profileId }));
@@ -705,10 +710,22 @@ describe('voice profile model preview API', () => {
       audio: new Uint8Array([...audio, 9]),
       format: 'wav',
     }));
+    processChatterboxAudioVariants.mockImplementation(async (preview) => ({
+      original: await masterGeneratedVoiceAudio(
+        preview.audio,
+        preview.format,
+        'chatterbox-clarity',
+      ),
+    }));
+    isVoiceEnhancementAllowed.mockReturnValue(false);
     vi.doMock('@/lib/voice-cloning/config', () => ({
       getVoiceCloningDefaultLanguage: () => 'en',
       getChatterboxDefaultModelVariant: () => 'v3',
       isVoiceCloningServerEnabled: () => true,
+      isVoiceEnhancementAllowed,
+    }));
+    vi.doMock('@/lib/voice-cloning/audio-enhancement', () => ({
+      processChatterboxAudioVariants,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', () => ({
       isVoiceRecordingQualityError: (error: unknown) =>
@@ -863,6 +880,7 @@ describe('voice profile model preview API', () => {
       languageId: 'en',
       modelVariant: 'v3',
       generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
+      enhancementMode: 'standard',
     });
     expect(completed.profile.draftPreview.preview.base64).toBe(
       Buffer.from([1, 2, 9]).toString('base64'),
@@ -1016,6 +1034,64 @@ describe('voice profile model preview API', () => {
         }),
       }),
     );
+  });
+
+  it('persists an original-versus-enhanced preview from one Chatterbox synthesis', async () => {
+    readVoiceProfile.mockResolvedValue(readyProfile('v3'));
+    isVoiceEnhancementAllowed.mockReturnValue(true);
+    processChatterboxAudioVariants.mockResolvedValue({
+      original: { audio: new Uint8Array([3, 3]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([8, 8]), format: 'wav' },
+    });
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const previewResponse = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'preview-model',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(previewResponse.status).toBe(200);
+    expect(generatePreview).toHaveBeenCalledTimes(1);
+    expect(processChatterboxAudioVariants).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: new Uint8Array([1, 2]) }),
+      expect.objectContaining({ attemptEnhancement: true, languageId: 'en' }),
+    );
+    const draftProfile = writeVoiceProfile.mock.calls.at(-1)?.[0] as VoiceProfile;
+    expect(draftProfile.draftPreview).toMatchObject({
+      config: { enhancementMode: 'resemble-enhance' },
+      preview: { base64: Buffer.from([8, 8]).toString('base64') },
+      comparison: {
+        original: { base64: Buffer.from([3, 3]).toString('base64') },
+        enhanced: { base64: Buffer.from([8, 8]).toString('base64') },
+      },
+    });
+
+    readVoiceProfile.mockResolvedValue(draftProfile);
+    const acceptResponse = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'accept-preview',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(acceptResponse.status).toBe(200);
+    await expect(acceptResponse.json()).resolves.toMatchObject({
+      profile: {
+        enhancementMode: 'resemble-enhance',
+        preview: { base64: Buffer.from([8, 8]).toString('base64') },
+      },
+    });
+    expect(generatePreview).toHaveBeenCalledTimes(1);
   });
 
   it('rejects unsupported languages and mismatched phrase IDs clearly', async () => {
@@ -1500,6 +1576,7 @@ describe('voice profile model preview API', () => {
             languageId: 'en',
             previewTextLanguageId: 'en',
             generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
+            enhancementMode: 'standard',
           },
         }),
       }),
