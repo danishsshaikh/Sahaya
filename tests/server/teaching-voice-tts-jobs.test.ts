@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
   requireSessionUser: vi.fn(),
-  resolveProvider: vi.fn(),
+  resolveSelection: vi.fn(),
   synthesize: vi.fn(),
   enqueue: vi.fn(),
   read: vi.fn(),
@@ -19,7 +19,7 @@ vi.mock('@/lib/audio/tts-providers', async (importOriginal) => {
   return { ...actual, generateTTS: mocks.generateTTS };
 });
 vi.mock('@/lib/voice-cloning/synthesis', () => ({
-  resolveFacultyVoiceProviderId: mocks.resolveProvider,
+  resolveFacultyVoiceSelection: mocks.resolveSelection,
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 vi.mock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
@@ -71,7 +71,7 @@ describe('Teaching Voice async TTS routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireSessionUser.mockResolvedValue(user);
-    mocks.resolveProvider.mockResolvedValue('chatterbox');
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'chatterbox', synthesisLanguage: 'hi' });
     mocks.enqueue.mockReturnValue({ job: snapshot(), reused: false });
     mocks.generateTTS.mockResolvedValue({ audio: new Uint8Array([4, 5]), format: 'mp3' });
   });
@@ -91,7 +91,13 @@ describe('Teaching Voice async TTS routes', () => {
       statusUrl: `/api/generate/tts/jobs/${jobId}`,
     });
     expect(mocks.enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({ ownerId: 'faculty-a', stageId: 'stage-1', sceneId: 'scene-1' }),
+      expect.objectContaining({
+        ownerId: 'faculty-a',
+        stageId: 'stage-1',
+        sceneId: 'scene-1',
+        text: 'Narration',
+        language: 'hi',
+      }),
     );
     expect(mocks.synthesize).not.toHaveBeenCalled();
   });
@@ -107,7 +113,7 @@ describe('Teaching Voice async TTS routes', () => {
   });
 
   it('preserves synchronous behavior for Indic Teaching Voice', async () => {
-    mocks.resolveProvider.mockResolvedValue('indicf5');
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'indicf5' });
     mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
     const response = await POST(postRequest());
     expect(response.status).toBe(200);

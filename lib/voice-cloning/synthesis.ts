@@ -12,6 +12,7 @@ import { createLogger } from '@/lib/logger';
 import {
   isVoiceProviderProfileNotFoundError,
   resolveVoiceProfileGenerationSettings,
+  resolveVoiceProfileLanguageId,
   resolveVoiceProfileProvider,
   resolveVoiceProfileModelVariant,
   TeachingVoiceError,
@@ -144,10 +145,10 @@ async function synthesizeWithBusyRetry<T>(
   }
 }
 
-export async function resolveFacultyVoiceProviderId(
+export async function resolveFacultyVoiceSelection(
   profileId: string,
   ownerId: string,
-): Promise<string> {
+): Promise<{ providerId: string; synthesisLanguage?: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
   }
@@ -155,7 +156,25 @@ export async function resolveFacultyVoiceProviderId(
   if (!profile || profile.ownerId !== ownerId || profile.status === 'deleted') {
     throw new TeachingVoiceError('Voice profile not found.', 404);
   }
-  return resolveVoiceProfileProvider(profile);
+  const providerId = resolveVoiceProfileProvider(profile);
+  return {
+    providerId,
+    ...(providerId === 'chatterbox'
+      ? {
+          synthesisLanguage: validateTeachingVoiceLanguage(
+            profile,
+            resolveVoiceProfileLanguageId(profile),
+          ),
+        }
+      : {}),
+  };
+}
+
+export async function resolveFacultyVoiceProviderId(
+  profileId: string,
+  ownerId: string,
+): Promise<string> {
+  return (await resolveFacultyVoiceSelection(profileId, ownerId)).providerId;
 }
 
 export async function synthesizeFacultyVoice(input: {
@@ -178,8 +197,11 @@ export async function synthesizeFacultyVoice(input: {
   if (!(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Voice profile reference audio not found. Re-enroll this voice.');
   }
-  const language = validateTeachingVoiceLanguage(profile, input.language);
   const providerId = resolveVoiceProfileProvider(profile);
+  const language = validateTeachingVoiceLanguage(
+    profile,
+    providerId === 'chatterbox' ? resolveVoiceProfileLanguageId(profile) : input.language,
+  );
   const settings =
     providerId === 'chatterbox'
       ? {
@@ -229,7 +251,7 @@ export async function synthesizeFacultyVoice(input: {
     const { providerReferenceId } = await provider.createProfile({
       profileId: profile.id,
       referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
-      language,
+      language: profile.language,
       ...settings,
     });
     await writeVoiceProfile({
@@ -239,6 +261,7 @@ export async function synthesizeFacultyVoice(input: {
       modelVariant: settings.modelVariant,
       generationSettings: settings.generationSettings,
       preview: undefined,
+      previewTextLanguageId: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
       updatedAt: new Date().toISOString(),
@@ -258,7 +281,7 @@ export async function synthesizeFacultyVoice(input: {
     profileId: profile.id,
     referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
     ...(profile.referenceText ? { referenceText: profile.referenceText } : {}),
-    language,
+    language: profile.language,
     ...settings,
   });
   if (providerReferenceId !== profile.providerReferenceId) {

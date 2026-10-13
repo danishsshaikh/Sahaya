@@ -8,6 +8,7 @@ import {
 } from '@/lib/voice-cloning/phrases';
 import {
   newTeachingVoiceProvider,
+  resolveVoiceProfileReferenceLanguage,
   resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -214,6 +215,7 @@ export async function generateVariantPreview(
   options: {
     onPhase?: (phase: VoiceEnrollmentJobPhase) => void;
     attemptId?: string;
+    previewTextLanguageId?: 'en' | 'hi';
   } = {},
 ): Promise<{ providerReferenceId: string; preview: VoicePreview }> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
@@ -221,13 +223,17 @@ export async function generateVariantPreview(
   }
   const providerId = resolveVoiceProfileProvider(profile);
   validateTeachingVoiceLanguage(profile, config.languageId);
+  const referenceLanguage = resolveVoiceProfileReferenceLanguage(profile);
+  if (!referenceLanguage) {
+    throw new TeachingVoiceError('The voice profile reference language is unsupported.');
+  }
   const provider = getVoiceCloningProvider(providerId);
   options.onPhase?.('provider_registration');
   const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
     referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
     referenceText: profile.referenceText,
-    language: config.languageId,
+    language: referenceLanguage,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
   });
@@ -242,7 +248,7 @@ export async function generateVariantPreview(
   options.onPhase?.('preview_generation');
   const preview = await provider.generatePreview({
     providerReferenceId,
-    text: getVoicePreviewText(config.languageId, providerId),
+    text: getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
@@ -714,11 +720,11 @@ export async function acceptVoiceProfilePreview(
   const next = {
     ...profile,
     status: 'ready' as const,
-    language: config.languageId,
     languageId: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
     preview: profile.draftPreview?.preview,
+    previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
     draftPreview: undefined,
     updatedAt: new Date().toISOString(),
   };
@@ -729,8 +735,8 @@ export async function acceptVoiceProfilePreview(
     if (
       previousProfile &&
       previousProfile.ownerId === ownerId &&
-      resolveTeachingVoiceLanguage(previousProfile.languageId ?? previousProfile.language) ===
-        config.languageId &&
+      resolveVoiceProfileReferenceLanguage(previousProfile) ===
+        resolveVoiceProfileReferenceLanguage(profile) &&
       previousProfile.status !== 'deleted'
     ) {
       if (previousProfile.providerReferenceId) {
@@ -746,6 +752,7 @@ export async function acceptVoiceProfilePreview(
         referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,
+        previewTextLanguageId: undefined,
         previewVariants: undefined,
         draftPreview: undefined,
         updatedAt: new Date().toISOString(),

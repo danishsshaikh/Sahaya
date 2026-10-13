@@ -47,8 +47,15 @@ export const VOICE_SETTINGS_PRESETS: Record<
 
 export interface VoiceConfiguration {
   modelVariant?: ChatterboxModelVariant;
+  /** Chatterbox generation language. This is independent of the recorded reference language. */
   languageId: string;
   generationSettings?: VoiceGenerationSettings;
+}
+
+export type VoicePreviewTextLanguage = 'en' | 'hi';
+
+export interface VoicePreviewConfiguration extends VoiceConfiguration {
+  previewTextLanguageId?: VoicePreviewTextLanguage;
 }
 
 export interface VoicePreview {
@@ -58,7 +65,7 @@ export interface VoicePreview {
 }
 
 export interface VoiceDraftPreview {
-  config: VoiceConfiguration;
+  config: VoicePreviewConfiguration;
   preview: VoicePreview;
 }
 
@@ -72,6 +79,7 @@ export interface VoiceProfile {
   ownerId: string;
   displayName: string;
   provider: string;
+  /** Language spoken in the retained reference recording. */
   language: string;
   status: VoiceProfileStatus;
   createdAt: string;
@@ -88,6 +96,7 @@ export interface VoiceProfile {
   enrollmentAttemptId?: string;
   profileVersion: number;
   preview?: VoicePreview;
+  previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -99,6 +108,7 @@ export interface PublicVoiceProfile {
   id: string;
   displayName: string;
   provider: string;
+  /** Language spoken in the retained reference recording. */
   language: string;
   status: VoiceProfileStatus;
   createdAt: string;
@@ -110,6 +120,7 @@ export interface PublicVoiceProfile {
   generationSettings?: VoiceGenerationSettings;
   profileVersion: number;
   preview?: VoicePreview;
+  previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -311,6 +322,9 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     consentVersion: profile.consentVersion,
     profileVersion: profile.profileVersion,
     ...(!legacyQwenProfile && profile.preview ? { preview: profile.preview } : {}),
+    ...(!legacyQwenProfile && profile.previewTextLanguageId
+      ? { previewTextLanguageId: profile.previewTextLanguageId }
+      : {}),
     ...(!legacyQwenProfile && profile.previewVariants
       ? { previewVariants: profile.previewVariants }
       : {}),

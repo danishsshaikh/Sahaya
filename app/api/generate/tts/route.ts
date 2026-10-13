@@ -30,7 +30,7 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
 import {
-  resolveFacultyVoiceProviderId,
+  resolveFacultyVoiceSelection,
   synthesizeFacultyVoice,
 } from '@/lib/voice-cloning/synthesis';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
@@ -92,13 +92,16 @@ export async function POST(req: NextRequest) {
 
     if (teacherVoiceProfileId) {
       try {
-        const providerId = await resolveFacultyVoiceProviderId(teacherVoiceProfileId, user.id);
+        const { providerId, synthesisLanguage } = await resolveFacultyVoiceSelection(
+          teacherVoiceProfileId,
+          user.id,
+        );
         if (providerId === 'chatterbox') {
           const { job } = enqueueChatterboxTeachingVoiceJob({
             ownerId: user.id,
             profileId: teacherVoiceProfileId,
             text,
-            language: ttsLanguageCode,
+            language: synthesisLanguage,
             audioId,
             stageId: typeof body.stageId === 'string' ? body.stageId : undefined,
             outlineId: typeof body.outlineId === 'string' ? body.outlineId : undefined,

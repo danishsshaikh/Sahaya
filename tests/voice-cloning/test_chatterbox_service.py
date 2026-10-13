@@ -139,6 +139,12 @@ class ChatterboxServiceUnitTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= self.service.MAX_TEXT_CHUNK_CHARS for chunk in chunks))
 
+    def test_multilingual_language_ids_are_normalized_without_text_rewriting(self):
+        self.assertEqual(self.service.normalize_language_id("en-US"), "en")
+        self.assertEqual(self.service.normalize_language_id("hi_IN"), "hi")
+        with self.assertRaisesRegex(ValueError, "Unsupported language_id"):
+            self.service.normalize_language_id("mr")
+
     def test_cleanup_removes_only_hooks_added_during_generation(self):
         model = FakeModel()
         snapshot = self.service.generation_hook_snapshot(model)

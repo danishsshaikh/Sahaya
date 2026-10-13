@@ -19,21 +19,26 @@ the classroom's `languageDirective`. The session copies that ID into the stage;
 regeneration uses the stage's ID and language. There is no existing automatic
 language-aware profile re-resolution.
 
-Teaching Voice now looks up profiles by the chosen language. The existing GET
+Teaching Voice looks up profiles by their recorded reference language. The existing GET
 endpoint accepts optional `language`; no-query clients retain the previous
 latest-profile response shape. Optional `profileId` plus `language` validates a
 specific ready profile, used immediately after outline language inference.
-An ambiguous or mismatched narration language stops generation. It does not
-choose another profile. Synthesis repeats the check, including for later edits.
-An old Chatterbox caller without a language can still use the saved language;
-IndicF5 synthesis requires an explicit, resolvable target language.
+An ambiguous or mismatched IndicF5 narration language stops generation. It does
+not choose another profile. Chatterbox keeps the English reference language in
+`profile.language` and stores the faculty-selected English or Hindi synthesis
+language in `profile.languageId`. Classroom narration uses that saved Chatterbox
+selection even when the unchanged lesson text is English. IndicF5 synthesis
+continues to require an explicit target matching its Hindi or Marathi reference.
 
 The UI records an approved paragraph in the selected reference language and
 sends its versioned phrase ID and exact displayed text. The server checks both
-against the approved phrase and persists `referenceText` verbatim. Changing
-language discards the local candidate recording. The profile's reference
-language cannot be changed through preview settings. Hindi/Marathi previews
-use Devanagari. Chatterbox controls are available on English profiles.
+against the approved phrase and persists `referenceText` verbatim. Changing the
+enrollment language discards the local candidate recording. Preview settings do
+not change the reference language or require re-enrollment. An English-reference
+Chatterbox profile can preview English text with English or Hindi synthesis, and
+Hindi text with Hindi synthesis. These comparisons can affect pronunciation and
+do not guarantee a particular accent. Hindi/Marathi IndicF5 previews use
+Devanagari.
 
 Replacement targets the latest ready profile in the same language. The prior
 profile is retired only after the replacement preview is accepted, with a

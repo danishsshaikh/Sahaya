@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
   toastWarning: vi.fn(),
   serverBacked: vi.fn(),
   requireSessionUser: vi.fn(),
-  resolveFacultyVoiceProviderId: vi.fn(),
+  resolveFacultyVoiceSelection: vi.fn(),
   synthesizeFacultyVoice: vi.fn(),
 }));
 
@@ -80,7 +80,7 @@ vi.mock('@/lib/auth/server', () => ({ requireSessionUser: mocks.requireSessionUs
 vi.mock('@/lib/server/ssrf-guard', () => ({ validateUrlForSSRF: vi.fn() }));
 
 vi.mock('@/lib/voice-cloning/synthesis', () => ({
-  resolveFacultyVoiceProviderId: mocks.resolveFacultyVoiceProviderId,
+  resolveFacultyVoiceSelection: mocks.resolveFacultyVoiceSelection,
   synthesizeFacultyVoice: mocks.synthesizeFacultyVoice,
 }));
 
@@ -149,7 +149,9 @@ describe('server-backed narration storage', () => {
     mocks.requireSessionUser.mockReset().mockImplementation(async (request: Request) => ({
       id: request.headers.get('x-test-user') || 'faculty-a',
     }));
-    mocks.resolveFacultyVoiceProviderId.mockReset().mockResolvedValue('chatterbox');
+    mocks.resolveFacultyVoiceSelection
+      .mockReset()
+      .mockResolvedValue({ providerId: 'chatterbox', synthesisLanguage: 'en' });
     mocks.synthesizeFacultyVoice.mockReset();
   });
 

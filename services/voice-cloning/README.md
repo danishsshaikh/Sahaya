@@ -21,6 +21,10 @@ installed Chatterbox/Perth versions are upgraded and startup is revalidated.
 `CHATTERBOX_T3_MODEL` controls only the service default. Persisted Teaching Voice
 profiles send their selected `v2` or `v3` model variant with each trusted
 server-to-service request, so per-profile choice overrides the service default.
+The synthesis request's `language` field is normalized and passed to
+`ChatterboxMultilingualTTS.generate` as `language_id`. It is independent of the
+language spoken in the retained reference WAV; the Sahaya UI currently exposes
+English and Hindi synthesis for English-reference Chatterbox profiles.
 
 The installed `chatterbox-tts==0.1.7` package verified during development exposes
 `ChatterboxMultilingualTTS.from_pretrained(device)` and hardcodes the V2 T3

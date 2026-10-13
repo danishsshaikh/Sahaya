@@ -7,6 +7,7 @@ import {
 } from '@/lib/voice-cloning/config';
 import { requireSessionUser } from '@/lib/auth/server';
 import {
+  isChatterboxFacultySynthesisLanguage,
   resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -28,6 +29,7 @@ import {
   type ChatterboxModelVariant,
   type VoiceConfiguration,
   type VoiceGenerationSettings,
+  type VoicePreviewTextLanguage,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
@@ -133,6 +135,20 @@ function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfigur
   );
 }
 
+function parsePreviewTextLanguageId(
+  value: unknown,
+  synthesisLanguageId: string,
+): VoicePreviewTextLanguage {
+  const languageId = value === undefined ? 'en' : resolveTeachingVoiceLanguage(String(value));
+  if (!isChatterboxFacultySynthesisLanguage(languageId)) {
+    throw new TeachingVoiceError('Preview text must be English or Hindi.');
+  }
+  if (languageId === 'hi' && synthesisLanguageId !== 'hi') {
+    throw new TeachingVoiceError('Hindi preview text requires Hindi Chatterbox synthesis.');
+  }
+  return languageId;
+}
+
 export async function GET(req: NextRequest) {
   if (!isVoiceCloningServerEnabled()) return disabled();
   const user = await requireSessionUser(req);
@@ -195,6 +211,7 @@ export async function PATCH(req: NextRequest) {
     modelVariant?: string;
     languageId?: string;
     generationSettings?: unknown;
+    previewTextLanguageId?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -224,8 +241,13 @@ export async function PATCH(req: NextRequest) {
       return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready for preview');
     }
     let generated: Awaited<ReturnType<typeof generateVariantPreview>>;
+    let previewTextLanguageId: VoicePreviewTextLanguage | undefined;
     try {
-      generated = await generateVariantPreview(profile, config);
+      previewTextLanguageId =
+        resolveVoiceProfileProvider(profile) === 'chatterbox'
+          ? parsePreviewTextLanguageId(body.previewTextLanguageId, config.languageId)
+          : undefined;
+      generated = await generateVariantPreview(profile, config, { previewTextLanguageId });
     } catch (error) {
       return apiError(
         'GENERATION_FAILED',
@@ -240,7 +262,10 @@ export async function PATCH(req: NextRequest) {
       providerReferenceId,
       preview: profile.provider === 'qwen3' ? undefined : profile.preview,
       previewVariants: profile.provider === 'qwen3' ? undefined : profile.previewVariants,
-      draftPreview: { config, preview },
+      draftPreview: {
+        config: { ...config, ...(previewTextLanguageId ? { previewTextLanguageId } : {}) },
+        preview,
+      },
       updatedAt: new Date().toISOString(),
     };
     await writeVoiceProfile(next);

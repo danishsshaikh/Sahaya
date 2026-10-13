@@ -178,7 +178,7 @@ describe('explicit cloned voice TTS routing', () => {
     synthesizeFacultyVoice.mockReset();
     generateTTS.mockReset();
     vi.doMock('@/lib/voice-cloning/synthesis', () => ({
-      resolveFacultyVoiceProviderId: vi.fn(async () => 'indicf5'),
+      resolveFacultyVoiceSelection: vi.fn(async () => ({ providerId: 'indicf5' })),
       synthesizeFacultyVoice,
     }));
     vi.doMock('@/lib/audio/tts-providers', () => ({
@@ -324,7 +324,7 @@ describe('faculty voice synthesis language resolution', () => {
     }));
   });
 
-  it('rejects ambiguous narration language before contacting the provider', async () => {
+  it('uses saved Chatterbox synthesis language instead of an unrelated lesson directive', async () => {
     synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
     const { synthesizeFacultyVoice } = await import('@/lib/voice-cloning/synthesis');
 
@@ -335,8 +335,10 @@ describe('faculty voice synthesis language resolution', () => {
         text: 'Hello class',
         language: 'Use clear beginner-friendly wording throughout.',
       }),
-    ).rejects.toThrow('unambiguous narration language');
-    expect(synthesize).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ format: 'wav' });
+    expect(synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Hello class', language: 'en' }),
+    );
   });
 
   it('re-registers a persisted profile after provider restart and retries synthesis once', async () => {
@@ -486,11 +488,16 @@ describe('faculty voice setup UI contract', () => {
     expect(source).toContain('Balanced settings for clear, natural teaching narration.');
     expect(source).toContain('Adds more emphasis and energy to the delivery.');
     expect(source).toContain('Uses lower voice guidance to test whether the generated accent');
-    expect(source).toContain("The reference recording fixes this voice's language.");
+    expect(source).toContain('Choose the language Chatterbox uses to generate speech.');
+    expect(source).toContain('English text with Hindi synthesis is experimental');
+    expect(source).toContain('CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS.map');
+    expect(source).not.toContain(
+      'id="voice-language-id"\n            value={draftLanguageId}\n            disabled',
+    );
     expect(source).toContain('Voice Model');
     expect(source).toContain('Advanced Voice Settings');
     expect(source).toContain('Expert Settings');
-    expect(source).toContain('sm:grid-cols-2');
+    expect(source).toContain('md:grid-cols-3');
     expect(source).not.toContain('Chatterbox receives');
     expect(source).not.toContain('grid gap-2 sm:grid-cols-4');
   });
@@ -962,22 +969,53 @@ describe('voice profile model preview API', () => {
     },
   );
 
-  it('rejects changing a recorded profile language through preview settings', async () => {
-    readVoiceProfile.mockResolvedValue(readyProfile());
+  it('previews English and Hindi text with Hindi synthesis from one English reference', async () => {
+    readVoiceProfile.mockResolvedValue(readyProfile('v3'));
     const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
-    const response = await PATCH(
+    const englishPreview = await PATCH(
       new Request('http://localhost/api/voice-cloning/profile', {
         method: 'PATCH',
         body: JSON.stringify({
           profileId: 'vcp_ready',
           action: 'preview-model',
           languageId: 'hi',
+          previewTextLanguageId: 'en',
         }),
       }) as never,
     );
-    expect(response.status).toBe(400);
-    expect(generatePreview).not.toHaveBeenCalled();
-    expect(writeVoiceProfile).not.toHaveBeenCalled();
+    const hindiPreview = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'preview-model',
+          languageId: 'hi',
+          previewTextLanguageId: 'hi',
+        }),
+      }) as never,
+    );
+
+    expect(englishPreview.status).toBe(200);
+    expect(hindiPreview.status).toBe(200);
+    expect(createProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'en', referenceAudioKey: '/private/reference.wav' }),
+    );
+    expect(generatePreview).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ language: 'hi', text: getVoicePreviewText('en', 'chatterbox') }),
+    );
+    expect(generatePreview).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ language: 'hi', text: getVoicePreviewText('hi', 'chatterbox') }),
+    );
+    expect(writeVoiceProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        language: 'en',
+        draftPreview: expect.objectContaining({
+          config: expect.objectContaining({ languageId: 'hi', previewTextLanguageId: 'hi' }),
+        }),
+      }),
+    );
   });
 
   it('rejects unsupported languages and mismatched phrase IDs clearly', async () => {
@@ -1460,6 +1498,7 @@ describe('voice profile model preview API', () => {
           config: {
             modelVariant: 'v3',
             languageId: 'en',
+            previewTextLanguageId: 'en',
             generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
           },
         }),
@@ -1475,7 +1514,8 @@ describe('voice profile model preview API', () => {
         draftPreview: {
           config: {
             modelVariant: 'v3',
-            languageId: 'en',
+            languageId: 'hi',
+            previewTextLanguageId: 'en',
             generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
           },
           preview: { format: 'wav', base64: 'new', createdAt: '2026-08-12T00:00:00.000Z' },
@@ -1495,7 +1535,7 @@ describe('voice profile model preview API', () => {
           profileId: 'vcp_ready',
           action: 'accept-preview',
           modelVariant: 'v3',
-          languageId: 'en',
+          languageId: 'hi',
           generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         }),
       }) as never,
@@ -1504,7 +1544,9 @@ describe('voice profile model preview API', () => {
 
     expect(response.status).toBe(200);
     expect(data.profile.modelVariant).toBe('v3');
-    expect(data.profile.languageId).toBe('en');
+    expect(data.profile.language).toBe('en');
+    expect(data.profile.languageId).toBe('hi');
+    expect(data.profile.previewTextLanguageId).toBe('en');
     expect(data.profile.generationSettings).toEqual(VOICE_SETTINGS_PRESETS['accent-test']);
     expect(writeVoiceProfile).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -1521,7 +1563,8 @@ describe('voice profile model preview API', () => {
       expect.objectContaining({
         modelVariant: 'v3',
         language: 'en',
-        languageId: 'en',
+        languageId: 'hi',
+        previewTextLanguageId: 'en',
         generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
         referenceAudioKey: '/private/reference.wav',
         preview: { format: 'wav', base64: 'new', createdAt: '2026-08-12T00:00:00.000Z' },

@@ -67,7 +67,17 @@ describe('Teaching Voice language boundary', () => {
     expect(() => getVoiceCloningProvider('qwen3')).toThrow('Unsupported');
   });
 
-  it('rejects cross-language references, missing transcripts and missing target language', () => {
+  it('separates an English Chatterbox reference from English or Hindi synthesis', () => {
+    const englishReference = profile('chatterbox', 'en');
+    expect(validateTeachingVoiceLanguage(englishReference, 'en')).toBe('en');
+    expect(validateTeachingVoiceLanguage(englishReference, 'hi')).toBe('hi');
+    expect(validateTeachingVoiceLanguage({ ...englishReference, languageId: 'hi' })).toBe('hi');
+    expect(() => validateTeachingVoiceLanguage(englishReference, 'mr')).toThrow(
+      'English or Hindi synthesis',
+    );
+  });
+
+  it('keeps Indic references language-locked and validates provider requirements', () => {
     expect(() => validateTeachingVoiceLanguage(profile(), 'mr')).toThrow('does not match');
     expect(() => validateTeachingVoiceLanguage(profile('chatterbox', 'hi'), 'hi')).toThrow(
       'English',
@@ -136,7 +146,7 @@ describe('isolated Teaching Voice adapters', () => {
     });
   });
 
-  it('sends only target narration text to Chatterbox synthesis', async () => {
+  it('sends English text unchanged with an explicit Hindi Chatterbox language id', async () => {
     vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://voice.local');
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(new Uint8Array([1]), {
@@ -148,14 +158,14 @@ describe('isolated Teaching Voice adapters', () => {
     await new ChatterboxVoiceCloningProvider().synthesize({
       providerReferenceId: 'vcp_class_tail',
       text: 'Today we are going to understand neural networks.',
-      language: 'en',
+      language: 'hi',
       modelVariant: 'v3',
     });
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
       profileId: 'vcp_class_tail',
       text: 'Today we are going to understand neural networks.',
-      language: 'en',
+      language: 'hi',
       modelVariant: 'v3',
     });
   });

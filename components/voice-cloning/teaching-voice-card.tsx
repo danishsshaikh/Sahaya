@@ -18,10 +18,13 @@ import { cn } from '@/lib/utils';
 import {
   CHATTERBOX_LANGUAGE_LABELS,
   CHATTERBOX_SUPPORTED_LANGUAGE_IDS,
-  isTTSLanguageCode,
 } from '@/lib/audio/tts-language';
 import { getVoiceEnrollmentPhrases } from '@/lib/voice-cloning/phrases';
-import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import {
+  CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS,
+  isChatterboxFacultySynthesisLanguage,
+  resolveTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import {
   MIN_RECORDING_SIZE_BYTES,
   VOICE_ENROLLMENT_TARGET_SECONDS,
@@ -37,6 +40,7 @@ import {
   type PublicVoiceProfile,
   type VoiceConfiguration,
   type VoiceGenerationSettings,
+  type VoicePreviewTextLanguage,
   type VoiceSettingsPreset,
 } from '@/lib/voice-cloning/types';
 import { readVoiceApiResponse, voiceFetchError } from '@/lib/voice-cloning/api-client';
@@ -235,6 +239,8 @@ export function TeachingVoiceCard({
     DEFAULT_CHATTERBOX_MODEL_VARIANT,
   );
   const [draftLanguageId, setDraftLanguageId] = useState('en');
+  const [previewTextLanguageId, setPreviewTextLanguageId] =
+    useState<VoicePreviewTextLanguage>('en');
   const [draftGenerationSettings, setDraftGenerationSettings] =
     useState<VoiceGenerationSettings>(cloneRecommendedSettings);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -282,9 +288,13 @@ export function TeachingVoiceCard({
     acceptedConfiguration && voiceConfigurationsEqual(draftConfiguration, acceptedConfiguration);
   const selectedPreview =
     profile?.draftPreview &&
-    voiceConfigurationsEqual(profile.draftPreview.config, draftConfiguration)
+    voiceConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
+    (!isChatterboxProfile ||
+      (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId)
       ? profile.draftPreview.preview
-      : draftMatchesAccepted
+      : draftMatchesAccepted &&
+          (!isChatterboxProfile ||
+            (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId)
         ? readyProfile?.preview
         : undefined;
   const recordingReady = Boolean(recording.blob);
@@ -351,6 +361,7 @@ export function TeachingVoiceCard({
             next.draftPreview.config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT,
           );
           setDraftLanguageId(next.draftPreview.config.languageId);
+          setPreviewTextLanguageId(next.draftPreview.config.previewTextLanguageId ?? 'en');
           setDraftGenerationSettings(
             next.draftPreview.config.generationSettings ?? cloneRecommendedSettings(),
           );
@@ -358,6 +369,7 @@ export function TeachingVoiceCard({
           const config = profileConfiguration(next);
           setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
           setDraftLanguageId(config.languageId);
+          setPreviewTextLanguageId(next.previewTextLanguageId ?? 'en');
           setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
         }
         if (next?.status === 'ready' && !selectedProfileIdRef.current) {
@@ -445,6 +457,7 @@ export function TeachingVoiceCard({
     const config = next.draftPreview?.config ?? profileConfiguration(next);
     setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
     setDraftLanguageId(config.languageId);
+    setPreviewTextLanguageId(next.draftPreview?.config.previewTextLanguageId ?? 'en');
     setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
   };
 
@@ -533,10 +546,11 @@ export function TeachingVoiceCard({
   const resetRecommendedDraft = () => {
     setDraftModelVariant(DEFAULT_CHATTERBOX_MODEL_VARIANT);
     setDraftLanguageId(
-      isTTSLanguageCode(acceptedConfiguration?.languageId)
+      isChatterboxFacultySynthesisLanguage(acceptedConfiguration?.languageId)
         ? acceptedConfiguration.languageId
         : draftLanguageId,
     );
+    setPreviewTextLanguageId('en');
     setDraftGenerationSettings(cloneRecommendedSettings());
   };
 
@@ -616,7 +630,7 @@ export function TeachingVoiceCard({
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-3">
         <div className="space-y-2">
           <label htmlFor="voice-language-id" className="text-xs font-medium text-foreground">
             Language
@@ -624,18 +638,23 @@ export function TeachingVoiceCard({
           <select
             id="voice-language-id"
             value={draftLanguageId}
-            disabled
+            onChange={(event) => {
+              const languageId = event.target.value;
+              if (!isChatterboxFacultySynthesisLanguage(languageId)) return;
+              setDraftLanguageId(languageId);
+              if (languageId === 'en') setPreviewTextLanguageId('en');
+            }}
             className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
           >
-            {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.map((languageId) => (
+            {CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS.map((languageId) => (
               <option key={languageId} value={languageId}>
                 {CHATTERBOX_LANGUAGE_LABELS[languageId]}
               </option>
             ))}
           </select>
           <p className="text-xs leading-snug text-muted-foreground">
-            {"The reference recording fixes this voice's language."} Record another voice to change
-            it.
+            Choose the language Chatterbox uses to generate speech. You can try both with the same
+            recording; pronunciation and accent may vary.
           </p>
         </div>
 
@@ -655,6 +674,31 @@ export function TeachingVoiceCard({
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="space-y-2">
+          <label
+            htmlFor="voice-preview-text-language"
+            className="text-xs font-medium text-foreground"
+          >
+            Preview Text
+          </label>
+          <select
+            id="voice-preview-text-language"
+            value={previewTextLanguageId}
+            onChange={(event) =>
+              setPreviewTextLanguageId(event.target.value as VoicePreviewTextLanguage)
+            }
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
+          >
+            <option value="en">English sample</option>
+            <option value="hi" disabled={draftLanguageId !== 'hi'}>
+              Hindi sample
+            </option>
+          </select>
+          <p className="text-xs leading-snug text-muted-foreground">
+            English text with Hindi synthesis is experimental and may pronounce words differently.
+          </p>
         </div>
       </div>
 
@@ -872,6 +916,7 @@ export function TeachingVoiceCard({
       const config = profileConfiguration(data.profile);
       setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
       setDraftLanguageId(config.languageId);
+      setPreviewTextLanguageId(data.profile.previewTextLanguageId ?? 'en');
       setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
       onSelectedProfileIdChange(data.profile.id);
     } catch (err) {
@@ -897,6 +942,7 @@ export function TeachingVoiceCard({
           profileId: profile.id,
           action: 'preview-model',
           ...draftConfiguration,
+          previewTextLanguageId,
         }),
       });
       const data = await readVoiceApiResponse<ApiProfileResponse>(response);

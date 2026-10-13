@@ -123,14 +123,32 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('chatterbox');
   });
 
-  it('rejects language mismatch and absent transcript before service access', async () => {
-    await expect(synthesizeFacultyVoice({ ...request, language: 'hi' })).rejects.toThrow(
+  it('rejects Indic language mismatch and absent transcript before service access', async () => {
+    profile = { ...profile, provider: 'indicf5', language: 'hi', languageId: 'hi' };
+    await expect(synthesizeFacultyVoice({ ...request, language: 'mr' })).rejects.toThrow(
       'does not match',
     );
     profile = { ...profile, provider: 'indicf5', language: 'hi', referenceText: undefined };
     await expect(synthesizeFacultyVoice({ ...request, language: 'hi' })).rejects.toThrow(
       'transcript',
     );
+    expect(mocks.resolve).not.toHaveBeenCalled();
+  });
+
+  it('uses saved Hindi Chatterbox synthesis for unchanged English lesson text', async () => {
+    profile = { ...profile, language: 'en', languageId: 'hi', modelVariant: 'v3' };
+
+    await synthesizeFacultyVoice({ ...request, text: 'Welcome to class.', language: 'en' });
+
+    expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'Welcome to class.', language: 'hi', modelVariant: 'v3' }),
+    );
+  });
+
+  it('rejects unsupported saved Chatterbox synthesis without rerouting providers', async () => {
+    profile = { ...profile, language: 'en', languageId: 'mr', modelVariant: 'v3' };
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toThrow('English or Hindi synthesis');
     expect(mocks.resolve).not.toHaveBeenCalled();
   });
 
