@@ -3,6 +3,9 @@ import { getResourceJobQueue, type ResourceJobSnapshot } from '@/lib/server/reso
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 
 export const CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:chatterbox';
+export const INDICF5_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:indicf5';
+
+export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5';
 
 export interface TeachingVoiceJobResult {
   audio: Uint8Array;
@@ -20,12 +23,19 @@ export interface TeachingVoiceJobInput {
   sceneId?: string;
 }
 
-export function createTeachingVoiceIdempotencyKey(input: TeachingVoiceJobInput): string {
+export interface QueuedTeachingVoiceJobInput extends TeachingVoiceJobInput {
+  providerId: QueuedTeachingVoiceProvider;
+}
+
+export function createTeachingVoiceIdempotencyKey(
+  input: TeachingVoiceJobInput & { providerId?: QueuedTeachingVoiceProvider },
+): string {
   const textHash = createHash('sha256').update(input.text).digest('hex');
   return createHash('sha256')
     .update(
       JSON.stringify({
         ownerId: input.ownerId,
+        providerId: input.providerId ?? 'chatterbox',
         profileId: input.profileId,
         audioId: input.audioId,
         stageId: input.stageId ?? null,
@@ -38,17 +48,23 @@ export function createTeachingVoiceIdempotencyKey(input: TeachingVoiceJobInput):
     .digest('hex');
 }
 
-export function enqueueChatterboxTeachingVoiceJob(input: TeachingVoiceJobInput): {
+function resourceKeyForProvider(providerId: QueuedTeachingVoiceProvider): string {
+  return providerId === 'indicf5'
+    ? INDICF5_TEACHING_VOICE_RESOURCE_KEY
+    : CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY;
+}
+
+export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
   job: ResourceJobSnapshot;
   reused: boolean;
 } {
   return getResourceJobQueue().enqueue<TeachingVoiceJobResult>({
-    resourceKey: CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY,
+    resourceKey: resourceKeyForProvider(input.providerId),
     concurrency: 1,
     ownerId: input.ownerId,
     idempotencyKey: createTeachingVoiceIdempotencyKey(input),
     metadata: {
-      provider: 'chatterbox',
+      provider: input.providerId,
       profileId: input.profileId,
       stageId: input.stageId,
       outlineId: input.outlineId,
@@ -63,6 +79,13 @@ export function enqueueChatterboxTeachingVoiceJob(input: TeachingVoiceJobInput):
         queueJobId: jobId,
       }),
   });
+}
+
+export function enqueueChatterboxTeachingVoiceJob(input: TeachingVoiceJobInput): {
+  job: ResourceJobSnapshot;
+  reused: boolean;
+} {
+  return enqueueTeachingVoiceJob({ ...input, providerId: 'chatterbox' });
 }
 
 export function readTeachingVoiceJob(jobId: string, ownerId: string): ResourceJobSnapshot | null {

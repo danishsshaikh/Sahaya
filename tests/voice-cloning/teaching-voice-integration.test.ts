@@ -7,6 +7,7 @@ import { normalizeIndicTeachingText } from '@/lib/voice-cloning/indic-text-norma
 import { getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
 import {
   newTeachingVoiceProvider,
+  normalizeTeachingVoiceLanguageId,
   resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -52,6 +53,13 @@ describe('Teaching Voice language boundary', () => {
     ['Unspecified', null],
   ])('resolves %s without silently defaulting to English', (input, expected) => {
     expect(resolveTeachingVoiceLanguage(input)).toBe(expected);
+  });
+
+  it('keeps prose directives out of normalized API language identifiers', () => {
+    expect(normalizeTeachingVoiceLanguageId('hi-IN')).toBe('hi');
+    expect(normalizeTeachingVoiceLanguageId('mr')).toBe('mr');
+    expect(normalizeTeachingVoiceLanguageId('Deliver the entire course in Hindi')).toBeNull();
+    expect(normalizeTeachingVoiceLanguageId('English and Hindi')).toBeNull();
   });
 
   it('routes new enrollments while retaining absent legacy provider metadata', () => {

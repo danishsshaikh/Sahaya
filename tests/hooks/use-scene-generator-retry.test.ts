@@ -511,14 +511,24 @@ describe('browser scene generation retry wrappers', () => {
       stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready' },
     });
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
-    mockFetch.mockResolvedValue(
-      jsonResponse(200, {
-        success: true,
-        teachingVoiceProvider: 'indicf5',
-        base64: btoa('audio-data'),
-        format: 'wav',
-      }),
-    );
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'indicf5',
+          jobId: 'rq_completed_indicf5_language_test',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_completed_indicf5_language_test',
+          audioUrl: '/api/generate/tts/jobs/rq_completed_indicf5_language_test/audio',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new TextEncoder().encode('audio-data'), {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
 
     await generateAndStoreTTS(
       'tts_s2_action_1',

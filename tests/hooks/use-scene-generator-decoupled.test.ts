@@ -662,7 +662,7 @@ describe('scene generator visual and narration pipelines', () => {
     expect(statusChecks).toBe(4);
   });
 
-  it('publishes the first completed speech clip before the second clip finishes', async () => {
+  it('publishes the first completed IndicF5 clip before the second clip finishes', async () => {
     const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
     committedScene.actions = [
       { id: 'speech-1', type: 'speech', text: 'First narration' },
@@ -685,7 +685,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'chatterbox',
+              teachingVoiceProvider: 'indicf5',
               jobId: 'rq_first_clip_ready_immediately',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_first_clip_ready_immediately',
@@ -717,7 +717,7 @@ describe('scene generator visual and narration pipelines', () => {
     await vi.waitFor(() => expect(mocks.stageState.saveToStorage).toHaveBeenCalled());
   });
 
-  it('reuses completed clips while recovering only missing narration', async () => {
+  it('reuses completed IndicF5 clips while recovering only missing narration', async () => {
     const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
     committedScene.actions = [
       { id: 'speech-ready', type: 'speech', text: 'Already ready', audioId: 'ast_existing' },
@@ -740,7 +740,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'chatterbox',
+              teachingVoiceProvider: 'indicf5',
               jobId: 'rq_missing_only',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_missing_only',

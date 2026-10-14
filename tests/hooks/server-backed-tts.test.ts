@@ -207,26 +207,50 @@ describe('server-backed narration storage', () => {
     mocks.poolPut.mockResolvedValueOnce('ast_first').mockResolvedValueOnce('ast_second');
     let active = 0;
     let maxActive = 0;
-    mockFetch.mockImplementation(async (_url, init) => {
+    const postBodies: Array<Record<string, unknown>> = [];
+    const audioByUrl = new Map<string, string>();
+    mockFetch.mockImplementation(async (rawUrl, init) => {
       maxActive = Math.max(maxActive, ++active);
       await Promise.resolve();
       active--;
+      const url = String(rawUrl);
+      if (url.startsWith('/api/generate/tts/jobs/')) {
+        const text = audioByUrl.get(url);
+        if (!text) throw new Error(`Unexpected audio URL: ${url}`);
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'content-type': 'audio/wav' }),
+          arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+        };
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      postBodies.push(body);
+      const jobId = `rq_${postBodies.length}`;
+      const audioUrl = `/api/generate/tts/jobs/${jobId}/audio`;
+      audioByUrl.set(audioUrl, String(body.text));
       return {
-        ...ttsResponse(),
+        ok: true,
+        status: 200,
+        statusText: 'OK',
         json: async () => ({
           success: true,
+          async: true,
           teachingVoiceProvider: 'indicf5',
-          format: 'wav',
-          base64: btoa(JSON.parse(init.body).text),
+          jobId,
+          status: 'completed',
+          statusUrl: `/api/generate/tts/jobs/${jobId}`,
+          audioUrl,
         }),
       };
     });
     try {
       await expect(generateTTSForScene(scene, 'English')).resolves.toMatchObject({ success: true });
       expect(maxActive).toBe(1);
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(4);
       for (let index = 0; index < texts.length; index++) {
-        expect(JSON.parse(mockFetch.mock.calls[index][1].body)).toMatchObject({
+        expect(postBodies[index]).toMatchObject({
           text: texts[index],
           teacherVoiceProfileId: 'vcp_test',
           ttsLanguageCode: 'en',
@@ -248,7 +272,7 @@ describe('server-backed narration storage', () => {
     }
   });
 
-  it('polls an asynchronous Teaching Voice job and stores its completed audio', async () => {
+  it('polls an asynchronous IndicF5 job and stores its completed audio', async () => {
     vi.useFakeTimers();
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
     const { useStageStore } = await import('@/lib/store/stage');
@@ -267,7 +291,7 @@ describe('server-backed narration storage', () => {
         json: async () => ({
           success: true,
           async: true,
-          teachingVoiceProvider: 'chatterbox',
+          teachingVoiceProvider: 'indicf5',
           jobId: 'rq_test',
           status: 'queued',
           queuePosition: 2,
@@ -314,7 +338,7 @@ describe('server-backed narration storage', () => {
       const pending = generateAndStoreTTS(
         'tts_s1_action-1',
         'Queued narration',
-        'English',
+        'Deliver the entire course in Hindi.',
         undefined,
         undefined,
         undefined,
@@ -334,6 +358,58 @@ describe('server-backed narration storage', () => {
       ]);
       expect(queueStates).toEqual(['queued', 'running', null]);
       expect(await (mocks.poolPut.mock.calls[0][0] as Blob).text()).toBe('queued-audio');
+      expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
+        ttsLanguageCode: 'hi',
+      });
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
+  it('surfaces a terminal IndicF5 job failure instead of polling forever', async () => {
+    vi.useFakeTimers();
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 202,
+        statusText: 'Accepted',
+        json: async () => ({
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'indicf5',
+          jobId: 'rq_failed',
+          status: 'queued',
+          statusUrl: '/api/generate/tts/jobs/rq_failed',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          success: true,
+          async: true,
+          jobId: 'rq_failed',
+          status: 'failed',
+          error: 'IndicF5 synthesis deadline exceeded.',
+        }),
+      });
+
+    try {
+      const pending = generateAndStoreTTS('tts_failed', 'Narration', 'hi');
+      const rejection = expect(pending).rejects.toThrow('IndicF5 synthesis deadline exceeded.');
+      await vi.advanceTimersByTimeAsync(1500);
+      await rejection;
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mocks.poolPut).not.toHaveBeenCalled();
     } finally {
       useStageStore.setState({ stage: previousStage });
     }
@@ -496,7 +572,7 @@ describe('server-backed narration storage', () => {
     }
   });
 
-  it('rejects a synchronous Chatterbox response instead of accepting legacy audio JSON', async () => {
+  it('rejects a synchronous Teaching Voice response instead of accepting legacy audio JSON', async () => {
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
     const { useStageStore } = await import('@/lib/store/stage');
     const previousStage = useStageStore.getState().stage;
@@ -517,7 +593,7 @@ describe('server-backed narration storage', () => {
 
     try {
       await expect(generateAndStoreTTS('tts_chatterbox_legacy', 'Narration')).rejects.toThrow(
-        'Chatterbox Teaching Voice must use the asynchronous synthesis job API.',
+        'Teaching Voice must use the asynchronous synthesis job API.',
       );
       expect(mocks.poolPut).not.toHaveBeenCalled();
     } finally {

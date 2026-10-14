@@ -8,8 +8,8 @@ import {
 } from '@/lib/voice-cloning/phrases';
 import {
   newTeachingVoiceProvider,
+  normalizeTeachingVoiceLanguageId,
   resolveVoiceProfileReferenceLanguage,
-  resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
 import {
@@ -683,8 +683,12 @@ export async function parseVoiceEnrollmentForm(
       ? String(formData.get('displayName')).trim().slice(0, 80)
       : '';
   const languageValue = formData.get('languageId') ?? formData.get('language');
-  const languageId =
-    resolveTeachingVoiceLanguage(typeof languageValue === 'string' ? languageValue : null) || '';
+  const languageId = normalizeTeachingVoiceLanguageId(
+    typeof languageValue === 'string' ? languageValue : null,
+  );
+  if (!languageId) {
+    throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
+  }
   const providerId = newTeachingVoiceProvider(languageId);
   const phrase = getVoiceEnrollmentPhrases(languageId).find(
     (item) => item.id === formData.get('phraseId'),

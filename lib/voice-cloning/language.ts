@@ -17,11 +17,21 @@ export function isChatterboxFacultySynthesisLanguage(
   return value === 'en' || value === 'hi';
 }
 
-export function resolveTeachingVoiceLanguage(value?: string | null): string | null {
+/** Normalize an API language identifier without interpreting prose instructions. */
+export function normalizeTeachingVoiceLanguageId(
+  value?: string | null,
+): TeachingVoiceLanguage | null {
   const input = value?.trim().toLowerCase();
   if (!input) return null;
   const direct = /^(en|hi|mr)(?:[-_][a-z0-9]+)*$/.exec(input);
-  if (direct) return direct[1];
+  return (direct?.[1] as TeachingVoiceLanguage | undefined) ?? null;
+}
+
+export function resolveTeachingVoiceLanguage(value?: string | null): string | null {
+  const input = value?.trim().toLowerCase();
+  if (!input) return null;
+  const direct = normalizeTeachingVoiceLanguageId(input);
+  if (direct) return direct;
   const matches = [
     ['en', new RegExp('(?<![\\p{L}\\p{M}\\p{N}_])english(?![\\p{L}\\p{M}\\p{N}_])', 'u')],
     [

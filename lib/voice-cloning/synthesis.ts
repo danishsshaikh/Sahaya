@@ -24,7 +24,8 @@ import {
 const log = createLogger('VoiceCloningSynthesis');
 
 const DEFAULT_BUSY_RETRY_BASE_MS = 3000;
-const DEFAULT_BUSY_RETRY_MAX_RETRIES = 4;
+const DEFAULT_BUSY_RETRY_MAX_RETRIES = 20;
+const DEFAULT_BUSY_RETRY_MAX_WAIT_MS = 5 * 60 * 1000;
 const MAX_BUSY_RETRY_DELAY_MS = 30000;
 
 function traceTeachingVoiceSynthesis(event: string, extra: Record<string, unknown>) {
@@ -49,6 +50,10 @@ function busyRetryConfig() {
     maxRetries: parsePositiveInteger(
       process.env.TEACHING_VOICE_BUSY_MAX_RETRIES,
       DEFAULT_BUSY_RETRY_MAX_RETRIES,
+    ),
+    maxWaitMs: parsePositiveInteger(
+      process.env.TEACHING_VOICE_BUSY_MAX_WAIT_MS,
+      DEFAULT_BUSY_RETRY_MAX_WAIT_MS,
     ),
   };
 }
@@ -82,7 +87,8 @@ async function synthesizeWithBusyRetry<T>(
   metadata: Record<string, unknown>,
   operation: (attempt: number) => Promise<T>,
 ): Promise<T> {
-  const { maxRetries } = busyRetryConfig();
+  const { maxRetries, maxWaitMs } = busyRetryConfig();
+  const startedAt = Date.now();
   let attempt = 1;
 
   while (true) {
@@ -101,12 +107,19 @@ async function synthesizeWithBusyRetry<T>(
       return result;
     } catch (error) {
       const durationMs = Date.now() - attemptStartedAt;
-      if (isProviderBusyError(error) && attempt <= maxRetries) {
-        const retryDelayMs = busyRetryDelayMs(attempt);
+      const retryDelayMs = busyRetryDelayMs(attempt);
+      const busyWaitElapsedMs = Date.now() - startedAt;
+      if (
+        isProviderBusyError(error) &&
+        attempt <= maxRetries &&
+        busyWaitElapsedMs + retryDelayMs <= maxWaitMs
+      ) {
         traceTeachingVoiceSynthesis('provider-busy', {
           attempt,
           durationMs,
           retryDelayMs,
+          busyWaitElapsedMs,
+          maxBusyWaitMs: maxWaitMs,
           ...metadata,
         });
         if (metadata.queueJobId) {
@@ -140,6 +153,8 @@ async function synthesizeWithBusyRetry<T>(
         attempt,
         durationMs,
         busyRetryExhausted: isProviderBusyError(error),
+        busyWaitElapsedMs: Date.now() - startedAt,
+        maxBusyWaitMs: maxWaitMs,
         ...metadata,
       });
       throw error;
@@ -150,6 +165,7 @@ async function synthesizeWithBusyRetry<T>(
 export async function resolveFacultyVoiceSelection(
   profileId: string,
   ownerId: string,
+  requestedLanguage?: string,
 ): Promise<{ providerId: string; synthesisLanguage?: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
@@ -159,16 +175,15 @@ export async function resolveFacultyVoiceSelection(
     throw new TeachingVoiceError('Voice profile not found.', 404);
   }
   const providerId = resolveVoiceProfileProvider(profile);
+  const synthesisLanguage = validateTeachingVoiceLanguage(
+    profile,
+    providerId === 'chatterbox'
+      ? resolveVoiceProfileLanguageId(profile)
+      : (requestedLanguage ?? resolveVoiceProfileLanguageId(profile)),
+  );
   return {
     providerId,
-    ...(providerId === 'chatterbox'
-      ? {
-          synthesisLanguage: validateTeachingVoiceLanguage(
-            profile,
-            resolveVoiceProfileLanguageId(profile),
-          ),
-        }
-      : {}),
+    synthesisLanguage,
   };
 }
 

@@ -189,6 +189,29 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
   });
 
+  it('recovers an IndicF5 synthesis after a transient provider-busy response', async () => {
+    profile = { ...profile, provider: 'indicf5', language: 'hi', languageId: 'hi' };
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    mocks.synthesize
+      .mockRejectedValueOnce(busyError())
+      .mockResolvedValueOnce({ audio: new Uint8Array([1]), format: 'wav' });
+
+    await expect(synthesizeFacultyVoice({ ...request, language: 'hi' })).resolves.toMatchObject({
+      format: 'wav',
+    });
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds provider-busy retries by elapsed wait time', async () => {
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '20');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_WAIT_MS', '2');
+    mocks.synthesize.mockRejectedValue(busyError());
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 429 });
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+  });
+
   it('does not duplicate a successful Chatterbox synthesis request', async () => {
     await synthesizeFacultyVoice(request);
     expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith(

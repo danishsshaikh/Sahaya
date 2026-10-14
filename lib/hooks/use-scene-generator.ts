@@ -571,8 +571,8 @@ async function resolveTeachingVoiceJob(
     throw new Error('Teaching Voice response is missing provider metadata.');
   }
   if (!initial.async || !initial.jobId || !initial.statusUrl) {
-    if (initial.teachingVoiceProvider === 'chatterbox') {
-      throw new Error('Chatterbox Teaching Voice must use the asynchronous synthesis job API.');
+    if (initial.teachingVoiceProvider) {
+      throw new Error('Teaching Voice must use the asynchronous synthesis job API.');
     }
     return initial;
   }
@@ -696,7 +696,7 @@ export async function generateAndStoreTTS(
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
   const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
-    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage)
+    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? undefined)
     : undefined;
   // A generated roster's explicit voice binding is the course voice source of truth.
   // Global settings remain the fallback for classrooms without a binding.

@@ -8,6 +8,7 @@ import {
 import { requireSessionUser } from '@/lib/auth/server';
 import {
   isChatterboxFacultySynthesisLanguage,
+  normalizeTeachingVoiceLanguageId,
   resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -184,7 +185,7 @@ export async function GET(req: NextRequest) {
   try {
     const params = req.nextUrl.searchParams;
     const requested = params.get('language');
-    const language = requested === null ? undefined : resolveTeachingVoiceLanguage(requested);
+    const language = requested === null ? undefined : normalizeTeachingVoiceLanguageId(requested);
     if (language === null)
       return apiError('INVALID_REQUEST', 400, 'Unsupported or ambiguous voice language');
     const profileId = params.get('profileId');

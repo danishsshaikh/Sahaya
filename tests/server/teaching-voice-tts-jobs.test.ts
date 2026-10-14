@@ -23,7 +23,7 @@ vi.mock('@/lib/voice-cloning/synthesis', () => ({
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 vi.mock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-  enqueueChatterboxTeachingVoiceJob: mocks.enqueue,
+  enqueueTeachingVoiceJob: mocks.enqueue,
   readTeachingVoiceJob: mocks.read,
   readTeachingVoiceJobResult: mocks.result,
   cancelTeachingVoiceJob: mocks.cancel,
@@ -37,7 +37,7 @@ import { GET as getAudio } from '@/app/api/generate/tts/jobs/[jobId]/audio/route
 const jobId = 'rq_abcdefghijklmnopqrstuvwxyz';
 const user = { id: 'faculty-a' };
 
-function postRequest() {
+function postRequest(language = 'en') {
   return new NextRequest('http://localhost/api/generate/tts', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -45,7 +45,7 @@ function postRequest() {
       text: 'Narration',
       audioId: 'tts_s1_action-1',
       teacherVoiceProfileId: 'vcp_faculty',
-      ttsLanguageCode: 'en',
+      ttsLanguageCode: language,
       stageId: 'stage-1',
       sceneId: 'scene-1',
     }),
@@ -112,18 +112,32 @@ describe('Teaching Voice async TTS routes', () => {
     });
   });
 
-  it('preserves synchronous behavior for Indic Teaching Voice', async () => {
-    mocks.resolveSelection.mockResolvedValue({ providerId: 'indicf5' });
-    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
-    const response = await POST(postRequest());
-    expect(response.status).toBe(200);
+  it('admits Indic Teaching Voice to its recoverable queue', async () => {
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'indicf5', synthesisLanguage: 'hi' });
+    mocks.enqueue.mockReturnValue({
+      job: { ...snapshot(), resourceKey: 'teaching-voice:indicf5' },
+      reused: false,
+    });
+    const response = await POST(postRequest('hi'));
+    expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
-      format: 'wav',
+      async: true,
+      status: 'queued',
       teachingVoiceProvider: 'indicf5',
     });
+    expect(mocks.resolveSelection).toHaveBeenCalledWith('vcp_faculty', 'faculty-a', 'hi');
+    expect(mocks.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'indicf5', language: 'hi' }),
+    );
+    expect(mocks.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('rejects prose in the Teaching Voice language transport', async () => {
+    const response = await POST(postRequest('Deliver the entire course in Hindi'));
+    expect(response.status).toBe(400);
+    expect(mocks.resolveSelection).not.toHaveBeenCalled();
     expect(mocks.enqueue).not.toHaveBeenCalled();
-    expect(mocks.synthesize).toHaveBeenCalledTimes(1);
   });
 
   it('does not send Standard Voice through the Chatterbox resource queue', async () => {

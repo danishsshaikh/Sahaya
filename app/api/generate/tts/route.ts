@@ -1,8 +1,8 @@
 /**
  * Single TTS Generation API
  *
- * Generates TTS audio for a single text string. Qwen Teaching Voice returns an
- * asynchronous job; other providers retain their existing audio response.
+ * Generates TTS audio for a single text string. Local Teaching Voice providers
+ * return recoverable asynchronous jobs; standard providers return audio directly.
  *
  * POST /api/generate/tts
  */
@@ -29,12 +29,10 @@ import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
-import {
-  resolveFacultyVoiceSelection,
-  synthesizeFacultyVoice,
-} from '@/lib/voice-cloning/synthesis';
+import { resolveFacultyVoiceSelection } from '@/lib/voice-cloning/synthesis';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
-import { enqueueChatterboxTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import { enqueueTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import { normalizeTeachingVoiceLanguageId } from '@/lib/voice-cloning/language';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
 import { isQwenCloneVoice } from '@/lib/audio/constants';
@@ -92,12 +90,23 @@ export async function POST(req: NextRequest) {
 
     if (teacherVoiceProfileId) {
       try {
+        const requestedLanguage = ttsLanguageCode
+          ? normalizeTeachingVoiceLanguageId(ttsLanguageCode)
+          : undefined;
+        if (ttsLanguageCode && !requestedLanguage) {
+          throw new TeachingVoiceError(
+            'Teaching Voice narration requires a normalized language identifier.',
+            400,
+          );
+        }
         const { providerId, synthesisLanguage } = await resolveFacultyVoiceSelection(
           teacherVoiceProfileId,
           user.id,
+          requestedLanguage ?? undefined,
         );
-        if (providerId === 'chatterbox') {
-          const { job } = enqueueChatterboxTeachingVoiceJob({
+        if (providerId === 'chatterbox' || providerId === 'indicf5') {
+          const { job } = enqueueTeachingVoiceJob({
+            providerId,
             ownerId: user.id,
             profileId: teacherVoiceProfileId,
             text,
@@ -126,14 +135,7 @@ export async function POST(req: NextRequest) {
             job.status === 'completed' ? 200 : 202,
           );
         }
-        const { audio, format } = await synthesizeFacultyVoice({
-          profileId: teacherVoiceProfileId,
-          ownerId: user.id,
-          text,
-          language: ttsLanguageCode,
-        });
-        const base64 = Buffer.from(audio).toString('base64');
-        return apiSuccess({ audioId, base64, format, teachingVoiceProvider: providerId });
+        throw new TeachingVoiceError('Unsupported Teaching Voice provider.');
       } catch (error) {
         const message =
           error instanceof TeachingVoiceError

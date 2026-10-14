@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFeatureFlagBoolean } from '@/lib/config/feature-flags';
 import {
@@ -173,14 +174,32 @@ describe('voice profile privacy', () => {
 describe('explicit cloned voice TTS routing', () => {
   const synthesizeFacultyVoice = vi.fn();
   const generateTTS = vi.fn();
+  const enqueueTeachingVoiceJob = vi.fn();
 
   beforeEach(async () => {
     vi.resetModules();
     synthesizeFacultyVoice.mockReset();
     generateTTS.mockReset();
+    enqueueTeachingVoiceJob.mockReset().mockReturnValue({
+      job: {
+        id: 'rq_indicf5_test_job_123456789',
+        status: 'queued',
+        queuePosition: 1,
+        jobsAhead: 0,
+        queueDepth: 1,
+        estimatedWaitMs: null,
+      },
+      reused: false,
+    });
     vi.doMock('@/lib/voice-cloning/synthesis', () => ({
-      resolveFacultyVoiceSelection: vi.fn(async () => ({ providerId: 'indicf5' })),
+      resolveFacultyVoiceSelection: vi.fn(async () => ({
+        providerId: 'indicf5',
+        synthesisLanguage: 'hi',
+      })),
       synthesizeFacultyVoice,
+    }));
+    vi.doMock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
+      enqueueTeachingVoiceJob,
     }));
     vi.doMock('@/lib/audio/tts-providers', () => ({
       generateTTS,
@@ -222,10 +241,6 @@ describe('explicit cloned voice TTS routing', () => {
   }
 
   it('routes explicit faculty voice requests to the clone provider before default TTS guards', async () => {
-    synthesizeFacultyVoice.mockResolvedValue({
-      audio: new Uint8Array([1, 2, 3]),
-      format: 'wav',
-    });
     const { POST } = await import('@/app/api/generate/tts/route');
 
     const response = await POST(
@@ -233,19 +248,33 @@ describe('explicit cloned voice TTS routing', () => {
     );
     const data = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(data).toMatchObject({ success: true, audioId: 'audio-1', format: 'wav' });
-    expect(synthesizeFacultyVoice).toHaveBeenCalledWith({
-      profileId: 'vcp_ready',
+    expect(response.status).toBe(202);
+    expect(data).toMatchObject({
+      success: true,
+      async: true,
+      audioId: 'audio-1',
+      teachingVoiceProvider: 'indicf5',
+      status: 'queued',
+    });
+    expect(enqueueTeachingVoiceJob).toHaveBeenCalledWith({
+      providerId: 'indicf5',
       ownerId: 'usr_faculty_a',
+      profileId: 'vcp_ready',
       text: 'Hello class',
       language: 'hi',
+      audioId: 'audio-1',
+      stageId: undefined,
+      outlineId: undefined,
+      sceneId: undefined,
     });
+    expect(synthesizeFacultyVoice).not.toHaveBeenCalled();
     expect(generateTTS).not.toHaveBeenCalled();
   });
 
-  it('does not silently fall back when explicit faculty voice synthesis fails', async () => {
-    synthesizeFacultyVoice.mockRejectedValue(new Error('voice service unavailable'));
+  it('does not silently fall back when Teaching Voice queue admission fails', async () => {
+    enqueueTeachingVoiceJob.mockImplementation(() => {
+      throw new Error('voice queue unavailable');
+    });
     const { POST } = await import('@/app/api/generate/tts/route');
 
     const response = await POST(request({ teacherVoiceProfileId: 'vcp_ready' }) as never);
@@ -1036,6 +1065,18 @@ describe('voice profile model preview API', () => {
     );
   });
 
+  it('rejects lesson instructions in the profile language query', async () => {
+    const { GET } = await import('@/app/api/voice-cloning/profile/route');
+    const response = await GET(
+      new NextRequest(
+        'http://localhost/api/voice-cloning/profile?language=Deliver+the+entire+course+in+Hindi',
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
+  });
+
   it('persists an original-versus-enhanced preview from one Chatterbox synthesis', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));
     isVoiceEnhancementAllowed.mockReturnValue(true);
@@ -1107,6 +1148,16 @@ describe('voice profile model preview API', () => {
       }) as never,
     );
     expect(languageResponse.status).toBe(400);
+
+    const proseLanguage = enrollmentForm();
+    proseLanguage.set('languageId', 'Deliver the entire course in Hindi');
+    const proseLanguageResponse = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: proseLanguage,
+      }) as never,
+    );
+    expect(proseLanguageResponse.status).toBe(400);
 
     const malformedSettings = enrollmentForm();
     malformedSettings.set('phraseId', 'unknown-phrase');
