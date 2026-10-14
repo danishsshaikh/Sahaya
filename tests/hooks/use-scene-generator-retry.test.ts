@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import {
+  normalizeGenerationPreviewLanguageState,
+  validateGenerationPreviewVoiceSelection,
+} from '@/app/generation-preview/voice-language';
+import type { GenerationSessionState } from '@/app/generation-preview/types';
 import type { SceneOutline } from '@/lib/types/generation';
 
 const mocks = vi.hoisted(() => ({
@@ -544,6 +549,120 @@ describe('browser scene generation retry wrappers', () => {
       ttsLanguageCode: 'hi',
     });
     expect(body.language).toBeUndefined();
+  });
+
+  it('takes the exact Hindi Force preview through Scene 1 and IndicF5 queue admission', async () => {
+    const outlines: SceneOutline[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `force-outline-${index + 1}`,
+      type: index === 2 ? 'quiz' : 'slide',
+      title: `Force ${index + 1}`,
+      description: 'Force lesson scene.',
+      keyPoints: ['Force'],
+      order: index + 1,
+    }));
+    const previewSession = normalizeGenerationPreviewLanguageState({
+      sessionId: 'force-hindi-session',
+      requirements: {
+        requirement:
+          'Generate a short 4-slide lesson on Force in Hindi, including 2 explanation slides, 1 quiz, and 1 summary slide. Use simple Hindi throughout.',
+      },
+      pdfText: '',
+      sceneOutlines: outlines,
+      currentStep: 'generating',
+      previewPhase: 'generating-content',
+      teacherVoiceProfileId: 'vcp_force_hindi',
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    } satisfies GenerationSessionState);
+    const profileFetch = vi.fn(async () =>
+      jsonResponse(200, {
+        profile: {
+          id: 'vcp_force_hindi',
+          status: 'ready',
+          provider: 'indicf5',
+          language: 'hi',
+          languageId: 'hi',
+        },
+      }),
+    );
+
+    const profile = await validateGenerationPreviewVoiceSelection(
+      previewSession,
+      profileFetch as typeof fetch,
+    );
+    mocks.stageState.mockReturnValue({
+      stage: {
+        id: 'stage-force-hindi',
+        teacherVoiceProfileId: previewSession.teacherVoiceProfileId,
+        lessonLanguage: previewSession.lessonLanguage,
+      },
+    });
+    const { fetchSceneContent, generateAndStoreTTS } =
+      await import('@/lib/hooks/use-scene-generator');
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          content: { elements: [] },
+          attemptId: 'attempt-force-scene-1',
+          generationVersion: 'version-force-1',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(202, {
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'indicf5',
+          jobId: 'rq_force_hindi_scene_1',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_force_hindi_scene_1',
+          audioUrl: '/api/generate/tts/jobs/rq_force_hindi_scene_1/audio',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new TextEncoder().encode('force-hindi-audio'), {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
+
+    const scene = await fetchSceneContent(
+      {
+        outline: outlines[0],
+        allOutlines: outlines,
+        stageId: 'stage-force-hindi',
+        stageInfo: { name: 'Force in Hindi' },
+        languageDirective: previewSession.languageDirective,
+        requirements: previewSession.requirements,
+      },
+      undefined,
+      retryOptions,
+    );
+    const audioId = await generateAndStoreTTS(
+      'tts_force_hindi_scene_1',
+      'बल किसी वस्तु की गति को बदल सकता है।',
+      previewSession.languageDirective,
+      undefined,
+      retryOptions,
+      undefined,
+      'stage-force-hindi',
+      undefined,
+      0,
+      'scene-force-hindi-1',
+      undefined,
+      outlines[0].id,
+    );
+
+    expect(previewSession.lessonLanguage).toBe('hi');
+    expect(profile).toMatchObject({ provider: 'indicf5', language: 'hi' });
+    expect(scene).toMatchObject({ success: true, attemptId: 'attempt-force-scene-1' });
+    expect(audioId).toBe('tts_force_hindi_scene_1');
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/generate/scene-content');
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toMatchObject({
+      teacherVoiceProfileId: 'vcp_force_hindi',
+      ttsLanguageCode: 'hi',
+      stageId: 'stage-force-hindi',
+      outlineId: 'force-outline-1',
+    });
   });
 
   it('keeps scene content requests independent from selected faculty voice profiles', async () => {
