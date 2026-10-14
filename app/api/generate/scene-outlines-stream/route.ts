@@ -6,10 +6,11 @@
  * so the frontend can display them incrementally.
  *
  * SSE events:
- *   { type: 'languageDirective', data: string }
+ *   { type: 'languageDirective', data: string, lessonLanguage?: 'en' | 'hi' | 'mr' }
  *   { type: 'courseTitle', data: string }
  *   { type: 'outline', data: SceneOutline, index: number }
- *   { type: 'done', outlines: SceneOutline[], languageDirective: string, courseTitle?: string }
+ *   { type: 'done', outlines: SceneOutline[], languageDirective: string,
+ *     lessonLanguage?: 'en' | 'hi' | 'mr', courseTitle?: string }
  *   { type: 'error', error: string }
  */
 
@@ -41,6 +42,7 @@ import { sortDocumentImagesForVision } from '@/lib/document/bundle';
 import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
 import { applySahayaOutlineFeatureFallbacks } from '@/lib/generation/outline-generator';
+import { resolveLessonTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 const log = createLogger('Outlines Stream');
 
 export const maxDuration = 300;
@@ -570,6 +572,8 @@ export async function POST(req: NextRequest) {
                     const ldEvent = JSON.stringify({
                       type: 'languageDirective',
                       data: languageDirective,
+                      lessonLanguage:
+                        resolveLessonTeachingVoiceLanguage(languageDirective) || undefined,
                     });
                     controller.enqueue(encoder.encode(`data: ${ldEvent}\n\n`));
                   }
@@ -692,10 +696,13 @@ export async function POST(req: NextRequest) {
               status: 'completed',
             });
             // Send done event with all outlines
+            const finalLanguageDirective = languageDirective || DEFAULT_LANGUAGE_DIRECTIVE;
             const doneEvent = JSON.stringify({
               type: 'done',
               outlines: uniquifiedOutlines,
-              languageDirective: languageDirective || DEFAULT_LANGUAGE_DIRECTIVE,
+              languageDirective: finalLanguageDirective,
+              lessonLanguage:
+                resolveLessonTeachingVoiceLanguage(finalLanguageDirective) || undefined,
               courseTitle: courseTitle || undefined,
               taskEngineMode,
             });

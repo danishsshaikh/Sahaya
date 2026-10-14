@@ -16,7 +16,10 @@ import type { AgentInfo } from '@openmaic/generation';
 import type { Scene } from '@/lib/types/stage';
 import type { Action, SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
-import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import {
+  normalizeTeachingVoiceLanguageId,
+  resolveTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { resolveAgentVoiceOptions, pickNarratorAgent } from '@/lib/audio/agent-voice';
@@ -693,8 +696,10 @@ export async function generateAndStoreTTS(
   traceContext?: NarrationTraceContext,
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
-  const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
-  const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
+  const stage = useStageStore.getState().stage;
+  const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
+  const lessonLanguage = normalizeTeachingVoiceLanguageId(stage?.lessonLanguage);
+  const narrationLanguage = lessonLanguage || language || stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
     ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? undefined)
     : undefined;

@@ -1077,6 +1077,33 @@ describe('voice profile model preview API', () => {
     expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
   });
 
+  it.each(['hi', 'mr'] as const)(
+    'resolves an existing %s IndicF5 profile from a normalized preview lookup',
+    async (language) => {
+      readVoiceProfile.mockResolvedValue({
+        ...readyProfile(),
+        provider: 'indicf5',
+        language,
+        languageId: language,
+        referenceText: getVoiceEnrollmentPhrases(language)[0].text,
+      });
+      const { GET } = await import('@/app/api/voice-cloning/profile/route');
+      const response = await GET(
+        new NextRequest(
+          `http://localhost/api/voice-cloning/profile?profileId=vcp_ready&language=${language}`,
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        success: true,
+        profile: { id: 'vcp_ready', provider: 'indicf5', language },
+      });
+      expect(readVoiceProfile).toHaveBeenCalledWith('vcp_ready', 'local-faculty');
+      expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
+    },
+  );
+
   it('persists an original-versus-enhanced preview from one Chatterbox synthesis', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));
     isVoiceEnhancementAllowed.mockReturnValue(true);

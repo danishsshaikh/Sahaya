@@ -506,9 +506,9 @@ describe('browser scene generation retry wrappers', () => {
     );
   });
 
-  it('sends a canonical cloned-voice language code instead of raw language directives', async () => {
+  it('uses the structured lesson language instead of an ambiguous narration directive', async () => {
     mocks.stageState.mockReturnValue({
-      stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready' },
+      stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready', lessonLanguage: 'hi' },
     });
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
     mockFetch
@@ -533,7 +533,7 @@ describe('browser scene generation retry wrappers', () => {
     await generateAndStoreTTS(
       'tts_s2_action_1',
       'Hello class',
-      'Deliver the entire course in English. Use clear wording.',
+      'Teach in Hindi while retaining technical terms in English.',
       undefined,
       retryOptions,
     );
@@ -541,7 +541,7 @@ describe('browser scene generation retry wrappers', () => {
     const body = JSON.parse(String(mockFetch.mock.calls[0][1]?.body));
     expect(body).toMatchObject({
       teacherVoiceProfileId: 'vcp_ready',
-      ttsLanguageCode: 'en',
+      ttsLanguageCode: 'hi',
     });
     expect(body.language).toBeUndefined();
   });

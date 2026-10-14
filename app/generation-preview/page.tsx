@@ -31,6 +31,12 @@ import {
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
+import { GenerationTeachingVoiceProfileError } from '@/lib/voice-cloning/selection-client';
+import {
+  normalizeTeachingVoiceLanguageId,
+  resolveLessonTeachingVoiceLanguage,
+  type TeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
   fetchSceneActions,
@@ -88,6 +94,10 @@ import {
 } from './types';
 import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
+import {
+  normalizeGenerationPreviewLanguageState,
+  validateGenerationPreviewVoiceSelection,
+} from './voice-language';
 import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
 import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
 
@@ -689,6 +699,7 @@ function GenerationPreviewContent() {
       // ── Generate outlines first (infers languageDirective) ──
       let outlines = currentSession.sceneOutlines;
       let languageDirective = currentSession.languageDirective;
+      let lessonLanguage = normalizeTeachingVoiceLanguageId(currentSession.lessonLanguage);
       let courseTitle = currentSession.courseTitle;
 
       const outlineStepIdx = activeSteps.findIndex((s) => s.id === 'outline');
@@ -708,11 +719,13 @@ function GenerationPreviewContent() {
         const outlineResult = await new Promise<{
           outlines: SceneOutline[];
           languageDirective: string;
+          lessonLanguage?: TeachingVoiceLanguage;
           courseTitle?: string;
           taskEngineMode: boolean;
         }>((resolve, reject) => {
           const collected: SceneOutline[] = [];
           let directive: string | undefined;
+          let structuredLanguage: TeachingVoiceLanguage | null = null;
           let title: string | undefined;
 
           fetch('/api/generate/scene-outlines-stream', {
@@ -758,6 +771,7 @@ function GenerationPreviewContent() {
                         const evt = JSON.parse(line.slice(6));
                         if (evt.type === 'languageDirective') {
                           directive = evt.data;
+                          structuredLanguage = normalizeTeachingVoiceLanguageId(evt.lessonLanguage);
                         } else if (evt.type === 'courseTitle') {
                           title = evt.data;
                         } else if (evt.type === 'outline') {
@@ -770,16 +784,22 @@ function GenerationPreviewContent() {
                           // succeeding attempt that omits them must fall back, not
                           // inherit the previous attempt's stale values.
                           directive = undefined;
+                          structuredLanguage = null;
                           title = undefined;
                           setStreamingOutlines([]);
                           setStatusMessage(t('generation.outlineRetrying'));
                         } else if (evt.type === 'done') {
                           directive = evt.languageDirective || directive;
+                          structuredLanguage =
+                            normalizeTeachingVoiceLanguageId(evt.lessonLanguage) ||
+                            structuredLanguage ||
+                            resolveLessonTeachingVoiceLanguage(directive);
                           resolve({
                             outlines: evt.outlines || collected,
                             languageDirective:
                               directive ||
                               'Teach in the language that matches the user requirement.',
+                            lessonLanguage: structuredLanguage || undefined,
                             courseTitle: evt.courseTitle || title,
                             taskEngineMode: resolveTaskEngineModeFromOutlineDoneEvent(evt),
                           });
@@ -799,6 +819,10 @@ function GenerationPreviewContent() {
                         outlines: collected,
                         languageDirective:
                           directive || 'Teach in the language that matches the user requirement.',
+                        lessonLanguage:
+                          structuredLanguage ||
+                          resolveLessonTeachingVoiceLanguage(directive) ||
+                          undefined,
                         // Carry any title latched from a streaming `courseTitle`
                         // event here too — symmetric with languageDirective — so
                         // a stream that ends without an explicit `done` event
@@ -821,6 +845,7 @@ function GenerationPreviewContent() {
 
         outlines = outlineResult.outlines;
         languageDirective = outlineResult.languageDirective;
+        lessonLanguage = outlineResult.lessonLanguage || null;
         courseTitle = outlineResult.courseTitle;
         const effectiveTaskEngineMode = outlineResult.taskEngineMode;
         setIsOutlineStreaming(false);
@@ -841,6 +866,7 @@ function GenerationPreviewContent() {
           ...currentSession,
           sceneOutlines: outlines,
           languageDirective,
+          lessonLanguage: lessonLanguage || undefined,
           courseTitle,
           taskEngineMode: effectiveTaskEngineMode,
           previewPhase: shouldReviewOutlines ? 'review' : 'outline-ready',
@@ -879,23 +905,28 @@ function GenerationPreviewContent() {
       }
       stage.taskEngineMode = currentSession.taskEngineMode === true;
 
+      // Older preview sessions predate the structured field. Resolve once from
+      // the retained directive, then persist it separately for refresh/re-entry.
+      const normalizedLanguageSession = normalizeGenerationPreviewLanguageState(
+        currentSession,
+        languageDirective,
+      );
+      if (normalizedLanguageSession !== currentSession) {
+        currentSession = normalizedLanguageSession;
+        persistSession(currentSession);
+      }
+      lessonLanguage = currentSession.lessonLanguage || null;
+
       // Store languageDirective on the stage
       if (languageDirective) {
         stage.languageDirective = languageDirective;
       }
+      if (lessonLanguage) {
+        stage.lessonLanguage = lessonLanguage;
+      }
       // Voice selection precedes language inference. Verify before generating media.
       if (stage.teacherVoiceProfileId) {
-        const query = new URLSearchParams({
-          profileId: stage.teacherVoiceProfileId,
-          language: languageDirective || '',
-        });
-        const response = await fetch(`/api/voice-cloning/profile?${query}`);
-        const result = await response.json();
-        if (!response.ok || !result.profile) {
-          throw new Error(
-            result.error || 'Select a Teaching Voice matching the narration language.',
-          );
-        }
+        await validateGenerationPreviewVoiceSelection(currentSession);
       }
 
       // Adopt the LLM-inferred course title as the stage name when available,
@@ -1283,7 +1314,9 @@ function GenerationPreviewContent() {
         log.info('[GenerationPreview] Generation aborted');
         return;
       }
-      sessionStorage.removeItem('generationSession');
+      if (!(err instanceof GenerationTeachingVoiceProfileError)) {
+        sessionStorage.removeItem('generationSession');
+      }
       setError(err instanceof Error ? err.message : String(err));
     }
   };

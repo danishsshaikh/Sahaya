@@ -80,7 +80,7 @@ describe('scene-outlines-stream route — standard branch prompt parity on a dro
         imageMapping: { img_1: 'ast_ok', img_2: 'ast_gone' },
       }),
     );
-    await readStreamBody(response);
+    const streamBody = await readStreamBody(response);
 
     // The standard branch ran with a vision-enabled model, so the LLM call is
     // multimodal and its text half is the standard prompt's user text.
@@ -102,6 +102,19 @@ describe('scene-outlines-stream route — standard branch prompt parity on a dro
     const imageParts = content.filter((part) => part.type === 'image');
     expect(imageParts).toHaveLength(1);
     expect(imageParts[0]?.image).toBe(Buffer.from('outline-bytes-img_1').toString('base64'));
+
+    const events = streamBody
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)));
+    expect(events.find((event) => event.type === 'languageDirective')).toMatchObject({
+      data: 'Teach in English.',
+      lessonLanguage: 'en',
+    });
+    expect(events.find((event) => event.type === 'done')).toMatchObject({
+      languageDirective: 'Teach in English.',
+      lessonLanguage: 'en',
+    });
   });
 });
 

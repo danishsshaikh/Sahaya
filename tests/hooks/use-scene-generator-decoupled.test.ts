@@ -74,7 +74,10 @@ vi.mock('@/lib/audio/unavailable-voice-bindings', () => ({
   markVoiceBindingUnavailable: vi.fn(),
   voiceBindingKey: () => 'voice',
 }));
-vi.mock('@/lib/voice-cloning/language', () => ({ resolveTeachingVoiceLanguage: () => 'en' }));
+vi.mock('@/lib/voice-cloning/language', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/voice-cloning/language')>()),
+  resolveTeachingVoiceLanguage: () => 'en',
+}));
 vi.mock('@/lib/audio/audio-duration', () => ({ measureAudioDuration: () => undefined }));
 vi.mock('@/lib/i18n', () => ({ getClientTranslation: (key: string) => key }));
 vi.mock('@/lib/logger', () => ({

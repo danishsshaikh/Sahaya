@@ -45,6 +45,13 @@ export function resolveTeachingVoiceLanguage(value?: string | null): string | nu
   return languages[0]?.[0] ?? tryResolveTTSLanguageCode(input);
 }
 
+/** Resolve a lesson directive to the normalized language IDs supported by Teaching Voice. */
+export function resolveLessonTeachingVoiceLanguage(
+  value?: string | null,
+): TeachingVoiceLanguage | null {
+  return normalizeTeachingVoiceLanguageId(resolveTeachingVoiceLanguage(value));
+}
+
 export function newTeachingVoiceProvider(language: string): 'chatterbox' | 'indicf5' {
   if (language === 'en') return 'chatterbox';
   if (language === 'hi' || language === 'mr') return 'indicf5';
