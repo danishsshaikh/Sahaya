@@ -116,6 +116,49 @@ describe('scene-outlines-stream route — standard branch prompt parity on a dro
       lessonLanguage: 'en',
     });
   });
+
+  test('emits Hindi from the explicit requirement when the completed directive is generic', async () => {
+    vi.resetModules();
+    resolveVisionImagesMock.mockResolvedValue([]);
+    streamLLMMock.mockReturnValue({
+      textStream: (async function* () {
+        yield JSON.stringify({
+          languageDirective: 'Teach in the language that matches the user requirement.',
+          outlines: Array.from({ length: 4 }, (_, index) => ({
+            id: `scene_${index + 1}`,
+            type: index === 2 ? 'quiz' : 'slide',
+            title: `Force ${index + 1}`,
+            description: 'Force lesson scene.',
+            keyPoints: ['Force'],
+            order: index + 1,
+          })),
+        });
+      })(),
+    });
+
+    const { POST } = await import('@/app/api/generate/scene-outlines-stream/route');
+    const response = await POST(
+      mockRequest({
+        pdfImages: [],
+        imageMapping: {},
+        requirement:
+          'Generate a short 4-slide lesson on Force in Hindi, including 2 explanation slides, 1 quiz, and 1 summary slide. Use simple Hindi throughout.',
+      }),
+    );
+    const events = (await readStreamBody(response))
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)));
+
+    expect(events.filter((event) => event.type === 'outline')).toHaveLength(4);
+    expect(events.find((event) => event.type === 'languageDirective')).toMatchObject({
+      lessonLanguage: 'hi',
+    });
+    expect(events.find((event) => event.type === 'done')).toMatchObject({
+      lessonLanguage: 'hi',
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    });
+  });
 });
 
 function readStreamBody(response: Response): Promise<string> {
@@ -134,10 +177,11 @@ function readStreamBody(response: Response): Promise<string> {
 function mockRequest(body: {
   pdfImages: Array<Pick<PdfImage, 'id' | 'src' | 'pageNumber' | 'width' | 'height'>>;
   imageMapping: ImageMapping;
+  requirement?: string;
 }) {
   return {
     json: async () => ({
-      requirements: { requirement: 'Teach a safety checklist course.' },
+      requirements: { requirement: body.requirement || 'Teach a safety checklist course.' },
       pdfText: 'Inspect the device before calibration.',
       pdfImages: body.pdfImages,
       imageMapping: body.imageMapping,

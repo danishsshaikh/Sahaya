@@ -34,7 +34,6 @@ import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
 import { GenerationTeachingVoiceProfileError } from '@/lib/voice-cloning/selection-client';
 import {
   normalizeTeachingVoiceLanguageId,
-  resolveLessonTeachingVoiceLanguage,
   type TeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
 import { useI18n } from '@/lib/hooks/use-i18n';
@@ -96,6 +95,7 @@ import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
 import {
   normalizeGenerationPreviewLanguageState,
+  resolveGenerationPreviewLanguage,
   validateGenerationPreviewVoiceSelection,
 } from './voice-language';
 import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
@@ -310,7 +310,7 @@ function GenerationPreviewContent() {
     const saved = sessionStorage.getItem('generationSession');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as GenerationSessionState;
+        let parsed = JSON.parse(saved) as GenerationSessionState;
         if (!parsed.previewPhase) {
           parsed.previewPhase = parsed.sceneOutlines?.length ? 'outline-ready' : 'preparing';
         }
@@ -321,6 +321,8 @@ function GenerationPreviewContent() {
           outlineReviewIntentRef.current = true;
         }
         parsed.taskEngineMode = parsed.taskEngineMode === true;
+        parsed = normalizeGenerationPreviewLanguageState(parsed);
+        sessionStorage.setItem('generationSession', JSON.stringify(parsed));
         sessionRef.current = parsed;
         setSession(parsed);
       } catch (e) {
@@ -725,7 +727,7 @@ function GenerationPreviewContent() {
         }>((resolve, reject) => {
           const collected: SceneOutline[] = [];
           let directive: string | undefined;
-          let structuredLanguage: TeachingVoiceLanguage | null = null;
+          let sseLanguage: string | null = null;
           let title: string | undefined;
 
           fetch('/api/generate/scene-outlines-stream', {
@@ -771,7 +773,19 @@ function GenerationPreviewContent() {
                         const evt = JSON.parse(line.slice(6));
                         if (evt.type === 'languageDirective') {
                           directive = evt.data;
-                          structuredLanguage = normalizeTeachingVoiceLanguageId(evt.lessonLanguage);
+                          sseLanguage =
+                            typeof evt.lessonLanguage === 'string' ? evt.lessonLanguage : null;
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-languageDirective',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                         } else if (evt.type === 'courseTitle') {
                           title = evt.data;
                         } else if (evt.type === 'outline') {
@@ -784,22 +798,32 @@ function GenerationPreviewContent() {
                           // succeeding attempt that omits them must fall back, not
                           // inherit the previous attempt's stale values.
                           directive = undefined;
-                          structuredLanguage = null;
+                          sseLanguage = null;
                           title = undefined;
                           setStreamingOutlines([]);
                           setStatusMessage(t('generation.outlineRetrying'));
                         } else if (evt.type === 'done') {
                           directive = evt.languageDirective || directive;
-                          structuredLanguage =
-                            normalizeTeachingVoiceLanguageId(evt.lessonLanguage) ||
-                            structuredLanguage ||
-                            resolveLessonTeachingVoiceLanguage(directive);
+                          if (typeof evt.lessonLanguage === 'string') {
+                            sseLanguage = evt.lessonLanguage;
+                          }
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-done',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                           resolve({
                             outlines: evt.outlines || collected,
                             languageDirective:
                               directive ||
                               'Teach in the language that matches the user requirement.',
-                            lessonLanguage: structuredLanguage || undefined,
+                            lessonLanguage: resolution.language || undefined,
                             courseTitle: evt.courseTitle || title,
                             taskEngineMode: resolveTaskEngineModeFromOutlineDoneEvent(evt),
                           });
@@ -815,14 +839,15 @@ function GenerationPreviewContent() {
                   }
                   if (done) {
                     if (collected.length > 0) {
+                      const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                        sseLanguage,
+                        languageDirective: directive,
+                      });
                       resolve({
                         outlines: collected,
                         languageDirective:
                           directive || 'Teach in the language that matches the user requirement.',
-                        lessonLanguage:
-                          structuredLanguage ||
-                          resolveLessonTeachingVoiceLanguage(directive) ||
-                          undefined,
+                        lessonLanguage: resolution.language || undefined,
                         // Carry any title latched from a streaming `courseTitle`
                         // event here too — symmetric with languageDirective — so
                         // a stream that ends without an explicit `done` event
@@ -926,7 +951,36 @@ function GenerationPreviewContent() {
       }
       // Voice selection precedes language inference. Verify before generating media.
       if (stage.teacherVoiceProfileId) {
-        await validateGenerationPreviewVoiceSelection(currentSession);
+        const languageResolution = resolveGenerationPreviewLanguage(currentSession, {
+          languageDirective,
+        });
+        log.info('[LessonLanguageTrace]', {
+          event: 'preview-validation-start',
+          lessonLanguage: languageResolution.language,
+          source: languageResolution.source,
+          reason: languageResolution.reason,
+          profileId: stage.teacherVoiceProfileId,
+        });
+        try {
+          const profile = await validateGenerationPreviewVoiceSelection(currentSession);
+          log.info('[LessonLanguageTrace]', {
+            event: 'preview-validation-success',
+            lessonLanguage,
+            stageLanguage: stage.lessonLanguage,
+            profileId: profile?.id,
+            provider: profile?.provider,
+            profileLanguage: profile?.language,
+          });
+        } catch (error) {
+          log.warn('[LessonLanguageTrace]', {
+            event: 'preview-validation-failure',
+            lessonLanguage: languageResolution.language,
+            source: languageResolution.source,
+            reason: error instanceof Error ? error.message : languageResolution.reason || 'unknown',
+            profileId: stage.teacherVoiceProfileId,
+          });
+          throw error;
+        }
       }
 
       // Adopt the LLM-inferred course title as the stage name when available,
@@ -1176,6 +1230,12 @@ function GenerationPreviewContent() {
 
       const firstOutline = outlines[0];
       const firstSceneStartedAt = Date.now();
+      log.info('[LessonLanguageTrace]', {
+        event: 'scene-1-generation-start',
+        lessonLanguage: stage.lessonLanguage,
+        profileId: stage.teacherVoiceProfileId,
+        outlineId: firstOutline.id,
+      });
       updateGenerationProgress('current-scene-changed', {
         stageId: stage.id,
         sceneIndex: 1,

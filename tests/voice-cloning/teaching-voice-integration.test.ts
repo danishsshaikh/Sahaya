@@ -8,6 +8,8 @@ import { getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-clon
 import {
   newTeachingVoiceProvider,
   normalizeTeachingVoiceLanguageId,
+  resolveGenerationLessonTeachingVoiceLanguage,
+  resolveRequestedLessonTeachingVoiceLanguage,
   resolveTeachingVoiceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -60,6 +62,36 @@ describe('Teaching Voice language boundary', () => {
     expect(normalizeTeachingVoiceLanguageId('mr')).toBe('mr');
     expect(normalizeTeachingVoiceLanguageId('Deliver the entire course in Hindi')).toBeNull();
     expect(normalizeTeachingVoiceLanguageId('English and Hindi')).toBeNull();
+  });
+
+  it('resolves explicit lesson intent without treating subject words as language choices', () => {
+    expect(
+      resolveRequestedLessonTeachingVoiceLanguage(
+        'Generate a lesson on English grammar in Hindi. Use simple Hindi throughout.',
+      ),
+    ).toBe('hi');
+    expect(
+      resolveRequestedLessonTeachingVoiceLanguage(
+        'Explain Hindi literature in English. Use simple English throughout.',
+      ),
+    ).toBe('en');
+    expect(
+      resolveRequestedLessonTeachingVoiceLanguage('Compare instruction in English and Hindi.'),
+    ).toBeNull();
+  });
+
+  it('rejects contradictory structured and requested lesson languages', () => {
+    expect(
+      resolveGenerationLessonTeachingVoiceLanguage({
+        sseLanguage: 'en',
+        requirement: 'Generate the lesson in Hindi.',
+      }),
+    ).toMatchObject({ language: null, reason: 'conflicting-language-signals' });
+    expect(
+      resolveGenerationLessonTeachingVoiceLanguage({
+        requirement: 'Generate the lesson in French.',
+      }),
+    ).toMatchObject({ language: null, reason: 'unresolved' });
   });
 
   it('routes new enrollments while retaining absent legacy provider metadata', () => {

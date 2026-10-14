@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { GenerationSessionState } from '@/app/generation-preview/types';
+import type { SceneOutline } from '@/lib/types/generation';
 import {
   normalizeGenerationPreviewLanguageState,
+  resolveGenerationPreviewLanguage,
   validateGenerationPreviewVoiceSelection,
 } from '@/app/generation-preview/voice-language';
 import { GenerationTeachingVoiceProfileError } from '@/lib/voice-cloning/selection-client';
@@ -47,6 +49,124 @@ function readyProfileResponse(language: 'en' | 'hi' | 'mr'): Response {
 }
 
 describe('generation preview Teaching Voice language propagation', () => {
+  it('retains Hindi from the exact Force lesson request when the completed SSE directive is generic', async () => {
+    const outlines: SceneOutline[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `outline-${index + 1}`,
+      type: index === 2 ? 'quiz' : 'slide',
+      title: `Force ${index + 1}`,
+      description: 'Force lesson scene.',
+      keyPoints: ['Force'],
+      order: index + 1,
+    }));
+    const doneEvent = {
+      type: 'done',
+      outlines,
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    };
+    const previewSession = normalizeGenerationPreviewLanguageState(
+      {
+        ...session(doneEvent.languageDirective),
+        requirements: {
+          requirement:
+            'Generate a short 4-slide lesson on Force in Hindi, including 2 explanation slides, 1 quiz, and 1 summary slide. Use simple Hindi throughout.',
+        },
+        sceneOutlines: doneEvent.outlines,
+      },
+      doneEvent.languageDirective,
+    );
+    const fetchProfile = vi.fn(async () => readyProfileResponse('hi'));
+
+    const profile = await validateGenerationPreviewVoiceSelection(
+      previewSession,
+      fetchProfile as typeof fetch,
+    );
+
+    expect(previewSession.lessonLanguage).toBe('hi');
+    expect(previewSession.sceneOutlines).toHaveLength(4);
+    expect(profile).toMatchObject({ provider: 'indicf5', language: 'hi' });
+    expect(fetchProfile).toHaveBeenCalledWith(
+      '/api/voice-cloning/profile?profileId=vcp_selected&language=hi',
+    );
+  });
+
+  it.each([
+    ['Generate a lesson on motion in Hindi. Use simple Hindi throughout.', 'hi'],
+    ['Generate a lesson on motion in Marathi. Use simple Marathi throughout.', 'mr'],
+    ['Generate a lesson on motion in English. Use simple English throughout.', 'en'],
+  ] as const)(
+    'recovers %s from the requirement when the SSE directive is generic',
+    (requirement, expected) => {
+      const previewSession = session('Teach in the language that matches the user requirement.');
+      previewSession.requirements.requirement = requirement;
+
+      const normalized = normalizeGenerationPreviewLanguageState(previewSession);
+
+      expect(normalized.lessonLanguage).toBe(expected);
+    },
+  );
+
+  it('retains Hindi for valid early-language and done-only SSE event orders', () => {
+    const previewSession = session('Teach in the language that matches the user requirement.');
+    previewSession.requirements.requirement =
+      'Generate a short lesson on Force in Hindi. Use simple Hindi throughout.';
+
+    const earlyLanguageEvent = resolveGenerationPreviewLanguage(previewSession, {
+      sseLanguage: 'hi',
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    });
+    const doneOnlyEvent = resolveGenerationPreviewLanguage(previewSession, {
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    });
+
+    expect(earlyLanguageEvent).toMatchObject({ language: 'hi', source: 'sse' });
+    expect(doneOnlyEvent).toMatchObject({ language: 'hi', source: 'requirement' });
+  });
+
+  it('does not replace an invalid structured SSE language with a prompt-derived default', () => {
+    const previewSession = session('Teach in the language that matches the user requirement.');
+    previewSession.requirements.requirement = 'Generate the lesson in Hindi.';
+
+    expect(
+      resolveGenerationPreviewLanguage(previewSession, {
+        sseLanguage: 'fr',
+      }),
+    ).toMatchObject({
+      language: null,
+      reason: 'invalid-structured-language',
+    });
+  });
+
+  it('keeps an explicit Hindi Chatterbox synthesis preference independent of an English lesson', async () => {
+    const previewSession = normalizeGenerationPreviewLanguageState(
+      session('Teach the entire lesson in English.', 'en'),
+    );
+    const fetchProfile = vi.fn(
+      async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            profile: {
+              id: 'vcp_selected',
+              status: 'ready',
+              provider: 'chatterbox',
+              language: 'en',
+              languageId: 'hi',
+            },
+          }),
+        }) as Response,
+    );
+
+    const profile = await validateGenerationPreviewVoiceSelection(
+      previewSession,
+      fetchProfile as typeof fetch,
+    );
+
+    expect(fetchProfile).toHaveBeenCalledWith(
+      '/api/voice-cloning/profile?profileId=vcp_selected&language=en',
+    );
+    expect(profile).toMatchObject({ provider: 'chatterbox', language: 'en', languageId: 'hi' });
+  });
+
   it.each([
     ['Teach the entire lesson in simple Hindi using Devanagari script.', 'hi'],
     ['Teach the entire lesson in Marathi using Devanagari script.', 'mr'],

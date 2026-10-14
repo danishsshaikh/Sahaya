@@ -42,7 +42,7 @@ import { sortDocumentImagesForVision } from '@/lib/document/bundle';
 import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
 import { applySahayaOutlineFeatureFallbacks } from '@/lib/generation/outline-generator';
-import { resolveLessonTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import { resolveGenerationLessonTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 const log = createLogger('Outlines Stream');
 
 export const maxDuration = 300;
@@ -459,6 +459,11 @@ export async function POST(req: NextRequest) {
     );
     const outlineGenerationStartedAt = Date.now();
     const outlineRequestId = `outline:${outlineGenerationStartedAt}`;
+    const resolveStreamLessonLanguage = (languageDirective?: string | null) =>
+      resolveGenerationLessonTeachingVoiceLanguage({
+        languageDirective,
+        requirement: requirements.requirement,
+      });
     log.info('[SceneGenerationTrace]', {
       event: 'outline-generation-start',
       requestId: outlineRequestId,
@@ -569,13 +574,20 @@ export async function POST(req: NextRequest) {
                 if (!languageDirective) {
                   languageDirective = extractLanguageDirective(fullText);
                   if (languageDirective) {
+                    const languageResolution = resolveStreamLessonLanguage(languageDirective);
                     const ldEvent = JSON.stringify({
                       type: 'languageDirective',
                       data: languageDirective,
-                      lessonLanguage:
-                        resolveLessonTeachingVoiceLanguage(languageDirective) || undefined,
+                      lessonLanguage: languageResolution.language || undefined,
                     });
                     controller.enqueue(encoder.encode(`data: ${ldEvent}\n\n`));
+                    log.info('[LessonLanguageTrace]', {
+                      event: 'sse-languageDirective',
+                      requestId: outlineRequestId,
+                      lessonLanguage: languageResolution.language,
+                      source: languageResolution.source,
+                      reason: languageResolution.reason,
+                    });
                   }
                 }
 
@@ -697,16 +709,23 @@ export async function POST(req: NextRequest) {
             });
             // Send done event with all outlines
             const finalLanguageDirective = languageDirective || DEFAULT_LANGUAGE_DIRECTIVE;
+            const finalLanguageResolution = resolveStreamLessonLanguage(finalLanguageDirective);
             const doneEvent = JSON.stringify({
               type: 'done',
               outlines: uniquifiedOutlines,
               languageDirective: finalLanguageDirective,
-              lessonLanguage:
-                resolveLessonTeachingVoiceLanguage(finalLanguageDirective) || undefined,
+              lessonLanguage: finalLanguageResolution.language || undefined,
               courseTitle: courseTitle || undefined,
               taskEngineMode,
             });
             controller.enqueue(encoder.encode(`data: ${doneEvent}\n\n`));
+            log.info('[LessonLanguageTrace]', {
+              event: 'sse-done',
+              requestId: outlineRequestId,
+              lessonLanguage: finalLanguageResolution.language,
+              source: finalLanguageResolution.source,
+              reason: finalLanguageResolution.reason,
+            });
           } else {
             // All retries exhausted, no outlines produced
             log.error(

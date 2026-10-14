@@ -7,6 +7,13 @@ import {
 } from './types';
 
 export type TeachingVoiceLanguage = 'en' | 'hi' | 'mr';
+export type LessonTeachingVoiceLanguageSource = 'saved' | 'sse' | 'directive' | 'requirement';
+
+export type LessonTeachingVoiceLanguageResolution = {
+  language: TeachingVoiceLanguage | null;
+  source: LessonTeachingVoiceLanguageSource | null;
+  reason?: 'invalid-structured-language' | 'conflicting-language-signals' | 'unresolved';
+};
 export const CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS = ['en', 'hi'] as const;
 export type ChatterboxFacultySynthesisLanguage =
   (typeof CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS)[number];
@@ -49,7 +56,91 @@ export function resolveTeachingVoiceLanguage(value?: string | null): string | nu
 export function resolveLessonTeachingVoiceLanguage(
   value?: string | null,
 ): TeachingVoiceLanguage | null {
-  return normalizeTeachingVoiceLanguageId(resolveTeachingVoiceLanguage(value));
+  return (
+    resolveRequestedLessonTeachingVoiceLanguage(value) ||
+    normalizeTeachingVoiceLanguageId(resolveTeachingVoiceLanguage(value))
+  );
+}
+
+const EXPLICIT_LESSON_LANGUAGE_PATTERNS = {
+  en: [
+    /\b(?:in|using|use)\s+(?:simple\s+)?english\b/iu,
+    /\benglish\s+(?:language|throughout|narration|instruction|medium)\b/iu,
+    /\b(?:teach|write|generate|explain|present|deliver)\s+(?:the\s+)?(?:entire\s+)?(?:lesson|course|content|narration|response)\s+(?:entirely\s+)?(?:in\s+)?(?:simple\s+)?english\b/iu,
+  ],
+  hi: [
+    /\b(?:in|using|use)\s+(?:simple\s+)?hindi\b/iu,
+    /\bhindi\s+(?:language|throughout|narration|instruction|medium)\b/iu,
+    /\b(?:teach|write|generate|explain|present|deliver)\s+(?:the\s+)?(?:entire\s+)?(?:lesson|course|content|narration|response)\s+(?:entirely\s+)?(?:in\s+)?(?:simple\s+)?hindi\b/iu,
+    /(?:हिंदी|हिन्दी)\s+में/u,
+  ],
+  mr: [
+    /\b(?:in|using|use)\s+(?:simple\s+)?marathi\b/iu,
+    /\bmarathi\s+(?:language|throughout|narration|instruction|medium)\b/iu,
+    /\b(?:teach|write|generate|explain|present|deliver)\s+(?:the\s+)?(?:entire\s+)?(?:lesson|course|content|narration|response)\s+(?:entirely\s+)?(?:in\s+)?(?:simple\s+)?marathi\b/iu,
+    /मराठी(?:त|\s+मध्ये)/u,
+  ],
+} satisfies Record<TeachingVoiceLanguage, RegExp[]>;
+
+/** Resolve explicit lesson-language intent without treating subject words as language choices. */
+export function resolveRequestedLessonTeachingVoiceLanguage(
+  value?: string | null,
+): TeachingVoiceLanguage | null {
+  const input = value?.trim();
+  if (!input) return null;
+  const direct = normalizeTeachingVoiceLanguageId(input);
+  if (direct) return direct;
+  if (/\b(?:english|hindi|marathi)\s*(?:and|or|\/|&)\s*(?:english|hindi|marathi)\b/iu.test(input)) {
+    return null;
+  }
+  const matches = (
+    Object.entries(EXPLICIT_LESSON_LANGUAGE_PATTERNS) as Array<[TeachingVoiceLanguage, RegExp[]]>
+  )
+    .filter(([, patterns]) => patterns.some((pattern) => pattern.test(input)))
+    .map(([language]) => language);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/** Reconcile the supported structured and textual signals used during lesson generation. */
+export function resolveGenerationLessonTeachingVoiceLanguage(input: {
+  savedLanguage?: string | null;
+  sseLanguage?: string | null;
+  languageDirective?: string | null;
+  requirement?: string | null;
+}): LessonTeachingVoiceLanguageResolution {
+  const candidates: Array<{
+    language: TeachingVoiceLanguage;
+    source: LessonTeachingVoiceLanguageSource;
+  }> = [];
+
+  for (const [value, source] of [
+    [input.savedLanguage, 'saved'],
+    [input.sseLanguage, 'sse'],
+  ] as const) {
+    if (value === undefined || value === null || value.trim() === '') continue;
+    const language = normalizeTeachingVoiceLanguageId(value);
+    if (!language) {
+      return { language: null, source: null, reason: 'invalid-structured-language' };
+    }
+    candidates.push({ language, source });
+  }
+
+  const directiveLanguage = resolveLessonTeachingVoiceLanguage(input.languageDirective);
+  if (directiveLanguage) {
+    candidates.push({ language: directiveLanguage, source: 'directive' });
+  }
+  const requirementLanguage = resolveRequestedLessonTeachingVoiceLanguage(input.requirement);
+  if (requirementLanguage) {
+    candidates.push({ language: requirementLanguage, source: 'requirement' });
+  }
+
+  if (new Set(candidates.map(({ language }) => language)).size > 1) {
+    return { language: null, source: null, reason: 'conflicting-language-signals' };
+  }
+  const resolved = candidates[0];
+  return resolved
+    ? { language: resolved.language, source: resolved.source }
+    : { language: null, source: null, reason: 'unresolved' };
 }
 
 export function newTeachingVoiceProvider(language: string): 'chatterbox' | 'indicf5' {
