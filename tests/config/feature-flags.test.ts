@@ -23,6 +23,11 @@ const FLAG_KEYS = [
   'NEXT_PUBLIC_FEATURE_COMPANION_SELECTOR',
   'NEXT_PUBLIC_FEATURE_CLASSROOM_CHAT',
   'NEXT_PUBLIC_FEATURE_VOICE_CLONING',
+  'NEXT_PUBLIC_FEATURE_STATIC_VOICE',
+  'NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION',
+  'NEXT_PUBLIC_FEATURE_WEB_SEARCH',
+  'NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT',
+  'NEXT_PUBLIC_FEATURE_WHITEBOARD',
   'NEXT_PUBLIC_FEATURE_INTERACTIVE_SCENES',
   'NEXT_PUBLIC_FEATURE_DETERMINISTIC_INTERACTIVES',
   'NEXT_PUBLIC_FEATURE_DISCUSSION_SCENES',
@@ -230,12 +235,32 @@ describe('classroom feature flags', () => {
       generatedClassroomAgents: false,
       classroomChat: false,
       voiceCloning: false,
+      staticVoice: false,
+      promptPersonalization: false,
+      webSearch: false,
+      classroomImport: false,
+      whiteboard: false,
       interactiveScenes: false,
       deterministicInteractives: true,
       discussionScenes: false,
       workspaceScenes: false,
       flowScenes: false,
     });
+  });
+
+  it.each([
+    ['NEXT_PUBLIC_FEATURE_STATIC_VOICE', 'isStaticVoiceEnabled'],
+    ['NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION', 'isPromptPersonalizationEnabled'],
+    ['NEXT_PUBLIC_FEATURE_WEB_SEARCH', 'isWebSearchEnabled'],
+    ['NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT', 'isClassroomImportEnabled'],
+    ['NEXT_PUBLIC_FEATURE_WHITEBOARD', 'isWhiteboardEnabled'],
+  ] as const)('%s defaults off and can be enabled independently', async (envKey, getter) => {
+    let flags = await loadFlags();
+    expect(flags[getter]()).toBe(false);
+
+    process.env[envKey] = 'true';
+    flags = await loadFlags();
+    expect(flags[getter]()).toBe(true);
   });
 
   it('keeps generated classroom agents opt-in for the standard teacher-only flow', async () => {

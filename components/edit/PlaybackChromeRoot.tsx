@@ -73,6 +73,7 @@ import {
   isCoursewareReferenceEnabled,
   isPiChatEnabled,
   isSceneEnabled,
+  isWhiteboardEnabled,
 } from '@/lib/config/feature-flags';
 import {
   getSlideElementPresentation,
@@ -125,6 +126,7 @@ interface PlaybackChromeRootProps {
   readonly hideHeader?: boolean;
   readonly hideHeaderGlobalControls?: boolean;
   readonly hideHeaderCourseActions?: boolean;
+  readonly headerStatus?: ReactNode;
   readonly onInteractivePickerChange?: (state: PlaybackInteractivePickerState | null) => void;
 }
 
@@ -147,6 +149,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       hideHeader,
       hideHeaderGlobalControls,
       hideHeaderCourseActions,
+      headerStatus,
       onInteractivePickerChange,
     },
     ref,
@@ -256,8 +259,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const [isPresentationInteractionActive, setIsPresentationInteractionActive] = useState(false);
 
     // Whiteboard state (from canvas store so AI tools can open it)
-    const whiteboardOpen = useCanvasStore.use.whiteboardOpen();
+    const storedWhiteboardOpen = useCanvasStore.use.whiteboardOpen();
     const setWhiteboardOpenManually = useCanvasStore.use.setWhiteboardOpenManually();
+    const whiteboardEnabled = isWhiteboardEnabled();
+    const whiteboardOpen = whiteboardEnabled && storedWhiteboardOpen;
 
     // Selected agents from settings store (Zustand)
     const selectedAgentIds = useSettingsStore((s) => s.selectedAgentIds);
@@ -1603,6 +1608,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // whiteboard toggle
     const handleWhiteboardToggle = () => {
+      if (!whiteboardEnabled) return;
       if (!whiteboardOpen) setElementPickActive(false);
       setWhiteboardOpenManually(!whiteboardOpen);
     };
@@ -1804,6 +1810,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               hideBackControl={hideHeaderBackControl}
               hideGlobalControls={hideHeaderGlobalControls}
               hideCourseActions={hideHeaderCourseActions}
+              statusSlot={headerStatus}
             />
           )}
 

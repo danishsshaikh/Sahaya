@@ -13,7 +13,7 @@ function source(path: string) {
 
 describe('classroom generation progress render contract', () => {
   it.each(classroomSources)(
-    '%s renders Stage directly while progress is an overlay sibling',
+    '%s keeps Stage mounted and passes progress into the classroom toolbar',
     (path) => {
       const text = source(path);
 
@@ -24,15 +24,13 @@ describe('classroom generation progress render contract', () => {
       expect(text).toContain("event: 'classroom-still-mounted-after-completion'");
       expect(text).toContain('onNarrationQueueChange: updateTeachingVoiceQueue');
       expect(text).toContain('teachingVoiceQueue={generationProgress.teachingVoiceQueue}');
+      expect(text).toContain('generationStatus={');
+      expect(text).not.toContain('pointer-events-none absolute right-4 top-4');
 
       const stageIndex = text.indexOf('<Stage');
       const progressIndex = text.indexOf('<LessonGenerationProgress');
       expect(stageIndex).toBeGreaterThan(0);
       expect(progressIndex).toBeGreaterThan(stageIndex);
-
-      const betweenStageAndProgress = text.slice(stageIndex, progressIndex);
-      expect(betweenStageAndProgress).not.toContain('<div className="relative min-h-0 flex-1">');
-      expect(betweenStageAndProgress).not.toContain('generationProgress ? <Stage');
     },
   );
 

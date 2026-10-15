@@ -22,6 +22,7 @@ import { useStageStore } from '@/lib/store';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useSoftCloseCountdown } from '@/components/chat/use-soft-close-countdown';
+import { isWhiteboardEnabled } from '@/lib/config/feature-flags';
 
 export interface CanvasToolbarProps {
   readonly currentSceneIndex: number;
@@ -131,9 +132,7 @@ export function CanvasToolbar({
   const canGoNext = currentSceneIndex < scenesCount - 1;
   const showPlayPause = !isLiveSession;
 
-  const whiteboardElementCount = useStageStore(
-    (s) => s.stage?.whiteboard?.[0]?.elements?.length || 0,
-  );
+  const whiteboardEnabled = isWhiteboardEnabled();
 
   // Volume slider hover state
   const [volumeHover, setVolumeHover] = useState(false);
@@ -406,40 +405,12 @@ export function CanvasToolbar({
             </TooltipProvider>
           )}
 
-          {/* Whiteboard */}
-          <TooltipProvider delayDuration={0}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onWhiteboardClose();
-                  }}
-                  className={cn(
-                    ctrlBtn,
-                    'h-6 w-6 gap-1 px-0 xl:w-auto xl:px-1.5',
-                    whiteboardOpen
-                      ? 'bg-violet-500/10 text-violet-600 dark:bg-violet-400/10 dark:text-violet-400'
-                      : 'text-gray-500 dark:text-gray-400',
-                  )}
-                  aria-label={whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
-                  aria-pressed={whiteboardOpen}
-                >
-                  <Presentation className="w-3.5 h-3.5" />
-                  <span className="hidden text-[11px] font-medium xl:inline">
-                    {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
-                  </span>
-                  {!whiteboardOpen && whiteboardElementCount > 0 && (
-                    <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-violet-500 dark:bg-violet-400 rounded-full" />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="text-xs">
-                {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          {whiteboardEnabled ? (
+            <WhiteboardControl
+              whiteboardOpen={whiteboardOpen}
+              onWhiteboardClose={onWhiteboardClose}
+            />
+          ) : null}
 
           {showElementReference && (
             <button
@@ -511,5 +482,54 @@ export function CanvasToolbar({
         )}
       </div>
     </div>
+  );
+}
+
+function WhiteboardControl({
+  whiteboardOpen,
+  onWhiteboardClose,
+}: {
+  readonly whiteboardOpen: boolean;
+  readonly onWhiteboardClose: () => void;
+}) {
+  const { t } = useI18n();
+  const whiteboardElementCount = useStageStore(
+    (state) => state.stage?.whiteboard?.[0]?.elements?.length || 0,
+  );
+
+  return (
+    <TooltipProvider delayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onWhiteboardClose();
+            }}
+            className={cn(
+              ctrlBtn,
+              'h-6 w-6 gap-1 px-0 xl:w-auto xl:px-1.5',
+              whiteboardOpen
+                ? 'bg-violet-500/10 text-violet-600 dark:bg-violet-400/10 dark:text-violet-400'
+                : 'text-gray-500 dark:text-gray-400',
+            )}
+            aria-label={whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+            aria-pressed={whiteboardOpen}
+          >
+            <Presentation className="h-3.5 w-3.5" />
+            <span className="hidden text-[11px] font-medium xl:inline">
+              {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+            </span>
+            {!whiteboardOpen && whiteboardElementCount > 0 ? (
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-violet-500 dark:bg-violet-400" />
+            ) : null}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="text-xs">
+          {whiteboardOpen ? t('whiteboard.minimize') : t('whiteboard.open')}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

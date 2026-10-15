@@ -48,6 +48,7 @@ import {
 import { dedupeCourseMaterialFiles } from '@/lib/document/course-materials';
 import type { SelectedCourseMaterial } from '@/lib/types/generation';
 import { findModelById, modelIdsMatch } from '@/lib/ai/model-aliases';
+import { isWebSearchEnabled } from '@/lib/config/feature-flags';
 
 // ─── Constants ───────────────────────────────────────────────
 const MAX_COURSE_MATERIAL_SIZE_MB = 50;
@@ -94,22 +95,9 @@ export function GenerationToolbar({
   const pdfProviderId = useSettingsStore((s) => s.pdfProviderId);
   const pdfProvidersConfig = useSettingsStore((s) => s.pdfProvidersConfig);
   const setPDFProvider = useSettingsStore((s) => s.setPDFProvider);
-  const webSearchProviderId = useSettingsStore((s) => s.webSearchProviderId);
-  const webSearchProvidersConfig = useSettingsStore((s) => s.webSearchProvidersConfig);
-  const setWebSearchProvider = useSettingsStore((s) => s.setWebSearchProvider);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
-
-  // Check web search availability. Keyless providers such as Brave should keep
-  // the toolbar reachable even when the current API-key provider is not ready.
-  const webSearchProvider = WEB_SEARCH_PROVIDERS[webSearchProviderId];
-  const webSearchConfig = webSearchProvidersConfig[webSearchProviderId];
-  const selectedWebSearchAvailable = webSearchProvider
-    ? isWebSearchProviderConfigured(webSearchProvider, webSearchConfig)
-    : false;
-  const webSearchAvailable = Object.values(WEB_SEARCH_PROVIDERS).some((provider) =>
-    isWebSearchProviderConfigured(provider, webSearchProvidersConfig[provider.id]),
-  );
+  const webSearchFeatureEnabled = isWebSearchEnabled();
 
   // Configured LLM providers (only those with valid credentials + models + endpoint)
   const configuredProviders = providersConfig
@@ -427,101 +415,13 @@ export function GenerationToolbar({
           </PopoverContent>
         </Popover>
 
-        {/* ── Web Search ── */}
-        {webSearchAvailable ? (
-          <Popover>
-            <PopoverTrigger asChild>
-              <button className={webSearch ? pillActive : pillMuted}>
-                <Globe2 className={cn('size-3.5', webSearch && 'animate-pulse')} />
-                {webSearch && (
-                  <span>
-                    {WEB_SEARCH_PROVIDERS[webSearchProviderId]
-                      ? getWebSearchProviderDisplayName(webSearchProviderId, t)
-                      : 'Search'}
-                  </span>
-                )}
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-64 p-3 space-y-3">
-              {/* Toggle */}
-              <button
-                onClick={() => {
-                  if (!selectedWebSearchAvailable) return;
-                  onWebSearchChange(!webSearch);
-                }}
-                disabled={materialsLocked}
-                className={cn(
-                  'w-full flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-all',
-                  webSearch ? 'border-primary/25 bg-primary/10' : 'border-border hover:bg-muted/50',
-                  !selectedWebSearchAvailable && 'opacity-60',
-                  materialsLocked && 'opacity-60 cursor-not-allowed',
-                )}
-              >
-                <Globe2
-                  className={cn(
-                    'size-4 shrink-0',
-                    webSearch ? 'text-primary' : 'text-muted-foreground',
-                  )}
-                />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium">
-                    {webSearch ? t('toolbar.webSearchOn') : t('toolbar.webSearchOff')}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground/70 mt-0.5">
-                    {t('toolbar.webSearchDesc')}
-                  </p>
-                </div>
-              </button>
-
-              {/* Provider selector */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-muted-foreground shrink-0">
-                  {t('toolbar.webSearchProvider')}
-                </span>
-                <Select
-                  value={webSearchProviderId}
-                  onValueChange={(v) => setWebSearchProvider(v as WebSearchProviderId)}
-                >
-                  <SelectTrigger className="h-7 text-xs flex-1 min-w-0">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.values(WEB_SEARCH_PROVIDERS).map((provider) => {
-                      const cfg = webSearchProvidersConfig[provider.id];
-                      const available = isWebSearchProviderConfigured(provider, cfg);
-                      return (
-                        <SelectItem key={provider.id} value={provider.id} disabled={!available}>
-                          <div
-                            className={cn('flex items-center gap-1.5', !available && 'opacity-50')}
-                          >
-                            {getWebSearchProviderDisplayName(provider.id, t)}
-                            {cfg?.isServerConfigured && (
-                              <span className="text-[9px] px-1 py-0 rounded border text-muted-foreground">
-                                {t('settings.serverConfigured')}
-                              </span>
-                            )}
-                          </div>
-                        </SelectItem>
-                      );
-                    })}
-                  </SelectContent>
-                </Select>
-              </div>
-            </PopoverContent>
-          </Popover>
-        ) : (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className={cn(pillCls, 'text-muted-foreground/40 cursor-not-allowed')}
-                disabled
-              >
-                <Globe2 className="size-3.5" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>{t('toolbar.webSearchNoProvider')}</TooltipContent>
-          </Tooltip>
-        )}
+        {webSearchFeatureEnabled ? (
+          <WebSearchControl
+            webSearch={webSearch}
+            onWebSearchChange={onWebSearchChange}
+            materialsLocked={materialsLocked}
+          />
+        ) : null}
 
         {/* ── Separator ── */}
         <div className="w-px h-4 bg-border/60 mx-1" />
@@ -530,6 +430,117 @@ export function GenerationToolbar({
         <MediaPopover onSettingsOpen={onSettingsOpen} />
       </div>
     </div>
+  );
+}
+
+function WebSearchControl({
+  webSearch,
+  onWebSearchChange,
+  materialsLocked,
+}: {
+  readonly webSearch: boolean;
+  readonly onWebSearchChange: (value: boolean) => void;
+  readonly materialsLocked: boolean;
+}) {
+  const { t } = useI18n();
+  const webSearchProviderId = useSettingsStore((s) => s.webSearchProviderId);
+  const webSearchProvidersConfig = useSettingsStore((s) => s.webSearchProvidersConfig);
+  const setWebSearchProvider = useSettingsStore((s) => s.setWebSearchProvider);
+  const webSearchProvider = WEB_SEARCH_PROVIDERS[webSearchProviderId];
+  const webSearchConfig = webSearchProvidersConfig[webSearchProviderId];
+  const selectedWebSearchAvailable = webSearchProvider
+    ? isWebSearchProviderConfigured(webSearchProvider, webSearchConfig)
+    : false;
+  const webSearchAvailable = Object.values(WEB_SEARCH_PROVIDERS).some((provider) =>
+    isWebSearchProviderConfigured(provider, webSearchProvidersConfig[provider.id]),
+  );
+  const pillClass =
+    'h-7 px-2.5 rounded-lg text-[11px] font-medium inline-flex items-center gap-1.5 border transition-all shrink-0';
+  const pillMuted = `${pillClass} border-border/50 text-muted-foreground/70 hover:text-foreground hover:bg-muted/60`;
+  const pillActive = `${pillClass} border-primary/25 bg-primary/10 text-primary`;
+
+  if (!webSearchAvailable) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button className={cn(pillClass, 'cursor-not-allowed text-muted-foreground/40')} disabled>
+            <Globe2 className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{t('toolbar.webSearchNoProvider')}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button className={webSearch ? pillActive : pillMuted}>
+          <Globe2 className={cn('size-3.5', webSearch && 'animate-pulse')} />
+          {webSearch ? (
+            <span>{getWebSearchProviderDisplayName(webSearchProviderId, t)}</span>
+          ) : null}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 space-y-3 p-3">
+        <button
+          onClick={() => {
+            if (selectedWebSearchAvailable) onWebSearchChange(!webSearch);
+          }}
+          disabled={materialsLocked}
+          className={cn(
+            'flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-all',
+            webSearch ? 'border-primary/25 bg-primary/10' : 'border-border hover:bg-muted/50',
+            !selectedWebSearchAvailable && 'opacity-60',
+            materialsLocked && 'cursor-not-allowed opacity-60',
+          )}
+        >
+          <Globe2
+            className={cn('size-4 shrink-0', webSearch ? 'text-primary' : 'text-muted-foreground')}
+          />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium">
+              {webSearch ? t('toolbar.webSearchOn') : t('toolbar.webSearchOff')}
+            </p>
+            <p className="mt-0.5 text-[10px] text-muted-foreground/70">
+              {t('toolbar.webSearchDesc')}
+            </p>
+          </div>
+        </button>
+
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 text-xs font-medium text-muted-foreground">
+            {t('toolbar.webSearchProvider')}
+          </span>
+          <Select
+            value={webSearchProviderId}
+            onValueChange={(value) => setWebSearchProvider(value as WebSearchProviderId)}
+          >
+            <SelectTrigger className="h-7 min-w-0 flex-1 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.values(WEB_SEARCH_PROVIDERS).map((provider) => {
+                const config = webSearchProvidersConfig[provider.id];
+                const available = isWebSearchProviderConfigured(provider, config);
+                return (
+                  <SelectItem key={provider.id} value={provider.id} disabled={!available}>
+                    <div className={cn('flex items-center gap-1.5', !available && 'opacity-50')}>
+                      {getWebSearchProviderDisplayName(provider.id, t)}
+                      {config?.isServerConfigured ? (
+                        <span className="rounded border px-1 py-0 text-[9px] text-muted-foreground">
+                          {t('settings.serverConfigured')}
+                        </span>
+                      ) : null}
+                    </div>
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
