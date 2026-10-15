@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   register: vi.fn(),
   resolve: vi.fn(),
   processAudio: vi.fn(),
+  masterAudio: vi.fn(),
 }));
 vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceCloningServerEnabled: () => true,
@@ -26,7 +27,7 @@ vi.mock('@/lib/voice-cloning/storage', () => ({
 }));
 vi.mock('@/lib/voice-cloning/provider', () => ({ getVoiceCloningProvider: mocks.resolve }));
 vi.mock('@/lib/voice-cloning/audio-validation', () => ({
-  masterGeneratedVoiceAudio: async (audio: Uint8Array, format: string) => ({ audio, format }),
+  masterGeneratedVoiceAudio: mocks.masterAudio,
 }));
 vi.mock('@/lib/voice-cloning/audio-enhancement', () => ({
   processChatterboxAudioVariants: mocks.processAudio,
@@ -38,6 +39,7 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   mocks.synthesize.mockReset();
   mocks.register.mockReset();
+  mocks.masterAudio.mockReset();
   profile = {
     id: 'vcp_example',
     ownerId: 'usr_example',
@@ -58,6 +60,10 @@ beforeEach(() => {
   mocks.resolve.mockReturnValue({ synthesize: mocks.synthesize, createProfile: mocks.register });
   mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
   mocks.register.mockResolvedValue({ providerReferenceId: 'vcp_example' });
+  mocks.masterAudio.mockImplementation(async (audio: Uint8Array, format: string) => ({
+    audio,
+    format,
+  }));
   mocks.processAudio.mockImplementation(async (raw: { audio: Uint8Array; format: string }) => ({
     original: raw,
   }));
@@ -200,6 +206,11 @@ describe('profile-specific synthesis and recovery', () => {
       format: 'wav',
     });
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.masterAudio).toHaveBeenCalledExactlyOnceWith(
+      new Uint8Array([1]),
+      'wav',
+      'indicf5-natural',
+    );
   });
 
   it('bounds provider-busy retries by elapsed wait time', async () => {

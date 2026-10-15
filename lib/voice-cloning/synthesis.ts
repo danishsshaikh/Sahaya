@@ -269,7 +269,7 @@ export async function synthesizeFacultyVoice(input: {
         });
       }
     } else {
-      mastered = await masterGeneratedVoiceAudio(result.audio, result.format, 'standard');
+      mastered = await masterGeneratedVoiceAudio(result.audio, result.format, 'indicf5-natural');
     }
     traceTeachingVoiceSynthesis('mastering-complete', {
       profileId: profile.id,

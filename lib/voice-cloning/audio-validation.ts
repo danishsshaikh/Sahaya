@@ -63,6 +63,10 @@ const GENERATED_AUDIO_MASTERING_FILTER = [
   `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
 ].join(',');
 
+// IndicF5 already returns a complete synthesized waveform. Keep its pauses and
+// dynamics intact, applying only a conservative output-level normalization.
+const INDICF5_NATURAL_MASTERING_FILTER = 'loudnorm=I=-20:TP=-3:LRA=14';
+
 const CHATTERBOX_CLARITY_MASTERING_FILTER = [
   [
     'silenceremove=start_periods=1:start_duration=0.2',
@@ -94,8 +98,11 @@ const CHATTERBOX_ENHANCED_MASTERING_FILTER = [
 
 export type GeneratedVoiceMasteringPreset =
   | 'standard'
+  | 'indicf5-natural'
   | 'chatterbox-clarity'
   | 'chatterbox-enhanced';
+
+export type VoiceReferenceProcessingPreset = 'standard' | 'indicf5-natural';
 
 export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/webm',
@@ -522,6 +529,7 @@ export async function validateVoiceClipDecodability(filePath: string): Promise<n
 
 export async function normalizeVoiceEnrollmentRecording(
   recording: IncomingVoiceClip,
+  preset: VoiceReferenceProcessingPreset = 'standard',
 ): Promise<NormalizedVoiceReference> {
   validateIncomingClipMetadata(recording);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openmaic-voice-'));
@@ -532,6 +540,9 @@ export async function normalizeVoiceEnrollmentRecording(
 
     const { metrics: quality, decision: qualityDecision } =
       await analyzeVoiceRecordingQuality(inputPath);
+    const processingArgs =
+      preset === 'indicf5-natural' ? [] : ['-af', REFERENCE_PREPROCESSING_FILTER];
+    const encodingArgs = preset === 'indicf5-natural' ? ['-c:a', 'pcm_s16le'] : [];
     await execFileAsync('ffmpeg', [
       '-y',
       '-hide_banner',
@@ -543,8 +554,8 @@ export async function normalizeVoiceEnrollmentRecording(
       '1',
       '-ar',
       String(VOICE_REFERENCE_SAMPLE_RATE),
-      '-af',
-      REFERENCE_PREPROCESSING_FILTER,
+      ...processingArgs,
+      ...encodingArgs,
       outputPath,
     ]);
     const durationSeconds = await validateVoiceClipDecodability(outputPath);
@@ -600,7 +611,10 @@ export async function masterGeneratedVoiceAudio(
         ? CHATTERBOX_CLARITY_MASTERING_FILTER
         : preset === 'chatterbox-enhanced'
           ? CHATTERBOX_ENHANCED_MASTERING_FILTER
-          : GENERATED_AUDIO_MASTERING_FILTER,
+          : preset === 'indicf5-natural'
+            ? INDICF5_NATURAL_MASTERING_FILTER
+            : GENERATED_AUDIO_MASTERING_FILTER,
+      ...(preset === 'indicf5-natural' ? ['-c:a', 'pcm_s16le'] : []),
       outputPath,
     ]);
     await probeDuration(outputPath);

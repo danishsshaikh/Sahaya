@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { measureWavDuration } from '@/lib/audio/audio-duration';
 import {
   masterGeneratedVoiceAudio,
+  normalizeVoiceEnrollmentRecording,
   validateEnhancedVoiceAudio,
 } from '@/lib/voice-cloning/audio-validation';
 
@@ -54,6 +55,28 @@ function synthesizeSegmentedWav(
 }
 
 describe.skipIf(!ffmpegAvailable)('masterGeneratedVoiceAudio', () => {
+  it('preserves complete IndicF5 timing while producing mono 24 kHz PCM16', async () => {
+    const raw = synthesizeSegmentedWav(
+      [
+        { seconds: 0.3, amplitude: 0 },
+        { seconds: 0.5, amplitude: 8_000 },
+        { seconds: 0.4, amplitude: 0 },
+        { seconds: 0.5, amplitude: 8_000, frequency: 260 },
+        { seconds: 0.3, amplitude: 0 },
+      ],
+      44_100,
+    );
+
+    const mastered = await masterGeneratedVoiceAudio(raw, 'wav', 'indicf5-natural');
+    const wav = Buffer.from(mastered.audio);
+
+    expect(measureWavDuration(mastered.audio)).toBeCloseTo(2, 1);
+    expect(wav.readUInt16LE(20)).toBe(1);
+    expect(wav.readUInt16LE(22)).toBe(1);
+    expect(wav.readUInt32LE(24)).toBe(24_000);
+    expect(wav.readUInt16LE(34)).toBe(16);
+  });
+
   it('keeps a quiet final voiced tail before trimming only trailing silence', async () => {
     const raw = synthesizeSegmentedWav([
       { seconds: 0.4, amplitude: 12_000 },
@@ -127,5 +150,31 @@ describe.skipIf(!ffmpegAvailable)('masterGeneratedVoiceAudio', () => {
   it('rejects an all-silent generated clip without returning corrupt audio', async () => {
     const silence = synthesizeSegmentedWav([{ seconds: 0.8, amplitude: 0 }]);
     await expect(masterGeneratedVoiceAudio(silence, 'wav', 'chatterbox-clarity')).rejects.toThrow();
+  });
+});
+
+describe.skipIf(!ffmpegAvailable)('normalizeVoiceEnrollmentRecording', () => {
+  it('keeps the full IndicF5 reference while converting only its transport format', async () => {
+    const recording = synthesizeSegmentedWav(
+      [
+        { seconds: 0.25, amplitude: 0 },
+        { seconds: 1.5, amplitude: 6_000 },
+        { seconds: 0.25, amplitude: 0 },
+      ],
+      44_100,
+    );
+
+    const normalized = await normalizeVoiceEnrollmentRecording(
+      { bytes: recording, mimeType: 'audio/wav', fileName: 'reference.wav' },
+      'indicf5-natural',
+    );
+    const wav = Buffer.from(normalized.referenceAudio);
+
+    expect(normalized.durationSeconds).toBeCloseTo(2, 1);
+    expect(wav.readUInt16LE(20)).toBe(1);
+    expect(wav.readUInt16LE(22)).toBe(1);
+    expect(wav.readUInt32LE(24)).toBe(24_000);
+    expect(wav.readUInt16LE(34)).toBe(16);
+    expect(normalized.qualityDecision.severity).toBe('pass');
   });
 });

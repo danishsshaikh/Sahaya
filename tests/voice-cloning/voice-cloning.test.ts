@@ -999,6 +999,10 @@ describe('voice profile model preview API', () => {
         status: 'completed',
         profile: { provider: 'indicf5', languageId: language },
       });
+      expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledWith(
+        expect.objectContaining({ mimeType: 'audio/webm', fileName: 'voice.webm' }),
+        'indicf5-natural',
+      );
       expect(writeVoiceProfile).toHaveBeenCalledWith(
         expect.objectContaining({
           provider: 'indicf5',
@@ -1012,6 +1016,11 @@ describe('voice profile model preview API', () => {
           language,
           text: getVoicePreviewText(language, 'indicf5'),
         }),
+      );
+      expect(masterGeneratedVoiceAudio).toHaveBeenCalledWith(
+        new Uint8Array([1, 2]),
+        'wav',
+        'indicf5-natural',
       );
     },
   );

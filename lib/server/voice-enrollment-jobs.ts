@@ -300,7 +300,7 @@ export async function generateVariantPreview(
         ? variants.enhanced
         : variants.original;
   } else {
-    mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format, 'standard');
+    mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format, 'indicf5-natural');
   }
   log.info('voice output mastering completed', {
     attemptId: options.attemptId,
@@ -421,7 +421,10 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       provider: input.providerId,
       recordingBytes: input.recording.bytes.byteLength,
     });
-    const normalizedReference = await normalizeVoiceEnrollmentRecording(input.recording);
+    const normalizedReference =
+      input.providerId === 'indicf5'
+        ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
+        : await normalizeVoiceEnrollmentRecording(input.recording);
     log.info('voice enrollment quality check passed', {
       attemptId: input.attemptId,
       operation: 'enroll',
