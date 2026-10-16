@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   listAgents: vi.fn(),
   stageState: vi.fn(),
   toastWarning: vi.fn(),
+  staticVoiceEnabled: vi.fn(),
 }));
 
 vi.mock('@/lib/utils/model-config', () => ({
@@ -72,6 +73,9 @@ vi.mock('@/lib/orchestration/registry/store', () => ({
 }));
 
 vi.mock('sonner', () => ({ toast: { warning: mocks.toastWarning } }));
+vi.mock('@/lib/config/feature-flags', () => ({
+  isStaticVoiceEnabled: mocks.staticVoiceEnabled,
+}));
 
 const mockFetch = vi.fn() as Mock;
 vi.stubGlobal('fetch', mockFetch);
@@ -140,10 +144,12 @@ describe('browser scene generation retry wrappers', () => {
     });
     mocks.isTTSProviderEnabled.mockReturnValue(true);
     mocks.pickNarratorAgent.mockReturnValue(undefined);
+    mocks.resolveAgentVoiceOptions.mockClear();
     mocks.resolveAgentVoiceOptions.mockResolvedValue({});
     mocks.listAgents.mockReturnValue([]);
     mocks.stageState.mockReturnValue({ stage: { id: 'stage-1' } });
     mocks.toastWarning.mockReset();
+    mocks.staticVoiceEnabled.mockReturnValue(true);
   });
 
   it('retries transient scene content HTTP failures before returning success', async () => {
@@ -509,6 +515,16 @@ describe('browser scene generation retry wrappers', () => {
         format: 'wav',
       }),
     );
+  });
+
+  it('does not initialize or request a generic narrator when static voice is disabled', async () => {
+    mocks.staticVoiceEnabled.mockReturnValue(false);
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+
+    await expect(generateAndStoreTTS('tts_static_off', 'Hello class')).resolves.toBeNull();
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mocks.resolveAgentVoiceOptions).not.toHaveBeenCalled();
   });
 
   it('uses the structured lesson language instead of an ambiguous narration directive', async () => {

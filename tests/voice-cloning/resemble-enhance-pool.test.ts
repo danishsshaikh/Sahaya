@@ -128,13 +128,15 @@ describe('Resemble Enhance worker pool', () => {
 describe('enhancement activation policy', () => {
   it('keeps classroom and Hindi processing opt-in', () => {
     vi.stubEnv('VOICE_ENHANCEMENT_ENABLED', 'true');
-    expect(isVoiceEnhancementAllowed('en', 'preview')).toBe(true);
-    expect(isVoiceEnhancementAllowed('en', 'classroom')).toBe(false);
-    expect(isVoiceEnhancementAllowed('hi', 'preview')).toBe(false);
+    expect(isVoiceEnhancementAllowed('chatterbox', 'en', 'preview')).toBe(true);
+    expect(isVoiceEnhancementAllowed('chatterbox', 'en', 'classroom')).toBe(false);
+    expect(isVoiceEnhancementAllowed('chatterbox', 'hi', 'preview')).toBe(false);
 
     vi.stubEnv('VOICE_ENHANCEMENT_CLASSROOM_ENABLED', 'true');
     vi.stubEnv('VOICE_ENHANCEMENT_HINDI_ENABLED', 'true');
-    expect(isVoiceEnhancementAllowed('hi', 'classroom')).toBe(true);
+    expect(isVoiceEnhancementAllowed('chatterbox', 'hi', 'classroom')).toBe(true);
+    expect(isVoiceEnhancementAllowed('indicf5', 'hi', 'classroom')).toBe(false);
+    expect(isVoiceEnhancementAllowed('chatterbox', 'mr', 'classroom')).toBe(false);
   });
 
   it('uses conservative defaults and a single worker', () => {

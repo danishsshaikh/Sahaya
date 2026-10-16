@@ -15,6 +15,11 @@ const mocks = vi.hoisted(() => ({
   assetRefExists: vi.fn(),
   proveExclusiveAssetOwnership: vi.fn(),
   mayGenerate: vi.fn(),
+  staticVoiceEnabled: vi.fn(),
+}));
+
+vi.mock('@/lib/config/feature-flags', () => ({
+  isStaticVoiceEnabled: mocks.staticVoiceEnabled,
 }));
 
 vi.mock('@/lib/classroom/generation-permission', () => ({
@@ -62,6 +67,7 @@ import {
 
 describe('allocated speech audio identities', () => {
   beforeEach(() => {
+    mocks.staticVoiceEnabled.mockReturnValue(true);
     mocks.mayGenerate.mockReset().mockReturnValue(true);
     mocks.audioGet.mockReset();
     mocks.generateAndStoreTTS.mockReset();
@@ -110,6 +116,15 @@ describe('allocated speech audio identities', () => {
   it('refuses regeneration for a viewer who may not start generation', async () => {
     mocks.stageState = { stage: { id: 'stage-1' }, scenes: [] };
     mocks.mayGenerate.mockReturnValue(false);
+
+    await expect(
+      regenerateSpeechAudio(3, { id: 'speech-1', text: 'New narration' }, 'English'),
+    ).resolves.toBeNull();
+    expect(mocks.generateAndStoreTTS).not.toHaveBeenCalled();
+  });
+
+  it('does not regenerate with a generic provider when static voice is disabled', async () => {
+    mocks.staticVoiceEnabled.mockReturnValue(false);
 
     await expect(
       regenerateSpeechAudio(3, { id: 'speech-1', text: 'New narration' }, 'English'),

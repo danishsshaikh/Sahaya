@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   voiceOptions: vi.fn(),
   warning: vi.fn(),
+  staticVoiceEnabled: vi.fn(),
 }));
 
 vi.mock('@/lib/store/settings', () => ({
@@ -54,6 +55,9 @@ vi.mock('@/lib/hooks/use-browser-tts', () => ({
       cancel: mocks.cancel,
     };
   },
+}));
+vi.mock('@/lib/config/feature-flags', () => ({
+  isStaticVoiceEnabled: mocks.staticVoiceEnabled,
 }));
 
 import { useDiscussionTTS } from '@/lib/hooks/use-discussion-tts';
@@ -131,6 +135,7 @@ async function respond(index: number, body = { base64: btoa(`audio-${index}`), f
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.staticVoiceEnabled.mockReturnValue(true);
   clearUnavailableVoiceBindingsForTests();
   mocks.voiceOptions.mockResolvedValue(undefined);
   mocks.settings.ttsMuted = false;
@@ -164,6 +169,17 @@ afterEach(() => {
 });
 
 describe('discussion TTS synthesis lookahead', () => {
+  it('does not initialize or queue generic discussion speech when static voice is disabled', async () => {
+    mocks.staticVoiceEnabled.mockReturnValue(false);
+    act(() => root.render(createElement(Probe)));
+
+    await seal('A');
+
+    expect(mocks.browserOptions.enabled).toBe(false);
+    expect(requests).toHaveLength(0);
+    expect(mocks.speak).not.toHaveBeenCalled();
+  });
+
   it('requests B during A playback and consumes the prepared result exactly once', async () => {
     await seal('A');
     await seal('B');

@@ -254,7 +254,7 @@ export async function synthesizeFacultyVoice(input: {
       const enhancementRequested =
         resolveVoiceProfileEnhancementMode(profile) === 'resemble-enhance';
       const enhancementAllowed =
-        enhancementRequested && isVoiceEnhancementAllowed(language, 'classroom');
+        enhancementRequested && isVoiceEnhancementAllowed(providerId, language, 'classroom');
       const variants = await processChatterboxAudioVariants(result, {
         attemptEnhancement: enhancementRequested && enhancementAllowed,
         context: 'classroom',

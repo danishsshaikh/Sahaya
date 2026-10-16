@@ -21,7 +21,6 @@ import {
 } from '@/lib/audio/tts-language';
 import { getVoiceEnrollmentPhrases } from '@/lib/voice-cloning/phrases';
 import {
-  CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS,
   isChatterboxFacultySynthesisLanguage,
   resolveTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
@@ -32,7 +31,6 @@ import {
 import {
   DEFAULT_CHATTERBOX_MODEL_VARIANT,
   RECOMMENDED_VOICE_GENERATION_SETTINGS,
-  VOICE_GENERATION_SETTING_RANGES,
   VOICE_SETTINGS_PRESETS,
   voiceGenerationPresetForSettings,
   resolveVoiceProfileProvider,
@@ -45,6 +43,12 @@ import {
   type VoiceSettingsPreset,
 } from '@/lib/voice-cloning/types';
 import { readVoiceApiResponse, voiceFetchError } from '@/lib/voice-cloning/api-client';
+import {
+  activateTeachingVoiceSelection,
+  clearTeachingVoiceSelection,
+  disableTeachingVoiceSelection,
+  readTeachingVoiceSelection,
+} from '@/lib/voice-cloning/selection-client';
 
 interface TeachingVoiceCardProps {
   selectedProfileId?: string;
@@ -109,69 +113,19 @@ function busyPhaseForEnrollmentPhase(phase?: VoiceEnrollmentResponse['phase']): 
   return 'generating';
 }
 
-const MODEL_OPTIONS: Array<{
-  value: ChatterboxModelVariant;
-  label: string;
-  description: string;
-}> = [
-  { value: 'v3', label: 'V3 — Recommended', description: 'Newer multilingual voice model' },
-  { value: 'v2', label: 'V2 — Legacy', description: 'Previous voice model' },
-];
-
 const PRESET_OPTIONS: Array<{
   value: Exclude<VoiceSettingsPreset, 'custom'>;
   label: string;
 }> = [
   { value: 'natural', label: 'Natural' },
   { value: 'expressive', label: 'Expressive' },
-  { value: 'accent-test', label: 'Accent Test' },
 ];
 
 const PRESET_DESCRIPTIONS: Record<Exclude<VoiceSettingsPreset, 'custom'>, string> = {
-  natural: 'Balanced settings for clear, natural teaching narration.',
-  expressive: 'Adds more emphasis and energy to the delivery.',
-  'accent-test':
-    'Uses lower voice guidance to test whether the generated accent stays closer to your recording.',
+  natural: 'Clear, balanced classroom narration.',
+  expressive: 'More emphasis for stories and key ideas.',
+  'accent-test': 'Legacy saved style.',
 };
-
-const SETTING_LABELS: Record<keyof VoiceGenerationSettings, { label: string; helper: string }> = {
-  exaggeration: {
-    label: 'Voice Variation',
-    helper: 'Controls emphasis and expressiveness in the generated line.',
-  },
-  cfgWeight: {
-    label: 'Voice Guidance',
-    helper: 'Lower values leave more room for the reference voice during A/B testing.',
-  },
-  temperature: {
-    label: 'Speech Randomness',
-    helper: 'Controls how much variation Chatterbox can use while speaking.',
-  },
-  topP: {
-    label: 'Speech Variation',
-    helper: 'Expert sampling control for the range of likely next sounds.',
-  },
-  minP: {
-    label: 'Low-Probability Filtering',
-    helper: 'Expert sampling control for filtering unlikely sounds.',
-  },
-  repetitionPenalty: {
-    label: 'Repeat Control',
-    helper: 'Expert control that discourages repeated words or phrases.',
-  },
-};
-
-const BASIC_SETTING_KEYS: Array<keyof VoiceGenerationSettings> = [
-  'exaggeration',
-  'cfgWeight',
-  'temperature',
-];
-
-const EXPERT_SETTING_KEYS: Array<keyof VoiceGenerationSettings> = [
-  'topP',
-  'minP',
-  'repetitionPenalty',
-];
 
 function cloneRecommendedSettings(): VoiceGenerationSettings {
   return { ...RECOMMENDED_VOICE_GENERATION_SETTINGS };
@@ -261,8 +215,6 @@ export function TeachingVoiceCard({
     useState<VoiceGenerationSettings>(cloneRecommendedSettings);
   const [draftEnhancementMode, setDraftEnhancementMode] =
     useState<VoiceEnhancementMode>('standard');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [expertOpen, setExpertOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyPhase, setBusyPhase] = useState<BusyPhase | null>(null);
   const [busyStartedAt, setBusyStartedAt] = useState<number | null>(null);
@@ -406,8 +358,17 @@ export function TeachingVoiceCard({
           setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
           setDraftEnhancementMode(config.enhancementMode ?? 'standard');
         }
-        if (next?.status === 'ready' && !selectedProfileIdRef.current) {
-          onSelectedProfileIdChangeRef.current(next.id);
+        if (next?.status === 'ready') {
+          const language = normalizeProfileLanguageId(next);
+          const persisted = readTeachingVoiceSelection(language);
+          const selectedId = selectedProfileIdRef.current;
+          const mayRestore = !selectedId || selectedId === next.id;
+          const matchesPersisted = !persisted?.profileId || persisted.profileId === next.id;
+          if (persisted?.enabled !== false && mayRestore && matchesPersisted) {
+            activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
+            selectedProfileIdRef.current = next.id;
+            onSelectedProfileIdChangeRef.current(next.id);
+          }
         }
       })
       .catch(() => {
@@ -463,6 +424,29 @@ export function TeachingVoiceCard({
     setError(null);
     setRecordingRequiresRetry(false);
     setSetupStep('record');
+  };
+
+  const prepareForRerecord = () => {
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+    setRecordingStartedAt(null);
+    setElapsedSeconds(0);
+    clearCandidateRecording();
+  };
+
+  const activateProfile = (next: PublicVoiceProfile) => {
+    const language = normalizeProfileLanguageId(next);
+    activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
+    selectedProfileIdRef.current = next.id;
+    onSelectedProfileIdChange(next.id);
+  };
+
+  const disableProfile = (next: PublicVoiceProfile) => {
+    disableTeachingVoiceSelection(normalizeProfileLanguageId(next));
+    selectedProfileIdRef.current = undefined;
+    onSelectedProfileIdChange(undefined);
   };
 
   const startBusy = (initialPhase: BusyPhase, stagedPhases: Array<[number, BusyPhase]> = []) => {
@@ -569,58 +553,9 @@ export function TeachingVoiceCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrollmentLanguage]);
 
-  const updateGenerationSetting = (key: keyof VoiceGenerationSettings, value: number) => {
-    setDraftGenerationSettings((prev) => ({ ...prev, [key]: value }));
-  };
-
   const applyPreset = (preset: VoiceSettingsPreset) => {
     if (preset === 'custom') return;
     setDraftGenerationSettings({ ...VOICE_SETTINGS_PRESETS[preset] });
-  };
-
-  const resetRecommendedDraft = () => {
-    setDraftModelVariant(DEFAULT_CHATTERBOX_MODEL_VARIANT);
-    setDraftLanguageId(
-      isChatterboxFacultySynthesisLanguage(acceptedConfiguration?.languageId)
-        ? acceptedConfiguration.languageId
-        : draftLanguageId,
-    );
-    setPreviewTextLanguageId('en');
-    setDraftGenerationSettings(cloneRecommendedSettings());
-    setDraftEnhancementMode('standard');
-  };
-
-  const renderSettingSlider = (key: keyof VoiceGenerationSettings) => {
-    const range = VOICE_GENERATION_SETTING_RANGES[key];
-    const metadata = SETTING_LABELS[key];
-    const value = draftGenerationSettings[key];
-    return (
-      <div key={key} className="space-y-1.5">
-        <div className="flex items-baseline justify-between gap-3">
-          <label htmlFor={`voice-setting-${key}`} className="text-xs font-medium text-foreground">
-            {metadata.label}
-          </label>
-          <span className="text-xs tabular-nums text-muted-foreground">{value.toFixed(2)}</span>
-        </div>
-        <input
-          id={`voice-setting-${key}`}
-          type="range"
-          min={range.min}
-          max={range.max}
-          step={range.step}
-          value={value}
-          aria-valuetext={`${metadata.label} ${value.toFixed(2)}`}
-          onChange={(event) => updateGenerationSetting(key, Number(event.target.value))}
-          className="w-full accent-primary"
-        />
-        <div className="flex justify-between text-[10px] tabular-nums text-muted-foreground">
-          <span>{range.min.toFixed(2)}</span>
-          <span>Recommended {range.recommended.toFixed(2)}</span>
-          <span>{range.max.toFixed(2)}</span>
-        </div>
-        <p className="text-xs leading-snug text-muted-foreground">{metadata.helper}</p>
-      </div>
-    );
   };
 
   const renderVoiceConfigurationControls = () => (
@@ -666,10 +601,10 @@ export function TeachingVoiceCard({
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <label htmlFor="voice-language-id" className="text-xs font-medium text-foreground">
-            Language
+            Accent
           </label>
           <select
             id="voice-language-id"
@@ -678,144 +613,54 @@ export function TeachingVoiceCard({
               const languageId = event.target.value;
               if (!isChatterboxFacultySynthesisLanguage(languageId)) return;
               setDraftLanguageId(languageId);
-              if (languageId === 'en') setPreviewTextLanguageId('en');
+              setPreviewTextLanguageId('en');
             }}
             className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
           >
-            {CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS.map((languageId) => (
-              <option key={languageId} value={languageId}>
-                {CHATTERBOX_LANGUAGE_LABELS[languageId]}
-              </option>
-            ))}
+            <option value="en">English</option>
+            <option value="hi">Hindi-influenced</option>
           </select>
           <p className="text-xs leading-snug text-muted-foreground">
-            Choose the language Chatterbox uses to generate speech. You can try both with the same
-            recording; pronunciation and accent may vary.
+            Adjusts pronunciation conditioning only. Your lesson text is not translated.
           </p>
         </div>
 
-        <div className="space-y-2">
-          <label htmlFor="voice-model-variant" className="text-xs font-medium text-foreground">
-            Voice Model
-          </label>
-          <select
-            id="voice-model-variant"
-            value={draftModelVariant}
-            onChange={(event) => setDraftModelVariant(event.target.value as ChatterboxModelVariant)}
-            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
-          >
-            {MODEL_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-2">
-          <label
-            htmlFor="voice-preview-text-language"
-            className="text-xs font-medium text-foreground"
-          >
-            Preview Text
-          </label>
-          <select
-            id="voice-preview-text-language"
-            value={previewTextLanguageId}
-            onChange={(event) =>
-              setPreviewTextLanguageId(event.target.value as VoicePreviewTextLanguage)
-            }
-            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
-          >
-            <option value="en">English sample</option>
-            <option value="hi" disabled={draftLanguageId !== 'hi'}>
-              Hindi sample
-            </option>
-          </select>
-          <p className="text-xs leading-snug text-muted-foreground">
-            English text with Hindi synthesis is experimental and may pronounce words differently.
-          </p>
-        </div>
-      </div>
-
-      <fieldset className="space-y-2">
-        <legend className="text-xs font-medium text-foreground">Narration Audio</legend>
-        <div className="inline-flex rounded-md border border-border/70 p-0.5">
-          {(
-            [
-              ['standard', 'Original'],
-              ['resemble-enhance', 'Enhanced'],
-            ] as const
-          ).map(([value, label]) => {
-            const selected = draftEnhancementMode === value;
-            const unavailable =
-              value === 'resemble-enhance' && !!selectedComparison && !selectedComparison.enhanced;
-            return (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={selected}
-                disabled={unavailable}
-                onClick={() => setDraftEnhancementMode(value)}
-                className={cn(
-                  'rounded px-3 py-1.5 text-xs font-medium transition-colors',
-                  selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground',
-                  unavailable && 'cursor-not-allowed opacity-50',
-                )}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-        {selectedComparison?.enhancementError && (
-          <p className="text-xs text-muted-foreground">{selectedComparison.enhancementError}</p>
-        )}
-      </fieldset>
-
-      <div className="rounded-lg border border-border/70">
-        <button
-          type="button"
-          onClick={() => setAdvancedOpen((value) => !value)}
-          className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium text-foreground"
-          aria-expanded={advancedOpen}
-        >
-          <span className="flex items-center gap-2">
-            <SlidersHorizontal className="size-4" />
-            Advanced Voice Settings
-          </span>
-          <span className="text-xs text-muted-foreground">{advancedOpen ? 'Hide' : 'Show'}</span>
-        </button>
-
-        {advancedOpen && (
-          <div className="space-y-4 border-t border-border/70 p-3">
-            <div className="grid gap-4 md:grid-cols-3">
-              {BASIC_SETTING_KEYS.map(renderSettingSlider)}
-            </div>
-
-            <div className="rounded-md border border-border/70">
-              <button
-                type="button"
-                onClick={() => setExpertOpen((value) => !value)}
-                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-foreground"
-                aria-expanded={expertOpen}
-              >
-                <span>Expert Settings</span>
-                <span className="text-muted-foreground">{expertOpen ? 'Hide' : 'Show'}</span>
-              </button>
-              {expertOpen && (
-                <div className="grid gap-4 border-t border-border/70 p-3 md:grid-cols-3">
-                  {EXPERT_SETTING_KEYS.map(renderSettingSlider)}
-                </div>
-              )}
-            </div>
-
-            <Button type="button" size="sm" variant="outline" onClick={resetRecommendedDraft}>
-              <RotateCcw className="size-4" />
-              Reset to Recommended
-            </Button>
+        <fieldset className="space-y-2">
+          <legend className="text-xs font-medium text-foreground">Voice Output</legend>
+          <div className="inline-flex rounded-md border border-border/70 p-0.5">
+            {(
+              [
+                ['standard', 'Original'],
+                ['resemble-enhance', 'Enhanced'],
+              ] as const
+            ).map(([value, label]) => {
+              const selected = draftEnhancementMode === value;
+              const unavailable =
+                value === 'resemble-enhance' &&
+                !!selectedComparison &&
+                !selectedComparison.enhanced;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={selected}
+                  disabled={unavailable}
+                  onClick={() => setDraftEnhancementMode(value)}
+                  className={cn(
+                    'rounded px-3 py-1.5 text-xs font-medium transition-colors',
+                    selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground',
+                    unavailable && 'cursor-not-allowed opacity-50',
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
-        )}
+          {selectedComparison?.enhancementError && (
+            <p className="text-xs text-muted-foreground">{selectedComparison.enhancementError}</p>
+          )}
+        </fieldset>
       </div>
     </div>
   );
@@ -990,7 +835,7 @@ export function TeachingVoiceCard({
       setPreviewTextLanguageId(data.profile.previewTextLanguageId ?? 'en');
       setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
       setDraftEnhancementMode(config.enhancementMode ?? 'standard');
-      onSelectedProfileIdChange(data.profile.id);
+      activateProfile(data.profile);
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Could not accept preview.');
     } finally {
@@ -1052,6 +897,8 @@ export function TeachingVoiceCard({
         setEnrollmentAttemptId(null);
       }
       if (!profileId || selectedProfileId === profileId) {
+        clearTeachingVoiceSelection(normalizeProfileLanguageId(profile));
+        selectedProfileIdRef.current = undefined;
         onSelectedProfileIdChange(undefined);
       }
       if (!profileId) setOpen(false);
@@ -1198,8 +1045,6 @@ export function TeachingVoiceCard({
             setCustomizeOpen(false);
             setDraftLanguageId(event.target.value);
             setEnrollmentLanguage(event.target.value);
-            selectedProfileIdRef.current = undefined;
-            onSelectedProfileIdChange(undefined);
           }}
           className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
@@ -1234,7 +1079,7 @@ export function TeachingVoiceCard({
                 : 'Teaching Voice ready'
               : profile?.status === 'preview-ready'
                 ? 'Preview is ready for review'
-                : 'Create a private voice for AI Teacher narration'}
+                : 'Narration is off until you create a Teaching Voice'}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1244,9 +1089,9 @@ export function TeachingVoiceCard({
               size="sm"
               variant={selectedProfileId === readyProfile.id ? 'default' : 'outline'}
               onClick={() =>
-                onSelectedProfileIdChange(
-                  selectedProfileId === readyProfile.id ? undefined : readyProfile.id,
-                )
+                selectedProfileId === readyProfile.id
+                  ? disableProfile(readyProfile)
+                  : activateProfile(readyProfile)
               }
             >
               <Check className="size-4" />
@@ -1360,7 +1205,7 @@ export function TeachingVoiceCard({
                   type="button"
                   size="sm"
                   variant={selectedProfileId === readyProfile.id ? 'default' : 'outline'}
-                  onClick={() => onSelectedProfileIdChange(readyProfile.id)}
+                  onClick={() => activateProfile(readyProfile)}
                   disabled={busy || selectedProfileId === readyProfile.id}
                 >
                   <Check className="size-4" />
@@ -1428,7 +1273,7 @@ export function TeachingVoiceCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => setSetupStep('record')}
+                  onClick={prepareForRerecord}
                   disabled={busy}
                 >
                   <RotateCcw className="size-4" />
@@ -1500,14 +1345,10 @@ export function TeachingVoiceCard({
                         !enrollmentPhrase
                       }
                       onClick={startRecording}
-                      aria-label={
-                        recording.blob
-                          ? 'Record teaching voice again'
-                          : 'Start recording teaching voice'
-                      }
+                      aria-label="Start recording teaching voice"
                     >
                       <Mic className="size-4" />
-                      {recording.blob ? 'Re-record' : 'Start Recording'}
+                      Start Recording
                     </Button>
                   )}
                   <span
@@ -1541,7 +1382,7 @@ export function TeachingVoiceCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={startRecording}
+                      onClick={prepareForRerecord}
                       disabled={!consented || busy}
                     >
                       <RotateCcw className="size-4" />

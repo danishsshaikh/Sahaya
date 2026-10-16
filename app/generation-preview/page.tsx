@@ -31,7 +31,10 @@ import {
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
-import { GenerationTeachingVoiceProfileError } from '@/lib/voice-cloning/selection-client';
+import {
+  GenerationTeachingVoiceProfileError,
+  resolveGenerationTeachingVoiceProfileId,
+} from '@/lib/voice-cloning/selection-client';
 import {
   normalizeTeachingVoiceLanguageId,
   type TeachingVoiceLanguage,
@@ -72,7 +75,11 @@ import {
   teacherOnlyAgentIds,
   teacherOnlyAgentInfo,
 } from '@/lib/generation/agent-mode';
-import { isGeneratedClassroomAgentsEnabled } from '@/lib/config/feature-flags';
+import {
+  isGeneratedClassroomAgentsEnabled,
+  isStaticVoiceEnabled,
+  isVoiceCloningEnabled,
+} from '@/lib/config/feature-flags';
 import { nanoid } from 'nanoid';
 import type { GeneratedAgentConfig, Stage } from '@/lib/types/stage';
 import type {
@@ -100,6 +107,7 @@ import {
 } from './voice-language';
 import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
 import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
+import { toast } from 'sonner';
 
 const log = createLogger('GenerationPreview');
 const OUTLINE_REVIEW_AUTO_CONTINUE_MS = 2500;
@@ -979,7 +987,43 @@ function GenerationPreviewContent() {
             reason: error instanceof Error ? error.message : languageResolution.reason || 'unknown',
             profileId: stage.teacherVoiceProfileId,
           });
-          throw error;
+          const compatibleProfileId = lessonLanguage
+            ? await resolveGenerationTeachingVoiceProfileId(
+                undefined,
+                fetch,
+                undefined,
+                lessonLanguage,
+              )
+            : undefined;
+          if (compatibleProfileId) {
+            stage.teacherVoiceProfileId = compatibleProfileId;
+            currentSession = {
+              ...currentSession,
+              teacherVoiceProfileId: compatibleProfileId,
+            };
+            persistSession(currentSession);
+            await validateGenerationPreviewVoiceSelection(currentSession);
+          } else {
+            stage.teacherVoiceProfileId = undefined;
+            currentSession = { ...currentSession, teacherVoiceProfileId: undefined };
+            persistSession(currentSession);
+            toast.warning(
+              'No Teaching Voice matches this lesson language. The visual lesson will continue without narration.',
+            );
+          }
+        }
+      } else if (lessonLanguage && isVoiceCloningEnabled()) {
+        const compatibleProfileId = await resolveGenerationTeachingVoiceProfileId(
+          undefined,
+          fetch,
+          undefined,
+          lessonLanguage,
+        );
+        if (compatibleProfileId) {
+          stage.teacherVoiceProfileId = compatibleProfileId;
+          currentSession = { ...currentSession, teacherVoiceProfileId: compatibleProfileId };
+          persistSession(currentSession);
+          await validateGenerationPreviewVoiceSelection(currentSession);
         }
       }
 
@@ -1314,7 +1358,8 @@ function GenerationPreviewContent() {
       }
       const narrationEnabled = Boolean(
         stage.teacherVoiceProfileId ||
-        (settings.ttsEnabled &&
+        (isStaticVoiceEnabled() &&
+          settings.ttsEnabled &&
           settings.ttsProviderId !== 'browser-native-tts' &&
           isTTSProviderEnabled(
             settings.ttsProviderId,

@@ -100,14 +100,17 @@ export function getVoiceEnhancementConfig(): VoiceEnhancementConfig {
 }
 
 export function isVoiceEnhancementAllowed(
+  providerId: 'chatterbox' | 'indicf5',
   languageId: string,
   surface: VoiceEnhancementSurface,
 ): boolean {
   const config = getVoiceEnhancementConfig();
+  if (providerId !== 'chatterbox') return false;
   if (!config.enabled) return false;
   if (surface === 'preview' && !config.previewEnabled) return false;
   if (surface === 'classroom' && !config.classroomEnabled) return false;
-  return languageId !== 'hi' || config.hindiEnabled;
+  if (languageId === 'en') return true;
+  return languageId === 'hi' && config.hindiEnabled;
 }
 
 export function getTeachingVoiceServiceConfig(_provider: 'indicf5') {

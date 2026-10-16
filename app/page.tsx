@@ -106,6 +106,7 @@ import {
   workspaceResumeHref,
 } from '@/lib/workbench/workspace-session-memory';
 import { resolveGenerationTeachingVoiceProfileId } from '@/lib/voice-cloning/selection-client';
+import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion';
 
 const log = createLogger('Home');
 
@@ -113,6 +114,28 @@ const WEB_SEARCH_STORAGE_KEY = 'webSearchEnabled';
 const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
 const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
 const HOMEPAGE_TAGLINE = 'Create focused, engaging lessons with an AI teaching assistant.';
+const TEACHING_PROMPT_SUGGESTIONS = [
+  {
+    label: 'Explain a Concept',
+    prompt:
+      'Explain Fourier transforms to second-year engineering students using a signal-processing example.',
+  },
+  {
+    label: 'Tell a Historical Story',
+    prompt:
+      'Tell the historical story of Indian astronomy, clearly separating mythology, cultural tradition, and scientific evidence.',
+  },
+  {
+    label: 'Create a Quiz',
+    prompt:
+      "Create a five-question formative quiz on Newton's laws, with explanations for every answer.",
+  },
+  {
+    label: 'Teach with Examples',
+    prompt:
+      'Teach recursion in Python with three progressively harder examples for undergraduate students.',
+  },
+] as const;
 
 // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
 // yet, so the flow only logs the parsed slides. Hide the entry point behind a
@@ -926,13 +949,29 @@ function HomePage() {
             {/* Textarea */}
             <textarea
               ref={textareaRef}
-              placeholder={t('upload.requirementPlaceholder')}
-              className="min-h-[140px] max-h-[300px] w-full resize-none border-0 bg-transparent px-4 pb-2 pt-1 text-[13px] leading-relaxed placeholder:text-muted-foreground/45 focus:outline-none"
+              placeholder="What would you like to teach today?"
+              className="min-h-[120px] max-h-[300px] w-full resize-none border-0 bg-transparent px-4 pb-2 pt-1 text-[13px] leading-relaxed placeholder:text-muted-foreground/55 focus:outline-none"
               value={form.requirement}
               onChange={(e) => updateForm('requirement', e.target.value)}
               onKeyDown={handleKeyDown}
               rows={4}
             />
+
+            <Suggestions className="px-3 pb-3" aria-label="Teaching prompt suggestions">
+              {TEACHING_PROMPT_SUGGESTIONS.map(({ label, prompt }) => (
+                <Suggestion
+                  key={label}
+                  suggestion={prompt}
+                  onClick={(value) => {
+                    updateForm('requirement', value);
+                    textareaRef.current?.focus();
+                  }}
+                  className="h-7 border-border/70 bg-background/70 px-3 text-[11px] text-muted-foreground hover:border-primary/35 hover:bg-primary/5 hover:text-foreground"
+                >
+                  {label}
+                </Suggestion>
+              ))}
+            </Suggestions>
 
             {/* Toolbar row */}
             <div className="px-3 pb-3 flex items-end gap-2">

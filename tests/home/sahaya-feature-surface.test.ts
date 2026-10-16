@@ -48,6 +48,16 @@ describe('Sahaya default-off feature surfaces', () => {
     expect(personalizationGate).toBeGreaterThan(0);
   });
 
+  it('keeps generic narration generation and classroom controls behind static voice', () => {
+    const generator = source('lib/hooks/use-scene-generator.ts');
+    const discussion = source('lib/hooks/use-discussion-tts.ts');
+    const actions = source('components/edit/ActionsBar/ActionsBar.tsx');
+
+    expect(generator).toContain('!teacherVoiceProfileId && !isStaticVoiceEnabled()');
+    expect(discussion).toContain('const playbackEnabled = enabled && isStaticVoiceEnabled()');
+    expect(actions).toContain('isStaticVoiceEnabled() &&');
+  });
+
   it('gates the Whiteboard launcher, data subscription, and mounted surface', () => {
     const area = source('components/canvas/canvas-area.tsx');
     const toolbar = source('components/canvas/canvas-toolbar.tsx');
@@ -67,5 +77,20 @@ describe('Sahaya default-off feature surfaces', () => {
     expect(progress).toContain('max-w-[11.5rem]');
     expect(progress).toContain('w-[min(20rem,calc(100vw-2rem))]');
     expect(progress).toContain('hidden font-medium sm:inline');
+  });
+
+  it('renders compact prompt chips that populate the editor without submitting', () => {
+    const page = source('app/page.tsx');
+    const suggestion = source('components/ai-elements/suggestion.tsx');
+
+    expect(page).toContain('placeholder="What would you like to teach today?"');
+    expect(page).toContain('<Suggestions');
+    expect(page).toContain('Explain a Concept');
+    expect(page).toContain('Tell a Historical Story');
+    expect(page).toContain('Create a Quiz');
+    expect(page).toContain('Teach with Examples');
+    expect(page).toContain("updateForm('requirement', value)");
+    expect(suggestion).toContain('rounded-full');
+    expect(suggestion).toContain('type="button"');
   });
 });

@@ -95,6 +95,7 @@ import {
 } from '@/lib/audio/regenerate-speech-tts';
 import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { PronunciationRepairDialog } from './PronunciationRepairDialog';
+import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
 const EMPTY: Action[] = [];
 const EMPTY_ELEMENTS: { id?: string; type: string; content?: string }[] = [];
@@ -1108,7 +1109,8 @@ export function ActionsBar({ sceneId }: { sceneId: string }) {
   // controls the way it must lose its ability to bill the operator.
   const ttsActive = useSettingsStore(
     (s) =>
-      Boolean(teacherVoiceProfileId) || (s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts'),
+      Boolean(teacherVoiceProfileId) ||
+      (isStaticVoiceEnabled() && s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts'),
   );
   const mayGenerate = useMayGenerateForStage(useStageStore((s) => s.stage?.id));
   const sceneNarrationInFlight =

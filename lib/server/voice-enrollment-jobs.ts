@@ -275,7 +275,7 @@ export async function generateVariantPreview(
   let mastered: { audio: Uint8Array; format: string };
   let comparison: VoicePreviewComparison | undefined;
   if (providerId === 'chatterbox') {
-    const enhancementAllowed = isVoiceEnhancementAllowed(config.languageId, 'preview');
+    const enhancementAllowed = isVoiceEnhancementAllowed(providerId, config.languageId, 'preview');
     const variants = await processChatterboxAudioVariants(preview, {
       attemptEnhancement: enhancementAllowed,
       context: 'preview',

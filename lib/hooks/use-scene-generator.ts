@@ -58,6 +58,7 @@ import {
   sceneForNarrationSynthesis,
   sceneWithPendingNarration,
 } from '@/lib/generation/scene-narration';
+import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
 const log = createLogger('SceneGenerator');
 type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
@@ -698,6 +699,7 @@ export async function generateAndStoreTTS(
   const settings = useSettingsStore.getState();
   const stage = useStageStore.getState().stage;
   const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
+  if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) return null;
   const lessonLanguage = normalizeTeachingVoiceLanguageId(stage?.lessonLanguage);
   const narrationLanguage = lessonLanguage || language || stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
@@ -1055,6 +1057,9 @@ export async function generateTTSForScene(
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
+  if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) {
+    return { success: true, failedCount: 0 };
+  }
   scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
   const speechActions = scene.actions.filter(
     (a): a is SpeechAction =>
@@ -1852,7 +1857,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             const teacherVoiceProfileId = store.getState().stage?.teacherVoiceProfileId;
             const narrationEnabled = Boolean(
               teacherVoiceProfileId ||
-              (settings.ttsEnabled &&
+              (isStaticVoiceEnabled() &&
+                settings.ttsEnabled &&
                 settings.ttsProviderId !== 'browser-native-tts' &&
                 isTTSProviderEnabled(
                   settings.ttsProviderId,
@@ -2154,7 +2160,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         const teacherVoiceProfileId = state.stage.teacherVoiceProfileId;
         const narrationEnabled = Boolean(
           teacherVoiceProfileId ||
-          (settings.ttsEnabled &&
+          (isStaticVoiceEnabled() &&
+            settings.ttsEnabled &&
             settings.ttsProviderId !== 'browser-native-tts' &&
             isTTSProviderEnabled(
               settings.ttsProviderId,
