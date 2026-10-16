@@ -92,15 +92,60 @@ describe('resolveGenerationTeachingVoiceProfileId', () => {
     expect(readTeachingVoiceSelection('hi', storage)).toBeUndefined();
   });
 
-  it('respects an intentional Teaching Voice disable without requesting a fallback profile', async () => {
+  it('respects an intentional Teaching Voice disable for the same ready profile', async () => {
     const storage = memoryStorage();
-    const fetchProfile = vi.fn();
-    disableTeachingVoiceSelection('en', storage);
+    const fetchProfile = vi.fn(async () =>
+      response({ profile: { id: 'vcp_ready', status: 'ready' } }),
+    );
+    disableTeachingVoiceSelection('en', 'vcp_ready', storage);
 
     await expect(
       resolveGenerationTeachingVoiceProfileId(undefined, fetchProfile as typeof fetch, storage),
     ).resolves.toBeUndefined();
-    expect(fetchProfile).not.toHaveBeenCalled();
+    expect(fetchProfile).toHaveBeenCalledOnce();
+    expect(fetchProfile).toHaveBeenCalledWith(
+      '/api/voice-cloning/profile?language=en&profileId=vcp_ready',
+    );
+  });
+
+  it('preserves a legacy explicit disable for the language', async () => {
+    const storage = memoryStorage();
+    storage.setItem('sahaya.teachingVoice.selection.v1.en', JSON.stringify({ enabled: false }));
+    const fetchProfile = vi.fn(async () =>
+      response({
+        profile: {
+          id: 'vcp_ready',
+          status: 'ready',
+          enhancementMode: 'resemble-enhance',
+        },
+      }),
+    );
+
+    await expect(
+      resolveGenerationTeachingVoiceProfileId(undefined, fetchProfile as typeof fetch, storage),
+    ).resolves.toBeUndefined();
+    expect(readTeachingVoiceSelection('en', storage)).toEqual({ enabled: false });
+  });
+
+  it('reconciles a stale saved profile id to the latest ready profile', async () => {
+    const storage = memoryStorage();
+    activateTeachingVoiceSelection('en', 'vcp_old', 'standard', storage);
+    const fetchProfile = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return url.includes('profileId=vcp_old')
+        ? response({ profile: null }, false)
+        : response({ profile: { id: 'vcp_current', status: 'ready' } });
+    });
+
+    await expect(
+      resolveGenerationTeachingVoiceProfileId(undefined, fetchProfile as typeof fetch, storage),
+    ).resolves.toBe('vcp_current');
+    expect(fetchProfile).toHaveBeenNthCalledWith(
+      1,
+      '/api/voice-cloning/profile?language=en&profileId=vcp_old',
+    );
+    expect(fetchProfile).toHaveBeenNthCalledWith(2, '/api/voice-cloning/profile?language=en');
+    expect(readTeachingVoiceSelection('en', storage)?.profileId).toBe('vcp_current');
   });
 
   it('restores only a persisted ready profile', async () => {

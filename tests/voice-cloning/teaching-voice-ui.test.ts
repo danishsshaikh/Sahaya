@@ -37,7 +37,9 @@ describe('Teaching Voice faculty UI', () => {
 
   it('activates an accepted ready profile and preserves an intentional disable', () => {
     expect(source).toContain('activateProfile(data.profile)');
-    expect(source).toContain('disableTeachingVoiceSelection(normalizeProfileLanguageId(next))');
-    expect(source).toContain('persisted?.enabled !== false');
+    expect(source).toContain(
+      'disableTeachingVoiceSelection(profileSelectionLanguage(next), next.id)',
+    );
+    expect(source).toContain('isTeachingVoiceExplicitlyDisabled(persisted, next.id)');
   });
 });

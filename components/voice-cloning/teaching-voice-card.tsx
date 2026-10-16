@@ -47,6 +47,7 @@ import {
   activateTeachingVoiceSelection,
   clearTeachingVoiceSelection,
   disableTeachingVoiceSelection,
+  isTeachingVoiceExplicitlyDisabled,
   readTeachingVoiceSelection,
 } from '@/lib/voice-cloning/selection-client';
 
@@ -133,6 +134,10 @@ function cloneRecommendedSettings(): VoiceGenerationSettings {
 
 function normalizeProfileLanguageId(profile: PublicVoiceProfile | null): string {
   return resolveTeachingVoiceLanguage(profile?.languageId || profile?.language) || 'en';
+}
+
+function profileSelectionLanguage(profile: PublicVoiceProfile | null): string {
+  return resolveTeachingVoiceLanguage(profile?.language) || normalizeProfileLanguageId(profile);
 }
 
 function profileConfiguration(profile: PublicVoiceProfile): VoiceConfiguration {
@@ -238,6 +243,12 @@ export function TeachingVoiceCard({
   const recordingUrlRef = useRef<string | undefined>(undefined);
 
   const readyProfile = profile?.status === 'ready' ? profile : null;
+  const readyProfileDisabled = readyProfile
+    ? isTeachingVoiceExplicitlyDisabled(
+        readTeachingVoiceSelection(profileSelectionLanguage(readyProfile)),
+        readyProfile.id,
+      )
+    : false;
   const isChatterboxProfile = !!profile && resolveVoiceProfileProvider(profile) === 'chatterbox';
   const draftConfiguration: VoiceConfiguration = {
     languageId: draftLanguageId,
@@ -359,12 +370,12 @@ export function TeachingVoiceCard({
           setDraftEnhancementMode(config.enhancementMode ?? 'standard');
         }
         if (next?.status === 'ready') {
-          const language = normalizeProfileLanguageId(next);
+          const language = profileSelectionLanguage(next);
           const persisted = readTeachingVoiceSelection(language);
           const selectedId = selectedProfileIdRef.current;
           const mayRestore = !selectedId || selectedId === next.id;
-          const matchesPersisted = !persisted?.profileId || persisted.profileId === next.id;
-          if (persisted?.enabled !== false && mayRestore && matchesPersisted) {
+          const explicitlyDisabled = isTeachingVoiceExplicitlyDisabled(persisted, next.id);
+          if (!explicitlyDisabled && mayRestore) {
             activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
             selectedProfileIdRef.current = next.id;
             onSelectedProfileIdChangeRef.current(next.id);
@@ -437,14 +448,14 @@ export function TeachingVoiceCard({
   };
 
   const activateProfile = (next: PublicVoiceProfile) => {
-    const language = normalizeProfileLanguageId(next);
+    const language = profileSelectionLanguage(next);
     activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
     selectedProfileIdRef.current = next.id;
     onSelectedProfileIdChange(next.id);
   };
 
   const disableProfile = (next: PublicVoiceProfile) => {
-    disableTeachingVoiceSelection(normalizeProfileLanguageId(next));
+    disableTeachingVoiceSelection(profileSelectionLanguage(next), next.id);
     selectedProfileIdRef.current = undefined;
     onSelectedProfileIdChange(undefined);
   };
@@ -897,7 +908,7 @@ export function TeachingVoiceCard({
         setEnrollmentAttemptId(null);
       }
       if (!profileId || selectedProfileId === profileId) {
-        clearTeachingVoiceSelection(normalizeProfileLanguageId(profile));
+        clearTeachingVoiceSelection(profileSelectionLanguage(profile));
         selectedProfileIdRef.current = undefined;
         onSelectedProfileIdChange(undefined);
       }
@@ -1076,7 +1087,9 @@ export function TeachingVoiceCard({
             {readyProfile
               ? selectedProfileId === readyProfile.id
                 ? 'Teaching Voice selected'
-                : 'Teaching Voice ready'
+                : readyProfileDisabled
+                  ? 'Teaching Voice ready, narration disabled'
+                  : 'Teaching Voice ready'
               : profile?.status === 'preview-ready'
                 ? 'Preview is ready for review'
                 : 'Narration is off until you create a Teaching Voice'}

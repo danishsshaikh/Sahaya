@@ -14,6 +14,7 @@ export interface TeachingVoiceSelection {
   enabled: boolean;
   profileId?: string;
   enhancementMode?: VoiceEnhancementMode;
+  explicitlyDisabled?: boolean;
 }
 
 const SELECTION_STORAGE_PREFIX = 'sahaya.teachingVoice.selection.v1';
@@ -48,6 +49,9 @@ export function readTeachingVoiceSelection(
       enabled: parsed.enabled,
       ...(profileId ? { profileId } : {}),
       ...(parsed.enabled ? { enhancementMode } : {}),
+      ...(!parsed.enabled && parsed.explicitlyDisabled === true
+        ? { explicitlyDisabled: true }
+        : {}),
     };
   } catch {
     return undefined;
@@ -78,8 +82,30 @@ export function activateTeachingVoiceSelection(
   );
 }
 
-export function disableTeachingVoiceSelection(language: string, storage?: StorageLike): void {
-  persistTeachingVoiceSelection(language, { enabled: false }, storage);
+export function disableTeachingVoiceSelection(
+  language: string,
+  profileId: string,
+  storage?: StorageLike,
+): void {
+  const normalized = normalizeProfileId(profileId);
+  if (!normalized) return;
+  persistTeachingVoiceSelection(
+    language,
+    { enabled: false, profileId: normalized, explicitlyDisabled: true },
+    storage,
+  );
+}
+
+export function isTeachingVoiceExplicitlyDisabled(
+  selection: TeachingVoiceSelection | undefined,
+  profileId: string,
+): boolean {
+  return (
+    selection?.enabled === false &&
+    (!selection.profileId ||
+      (selection.explicitlyDisabled === true &&
+        selection.profileId === normalizeProfileId(profileId)))
+  );
 }
 
 export function clearTeachingVoiceSelection(
@@ -106,23 +132,28 @@ export async function resolveGenerationTeachingVoiceProfileId(
   if (normalizedSelected) return normalizedSelected;
 
   const persisted = readTeachingVoiceSelection(language, storage);
-  if (persisted?.enabled === false) return undefined;
+  const fetchReadyProfile = async (profileId?: string): Promise<PublicVoiceProfile | null> => {
+    const query = new URLSearchParams({ language });
+    if (profileId) query.set('profileId', profileId);
+    let response: Response;
+    try {
+      response = await fetchProfile(`/api/voice-cloning/profile?${query}`);
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+    const data = (await response.json().catch(() => null)) as ProfileResponse | null;
+    return data?.profile?.status === 'ready' ? data.profile : null;
+  };
 
-  const query = new URLSearchParams({ language });
-  if (persisted?.profileId) query.set('profileId', persisted.profileId);
-  let response: Response;
-  try {
-    response = await fetchProfile(`/api/voice-cloning/profile?${query}`);
-  } catch {
-    return undefined;
-  }
-  if (!response.ok) return undefined;
-
-  const data = (await response.json().catch(() => null)) as ProfileResponse | null;
-  const profile = data?.profile;
-  if (profile?.status !== 'ready') return undefined;
+  const persistedProfile = persisted?.profileId
+    ? await fetchReadyProfile(persisted.profileId)
+    : null;
+  const profile = persistedProfile ?? (await fetchReadyProfile());
+  if (!profile) return undefined;
   const profileId = normalizeProfileId(profile.id);
   if (!profileId) return undefined;
+  if (isTeachingVoiceExplicitlyDisabled(persisted, profileId)) return undefined;
   activateTeachingVoiceSelection(
     language,
     profileId,
