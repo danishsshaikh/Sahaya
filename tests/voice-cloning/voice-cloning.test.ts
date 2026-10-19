@@ -498,10 +498,10 @@ describe('faculty voice setup UI contract', () => {
     expect(source).toContain("value: Exclude<VoiceSettingsPreset, 'custom'>");
     expect(source).toContain("{ value: 'natural', label: 'Natural' }");
     expect(source).toContain("{ value: 'expressive', label: 'Expressive' }");
-    expect(source).toContain("{ value: 'accent-test', label: 'Accent Test' }");
     expect(source).toContain('draftPresetDescription');
     expect(source).toContain('Manual settings are active.');
     expect(source).not.toContain("{ value: 'custom'");
+    expect(source).not.toContain("{ value: 'accent-test', label: 'Accent Test' }");
     expect(source).toContain('Speak naturally and do not rush.');
     expect(source).not.toContain('Minimum');
     expect(source).not.toContain('MAX_RECORDING_DURATION_SECONDS');
@@ -515,19 +515,17 @@ describe('faculty voice setup UI contract', () => {
   it('keeps customization controls compact and teacher-facing', () => {
     const source = componentSource();
 
-    expect(source).toContain('Balanced settings for clear, natural teaching narration.');
-    expect(source).toContain('Adds more emphasis and energy to the delivery.');
-    expect(source).toContain('Uses lower voice guidance to test whether the generated accent');
-    expect(source).toContain('Choose the language Chatterbox uses to generate speech.');
-    expect(source).toContain('English text with Hindi synthesis is experimental');
-    expect(source).toContain('CHATTERBOX_FACULTY_SYNTHESIS_LANGUAGE_IDS.map');
-    expect(source).not.toContain(
-      'id="voice-language-id"\n            value={draftLanguageId}\n            disabled',
-    );
-    expect(source).toContain('Voice Model');
-    expect(source).toContain('Advanced Voice Settings');
-    expect(source).toContain('Expert Settings');
-    expect(source).toContain('md:grid-cols-3');
+    expect(source).toContain('Clear, balanced classroom narration.');
+    expect(source).toContain('More emphasis for stories and key ideas.');
+    expect(source).toContain('Adjusts pronunciation conditioning only.');
+    expect(source).toContain('<option value="en">English</option>');
+    expect(source).toContain('<option value="hi">Hindi-influenced</option>');
+    expect(source).toContain('Voice Output');
+    expect(source).toContain('Preview Changes');
+    expect(source).not.toContain('Voice Model');
+    expect(source).not.toContain('Advanced Voice Settings');
+    expect(source).not.toContain('Expert Settings');
+    expect(source).toContain('sm:grid-cols-2');
     expect(source).not.toContain('Chatterbox receives');
     expect(source).not.toContain('grid gap-2 sm:grid-cols-4');
   });
@@ -1604,6 +1602,60 @@ describe('voice profile model preview API', () => {
       profile: { id: 'vcp_new' },
     });
     expect(deleteProfile).toHaveBeenCalledWith({ providerReferenceId: 'vcp_ready' });
+  });
+
+  it('uses preview enhancement eligibility for Hindi-conditioned Chatterbox', async () => {
+    readVoiceProfile.mockResolvedValue(readyProfile('v3'));
+    isVoiceEnhancementAllowed.mockReturnValue(true);
+    processChatterboxAudioVariants.mockResolvedValue({
+      original: { audio: new Uint8Array([3, 3]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([8, 8]), format: 'wav' },
+    });
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'preview-model',
+          modelVariant: 'v3',
+          languageId: 'hi',
+          previewTextLanguageId: 'en',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(readVoiceProfile).toHaveBeenCalledWith('vcp_ready', 'local-faculty');
+    expect(generatePreview).toHaveBeenCalledTimes(1);
+    expect(generatePreview).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'hi', text: getVoicePreviewText('en', 'chatterbox') }),
+    );
+    expect(isVoiceEnhancementAllowed).toHaveBeenCalledWith('chatterbox', 'hi', 'preview');
+    expect(processChatterboxAudioVariants).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: new Uint8Array([1, 2]) }),
+      expect.objectContaining({ attemptEnhancement: true, languageId: 'hi' }),
+    );
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'vcp_ready',
+        referenceAudioKey: '/private/reference.wav',
+        languageId: 'en',
+        draftPreview: expect.objectContaining({
+          config: expect.objectContaining({
+            modelVariant: 'v3',
+            languageId: 'hi',
+            enhancementMode: 'resemble-enhance',
+          }),
+          comparison: expect.objectContaining({
+            original: expect.any(Object),
+            enhanced: expect.any(Object),
+          }),
+        }),
+      }),
+    );
   });
 
   it('previews V2 and V3 from the same persisted reference without re-recording', async () => {

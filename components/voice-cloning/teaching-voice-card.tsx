@@ -268,30 +268,41 @@ export function TeachingVoiceCard({
   const acceptedConfiguration = readyProfile ? profileConfiguration(readyProfile) : null;
   const draftMatchesAccepted =
     acceptedConfiguration && voiceConfigurationsEqual(draftConfiguration, acceptedConfiguration);
-  const selectedComparison =
-    profile?.draftPreview?.comparison &&
+  const matchingDraftPreview =
+    profile?.draftPreview &&
     voiceSynthesisConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
     (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId
-      ? profile.draftPreview.comparison
-      : acceptedConfiguration &&
-          voiceSynthesisConfigurationsEqual(draftConfiguration, acceptedConfiguration) &&
-          (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId
-        ? readyProfile?.previewComparison
-        : undefined;
+      ? profile.draftPreview
+      : undefined;
+  const acceptedPreviewMatches = Boolean(
+    acceptedConfiguration &&
+    voiceSynthesisConfigurationsEqual(draftConfiguration, acceptedConfiguration) &&
+    (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId,
+  );
+  const selectedComparison =
+    matchingDraftPreview?.comparison ??
+    (acceptedPreviewMatches ? readyProfile?.previewComparison : undefined);
   const selectedPreview = selectedComparison
     ? draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
       ? selectedComparison.enhanced
       : selectedComparison.original
-    : profile?.draftPreview &&
-        voiceConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
-        (!isChatterboxProfile ||
-          (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId)
-      ? profile.draftPreview.preview
-      : draftMatchesAccepted &&
-          (!isChatterboxProfile ||
-            (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId)
+    : matchingDraftPreview &&
+        voiceConfigurationsEqual(matchingDraftPreview.config, draftConfiguration)
+      ? matchingDraftPreview.preview
+      : draftMatchesAccepted && acceptedPreviewMatches
         ? readyProfile?.preview
         : undefined;
+  const previewOutdated = Boolean(
+    isChatterboxProfile &&
+    (profile?.draftPreview?.preview || readyProfile?.preview) &&
+    !matchingDraftPreview &&
+    !acceptedPreviewMatches,
+  );
+  const canApplyDraftConfiguration = Boolean(
+    !draftMatchesAccepted &&
+    selectedPreview &&
+    (draftEnhancementMode === 'standard' || selectedComparison?.enhanced),
+  );
   const recordingReady = Boolean(recording.blob);
   const canSubmitRecording = recordingReady && !recordingRequiresRetry && !busy;
   const recordingGuidance =
@@ -673,6 +684,20 @@ export function TeachingVoiceCard({
           )}
         </fieldset>
       </div>
+
+      {readyProfile && (
+        <div className="flex flex-col gap-3 border-t border-border/70 pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs leading-snug text-muted-foreground" aria-live="polite">
+            {previewOutdated
+              ? 'Preview required for the selected accent and style.'
+              : 'Your saved Teaching Voice remains active until changes are applied.'}
+          </div>
+          <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
+            <Play className="size-4" />
+            Preview Changes
+          </Button>
+        </div>
+      )}
     </div>
   );
 
@@ -855,8 +880,11 @@ export function TeachingVoiceCard({
     }
   };
 
-  const generateModelPreview = async () => {
+  async function generateModelPreview() {
     if (!profile || previewRequestInFlightRef.current) return;
+    const previewConfiguration = isChatterboxProfile
+      ? { ...draftConfiguration, modelVariant: DEFAULT_CHATTERBOX_MODEL_VARIANT }
+      : draftConfiguration;
     previewRequestInFlightRef.current = true;
     setSetupStep('preview');
     startBusy('generating', [[14000, 'finishing']]);
@@ -869,7 +897,7 @@ export function TeachingVoiceCard({
         body: JSON.stringify({
           profileId: profile.id,
           action: 'preview-model',
-          ...draftConfiguration,
+          ...previewConfiguration,
           previewTextLanguageId,
         }),
       });
@@ -877,13 +905,25 @@ export function TeachingVoiceCard({
       if (!data.profile) throw new Error('Could not generate preview.');
       setProfile(data.profile);
       setSetupStep('review');
+      const generatedConfig = data.profile.draftPreview?.config;
+      if (generatedConfig) {
+        setDraftModelVariant(generatedConfig.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
+        setDraftLanguageId(generatedConfig.languageId);
+        setPreviewTextLanguageId(generatedConfig.previewTextLanguageId ?? 'en');
+        setDraftGenerationSettings(
+          generatedConfig.generationSettings ?? cloneRecommendedSettings(),
+        );
+        setDraftEnhancementMode(generatedConfig.enhancementMode ?? 'standard');
+      }
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : 'Could not generate preview.');
+      setSetupStep('review');
+      const message = err instanceof Error ? err.message : 'Could not generate preview.';
+      setPreviewError(`${message} Your saved Teaching Voice is unchanged. Try again.`);
     } finally {
       previewRequestInFlightRef.current = false;
       stopBusy();
     }
-  };
+  }
 
   const deleteProfile = async (profileId?: string) => {
     if (previewRequestInFlightRef.current) return;
@@ -1224,7 +1264,7 @@ export function TeachingVoiceCard({
                   <Check className="size-4" />
                   {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use This Voice'}
                 </Button>
-                {!draftMatchesAccepted && selectedPreview && (
+                {canApplyDraftConfiguration && (
                   <Button type="button" size="sm" onClick={acceptPreview} disabled={busy}>
                     <Check className="size-4" />
                     Use These Settings
