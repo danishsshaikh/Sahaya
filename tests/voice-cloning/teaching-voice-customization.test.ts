@@ -218,4 +218,61 @@ describe('Teaching Voice customization previews', () => {
     changeSelect(restoredAccent, 'en');
     expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
   });
+
+  it('previews Qwen Original and Enhanced without changing the saved Chatterbox voice', async () => {
+    const original = { format: 'wav', base64: 'cXdlbi1vcmlnaW5hbA==', createdAt: 'now' };
+    const enhanced = { format: 'wav', base64: 'cXdlbi1lbmhhbmNlZA==', createdAt: 'later' };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        return Promise.resolve(
+          jsonResponse({
+            success: true,
+            profile: savedProfile,
+            previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
+            modelPreview: {
+              previewModel: 'qwen3-tts-1.7b-base',
+              enhancementMode: 'resemble-enhance',
+              preview: enhanced,
+              comparison: { original, enhanced },
+            },
+          }),
+        );
+      }
+      return Promise.resolve(
+        jsonResponse({
+          success: true,
+          profile: { ...savedProfile, languageId: 'hi' },
+          previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mountTeachingVoiceCard();
+    await openCustomization(host);
+    click(button(host, 'Qwen3-TTS 1.7B'));
+
+    expect(host.querySelector('#voice-language-id')).toBeNull();
+    expect(host.textContent).toContain('Uses your saved English recording and transcript');
+    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).toBeNull();
+    click(button(host, 'Enhanced'));
+    click(button(host, 'Preview Changes'));
+    await flush();
+
+    const previewRequest = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(previewRequest?.[1]?.body))).toEqual({
+      profileId: PROFILE_ID,
+      action: 'preview-model',
+      previewModel: 'qwen3-tts-1.7b-base',
+      enhancementMode: 'resemble-enhance',
+    });
+    expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Resemble Enhance preview"]')).not.toBeNull();
+    expect(host.textContent).toContain('Preview only. Your saved Chatterbox voice remains active.');
+    expect(host.textContent).not.toContain('Use These Settings');
+    expect(host.textContent).toContain('Using Voice');
+    expect(
+      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
+    ).toEqual({ enabled: true, profileId: PROFILE_ID, enhancementMode: 'standard' });
+  });
 });

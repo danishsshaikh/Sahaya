@@ -3,6 +3,7 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import {
   getVoiceCloningDefaultLanguage,
   getChatterboxDefaultModelVariant,
+  isQwen3TtsPreviewEnabled,
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
 import { requireSessionUser } from '@/lib/auth/server';
@@ -21,6 +22,7 @@ import {
 import {
   isChatterboxModelVariant,
   isVoiceEnhancementMode,
+  isVoicePreviewModel,
   resolveVoiceProfileProvider,
   TeachingVoiceError,
   resolveVoiceProfileGenerationSettings,
@@ -33,6 +35,7 @@ import {
   type VoiceConfiguration,
   type VoiceGenerationSettings,
   type VoicePreviewTextLanguage,
+  type VoicePreviewModel,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
@@ -47,6 +50,7 @@ import {
   voiceEnrollmentErrorResponse,
   voiceEnrollmentResponse,
 } from '@/lib/server/voice-enrollment-jobs';
+import { generateQwen3TtsModelPreview } from '@/lib/server/qwen3-tts-preview';
 
 const log = createLogger('VoiceCloningProfileAPI');
 
@@ -54,6 +58,13 @@ export const maxDuration = 960;
 
 function disabled() {
   return apiError('PROVIDER_DISABLED', 404, 'Voice cloning is disabled');
+}
+
+function availablePreviewModels(): VoicePreviewModel[] {
+  return [
+    'chatterbox-v3',
+    ...(isQwen3TtsPreviewEnabled() ? (['qwen3-tts-1.7b-base'] as const) : []),
+  ];
 }
 
 function serverDefaultModelVariant(): ChatterboxModelVariant {
@@ -203,7 +214,10 @@ export async function GET(req: NextRequest) {
       getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
       validateTeachingVoiceLanguage(profile, requested ?? undefined);
     }
-    return apiSuccess({ profile: toPublicVoiceProfile(profile) });
+    return apiSuccess({
+      profile: toPublicVoiceProfile(profile),
+      previewModels: availablePreviewModels(),
+    });
   } catch (error) {
     return apiError(
       'INVALID_REQUEST',
@@ -242,6 +256,7 @@ export async function PATCH(req: NextRequest) {
     generationSettings?: unknown;
     enhancementMode?: string;
     previewTextLanguageId?: string;
+    previewModel?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -250,6 +265,53 @@ export async function PATCH(req: NextRequest) {
   if (!profile || profile.ownerId !== user.id || profile.status === 'deleted') {
     return apiError('INVALID_REQUEST', 404, 'Voice profile not found');
   }
+
+  const previewModel = body.previewModel ?? 'chatterbox-v3';
+  if (!isVoicePreviewModel(previewModel)) {
+    return apiError('INVALID_REQUEST', 400, 'Unsupported preview model');
+  }
+  if (previewModel === 'qwen3-tts-1.7b-base') {
+    if (body.action !== 'preview-model') {
+      return apiError('INVALID_REQUEST', 400, 'Qwen3-TTS is available for comparison only');
+    }
+    if (!isQwen3TtsPreviewEnabled()) {
+      return apiError('PROVIDER_DISABLED', 404, 'Qwen3-TTS preview is disabled');
+    }
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready for preview');
+    }
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'Qwen3-TTS preview requires an English Chatterbox Teaching Voice',
+      );
+    }
+    const enhancementMode =
+      body.enhancementMode === undefined
+        ? 'standard'
+        : isVoiceEnhancementMode(body.enhancementMode)
+          ? body.enhancementMode
+          : null;
+    if (!enhancementMode) {
+      return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
+    }
+    try {
+      const modelPreview = await generateQwen3TtsModelPreview(profile, enhancementMode);
+      return apiSuccess({
+        profile: toPublicVoiceProfile(profile),
+        modelPreview,
+        previewModels: availablePreviewModels(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Qwen3-TTS preview failed',
+      );
+    }
+  }
+
   let config: VoiceConfiguration;
   try {
     config = resolveVoiceConfiguration({

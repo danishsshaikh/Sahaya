@@ -2,6 +2,9 @@ export type VoiceProfileStatus = 'processing' | 'preview-ready' | 'ready' | 'fai
 export type ChatterboxModelVariant = 'v2' | 'v3';
 export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'custom';
 export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
+export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
+
+export const VOICE_PREVIEW_MODELS = ['chatterbox-v3', 'qwen3-tts-1.7b-base'] as const;
 
 export const CHATTERBOX_MODEL_VARIANTS = ['v2', 'v3'] as const;
 export const DEFAULT_CHATTERBOX_MODEL_VARIANT: ChatterboxModelVariant = 'v3';
@@ -71,6 +74,13 @@ export interface VoicePreviewComparison {
   original: VoicePreview;
   enhanced?: VoicePreview;
   enhancementError?: string;
+}
+
+export interface VoiceModelPreviewResult {
+  previewModel: VoicePreviewModel;
+  enhancementMode: VoiceEnhancementMode;
+  preview: VoicePreview;
+  comparison: VoicePreviewComparison;
 }
 
 export interface VoiceDraftPreview {
@@ -173,6 +183,10 @@ export function isChatterboxModelVariant(value: unknown): value is ChatterboxMod
   return value === 'v2' || value === 'v3';
 }
 
+export function isVoicePreviewModel(value: unknown): value is VoicePreviewModel {
+  return VOICE_PREVIEW_MODELS.includes(value as VoicePreviewModel);
+}
+
 export function resolveVoiceProfileProvider(profile: { provider?: string }): string {
   // Profiles enrolled during the retired Qwen3 period retain their reference WAV.
   // Resolve them to Chatterbox for new synthesis while preserving the stored
@@ -203,7 +217,7 @@ export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
     message: string,
     status: number,
     readonly metadata: {
-      provider: 'chatterbox' | 'indicf5';
+      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts';
       endpoint: string;
       operation: TeachingVoiceProviderOperation;
       providerStatus?: number;

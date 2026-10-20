@@ -1,4 +1,7 @@
-import { masterGeneratedVoiceAudio } from '@/lib/voice-cloning/audio-validation';
+import {
+  masterGeneratedVoiceAudio,
+  type GeneratedVoiceMasteringPreset,
+} from '@/lib/voice-cloning/audio-validation';
 import { enhanceGeneratedVoiceAudio } from '@/lib/voice-cloning/resemble-enhance';
 import { createLogger } from '@/lib/logger';
 
@@ -9,22 +12,28 @@ export interface ProcessedVoiceAudio {
   format: 'wav';
 }
 
-export interface ChatterboxAudioVariants {
+export interface VoiceAudioVariants {
   original: ProcessedVoiceAudio;
   enhanced?: ProcessedVoiceAudio;
   enhancementError?: string;
 }
 
-export async function processChatterboxAudioVariants(
+interface VoiceAudioVariantOptions {
+  attemptEnhancement: boolean;
+  context: 'preview' | 'classroom';
+  profileId: string;
+  languageId: string;
+  source: 'chatterbox' | 'qwen3-tts';
+  originalMasteringPreset: GeneratedVoiceMasteringPreset | null;
+}
+
+export async function processVoiceAudioVariants(
   raw: { audio: Uint8Array; format: string },
-  options: {
-    attemptEnhancement: boolean;
-    context: 'preview' | 'classroom';
-    profileId: string;
-    languageId: string;
-  },
-): Promise<ChatterboxAudioVariants> {
-  const original = await masterGeneratedVoiceAudio(raw.audio, raw.format, 'chatterbox-clarity');
+  options: VoiceAudioVariantOptions,
+): Promise<VoiceAudioVariants> {
+  const original = options.originalMasteringPreset
+    ? await masterGeneratedVoiceAudio(raw.audio, raw.format, options.originalMasteringPreset)
+    : { audio: raw.audio, format: 'wav' as const };
   if (!options.attemptEnhancement) return { original };
 
   const startedAt = Date.now();
@@ -37,6 +46,7 @@ export async function processChatterboxAudioVariants(
     );
     log.info('[VoiceEnhancement]', {
       event: 'completed',
+      source: options.source,
       context: options.context,
       profileId: options.profileId,
       languageId: options.languageId,
@@ -50,15 +60,33 @@ export async function processChatterboxAudioVariants(
   } catch (error) {
     log.warn('[VoiceEnhancement]', {
       event: 'bypassed',
+      source: options.source,
       context: options.context,
       profileId: options.profileId,
       languageId: options.languageId,
       totalMs: Date.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
+    const sourceLabel = options.source === 'chatterbox' ? 'Chatterbox' : 'Qwen3-TTS';
     return {
       original,
-      enhancementError: 'Enhancement is unavailable. The original Chatterbox audio is available.',
+      enhancementError: `Enhancement is unavailable. The original ${sourceLabel} audio is available.`,
     };
   }
+}
+
+export async function processChatterboxAudioVariants(
+  raw: { audio: Uint8Array; format: string },
+  options: {
+    attemptEnhancement: boolean;
+    context: 'preview' | 'classroom';
+    profileId: string;
+    languageId: string;
+  },
+): Promise<VoiceAudioVariants> {
+  return processVoiceAudioVariants(raw, {
+    ...options,
+    source: 'chatterbox',
+    originalMasteringPreset: 'chatterbox-clarity',
+  });
 }

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { processChatterboxAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
+import {
+  processChatterboxAudioVariants,
+  processVoiceAudioVariants,
+} from '@/lib/voice-cloning/audio-enhancement';
 
 const mocks = vi.hoisted(() => ({
   enhance: vi.fn(),
@@ -101,5 +104,43 @@ describe('Chatterbox enhancement branching', () => {
     });
     expect(result.original.audio).toEqual(new Uint8Array([4]));
     expect(result.enhanced).toBeUndefined();
+  });
+});
+
+describe('Qwen3-TTS enhancement branching', () => {
+  it('keeps the original Qwen waveform and enhances the same generated sample', async () => {
+    const result = await processVoiceAudioVariants(raw, {
+      ...options,
+      context: 'preview',
+      attemptEnhancement: true,
+      source: 'qwen3-tts',
+      originalMasteringPreset: null,
+    });
+
+    expect(result.original).toEqual({ audio: raw.audio, format: 'wav' });
+    expect(mocks.enhance).toHaveBeenCalledExactlyOnceWith(raw);
+    expect(mocks.master).toHaveBeenCalledExactlyOnceWith(
+      new Uint8Array([7, 8]),
+      'wav',
+      'chatterbox-enhanced',
+    );
+    expect(result.enhanced?.audio).toEqual(new Uint8Array([7, 8, 9]));
+  });
+
+  it('preserves the original Qwen preview when enhancement fails', async () => {
+    mocks.enhance.mockRejectedValue(new Error('enhancer unavailable'));
+
+    const result = await processVoiceAudioVariants(raw, {
+      ...options,
+      context: 'preview',
+      attemptEnhancement: true,
+      source: 'qwen3-tts',
+      originalMasteringPreset: null,
+    });
+
+    expect(result.original.audio).toBe(raw.audio);
+    expect(result.enhanced).toBeUndefined();
+    expect(result.enhancementError).toMatch(/original Qwen3-TTS audio/i);
+    expect(mocks.master).not.toHaveBeenCalled();
   });
 });

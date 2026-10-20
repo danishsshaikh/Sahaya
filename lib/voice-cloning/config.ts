@@ -32,6 +32,17 @@ export function getVoiceCloningTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
 }
 
+export function isQwen3TtsPreviewEnabled(): boolean {
+  return envFlag('QWEN3_TTS_PREVIEW_ENABLED', false);
+}
+
+export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs: number } {
+  return {
+    baseUrl: (process.env.QWEN3_TTS_BASE_URL || 'http://127.0.0.1:8771').trim().replace(/\/$/, ''),
+    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 1000, 900000)),
+  };
+}
+
 export function getChatterboxDefaultModelVariant(): ChatterboxModelVariant {
   const configured = (process.env.CHATTERBOX_T3_MODEL || '').trim().toLowerCase();
   return isChatterboxModelVariant(configured) ? configured : DEFAULT_CHATTERBOX_MODEL_VARIANT;
@@ -100,12 +111,13 @@ export function getVoiceEnhancementConfig(): VoiceEnhancementConfig {
 }
 
 export function isVoiceEnhancementAllowed(
-  providerId: 'chatterbox' | 'indicf5',
+  providerId: 'chatterbox' | 'indicf5' | 'qwen3-tts',
   languageId: string,
   surface: VoiceEnhancementSurface,
 ): boolean {
   const config = getVoiceEnhancementConfig();
-  if (providerId !== 'chatterbox') return false;
+  if (providerId === 'indicf5') return false;
+  if (providerId === 'qwen3-tts' && surface !== 'preview') return false;
   if (!config.enabled) return false;
   if (surface === 'preview' && !config.previewEnabled) return false;
   if (surface === 'classroom' && !config.classroomEnabled) return false;

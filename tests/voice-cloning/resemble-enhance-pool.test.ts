@@ -129,6 +129,8 @@ describe('enhancement activation policy', () => {
   it('keeps classroom and Hindi processing opt-in', () => {
     vi.stubEnv('VOICE_ENHANCEMENT_ENABLED', 'true');
     expect(isVoiceEnhancementAllowed('chatterbox', 'en', 'preview')).toBe(true);
+    expect(isVoiceEnhancementAllowed('qwen3-tts', 'en', 'preview')).toBe(true);
+    expect(isVoiceEnhancementAllowed('qwen3-tts', 'en', 'classroom')).toBe(false);
     expect(isVoiceEnhancementAllowed('chatterbox', 'en', 'classroom')).toBe(false);
     expect(isVoiceEnhancementAllowed('chatterbox', 'hi', 'preview')).toBe(false);
 

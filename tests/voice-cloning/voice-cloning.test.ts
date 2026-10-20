@@ -689,6 +689,8 @@ describe('voice profile model preview API', () => {
   const masterGeneratedVoiceAudio = vi.fn();
   const processChatterboxAudioVariants = vi.fn();
   const isVoiceEnhancementAllowed = vi.fn();
+  const isQwen3TtsPreviewEnabled = vi.fn();
+  const generateQwen3TtsModelPreview = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
   beforeEach(async () => {
@@ -707,6 +709,8 @@ describe('voice profile model preview API', () => {
     masterGeneratedVoiceAudio.mockReset();
     processChatterboxAudioVariants.mockReset();
     isVoiceEnhancementAllowed.mockReset();
+    isQwen3TtsPreviewEnabled.mockReset();
+    generateQwen3TtsModelPreview.mockReset();
     createVoiceProfileId.mockClear();
     referenceAudioExists.mockResolvedValue(true);
     createProfile.mockImplementation(async ({ profileId }) => ({ providerReferenceId: profileId }));
@@ -745,14 +749,19 @@ describe('voice profile model preview API', () => {
       ),
     }));
     isVoiceEnhancementAllowed.mockReturnValue(false);
+    isQwen3TtsPreviewEnabled.mockReturnValue(false);
     vi.doMock('@/lib/voice-cloning/config', () => ({
       getVoiceCloningDefaultLanguage: () => 'en',
       getChatterboxDefaultModelVariant: () => 'v3',
       isVoiceCloningServerEnabled: () => true,
       isVoiceEnhancementAllowed,
+      isQwen3TtsPreviewEnabled,
     }));
     vi.doMock('@/lib/voice-cloning/audio-enhancement', () => ({
       processChatterboxAudioVariants,
+    }));
+    vi.doMock('@/lib/server/qwen3-tts-preview', () => ({
+      generateQwen3TtsModelPreview,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', () => ({
       isVoiceRecordingQualityError: (error: unknown) =>
@@ -810,6 +819,7 @@ describe('voice profile model preview API', () => {
       consentTimestamp: '2026-08-11T00:00:00.000Z',
       consentVersion: 'faculty-self-voice-v1',
       referenceAudioKey: '/private/reference.wav',
+      referenceText: VOICE_ENROLLMENT_PARAGRAPH,
       providerReferenceId: 'vcp_ready',
       profileVersion: 1,
       preview: { format: 'wav', base64: 'old', createdAt: '2026-08-11T00:00:00.000Z' },
@@ -1167,6 +1177,79 @@ describe('voice profile model preview API', () => {
       },
     });
     expect(generatePreview).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an isolated Qwen comparison without mutating the Chatterbox profile', async () => {
+    const profile = {
+      ...readyProfile('v3'),
+      languageId: 'hi',
+      providerReferenceId: 'accepted-chatterbox-reference',
+    };
+    readVoiceProfile.mockResolvedValue(profile);
+    isQwen3TtsPreviewEnabled.mockReturnValue(true);
+    generateQwen3TtsModelPreview.mockResolvedValue({
+      previewModel: 'qwen3-tts-1.7b-base',
+      enhancementMode: 'resemble-enhance',
+      preview: { format: 'wav', base64: 'enhanced', createdAt: '2026-10-19T00:00:01.000Z' },
+      comparison: {
+        original: { format: 'wav', base64: 'original', createdAt: '2026-10-19T00:00:00.000Z' },
+        enhanced: { format: 'wav', base64: 'enhanced', createdAt: '2026-10-19T00:00:01.000Z' },
+      },
+    });
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: profile.id,
+          action: 'preview-model',
+          previewModel: 'qwen3-tts-1.7b-base',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      profile: {
+        provider: 'chatterbox',
+        languageId: 'hi',
+        preview: profile.preview,
+      },
+      modelPreview: {
+        previewModel: 'qwen3-tts-1.7b-base',
+        comparison: { original: { base64: 'original' }, enhanced: { base64: 'enhanced' } },
+      },
+      previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
+    });
+    expect(generateQwen3TtsModelPreview).toHaveBeenCalledExactlyOnceWith(
+      profile,
+      'resemble-enhance',
+    );
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+    expect(createProfile).not.toHaveBeenCalled();
+  });
+
+  it('does not allow a Qwen comparison to be accepted as the saved provider', async () => {
+    readVoiceProfile.mockResolvedValue(readyProfile('v3'));
+    isQwen3TtsPreviewEnabled.mockReturnValue(true);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_ready',
+          action: 'accept-preview',
+          previewModel: 'qwen3-tts-1.7b-base',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+    expect(generateQwen3TtsModelPreview).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported languages and mismatched phrase IDs clearly', async () => {
