@@ -1189,6 +1189,7 @@ describe('voice profile model preview API', () => {
     isQwen3TtsPreviewEnabled.mockReturnValue(true);
     generateQwen3TtsModelPreview.mockResolvedValue({
       previewModel: 'qwen3-tts-1.7b-base',
+      qwenCloneMode: 'speaker-embedding',
       enhancementMode: 'resemble-enhance',
       preview: { format: 'wav', base64: 'enhanced', createdAt: '2026-10-19T00:00:01.000Z' },
       comparison: {
@@ -1205,6 +1206,7 @@ describe('voice profile model preview API', () => {
           profileId: profile.id,
           action: 'preview-model',
           previewModel: 'qwen3-tts-1.7b-base',
+          qwenCloneMode: 'speaker-embedding',
           enhancementMode: 'resemble-enhance',
         }),
       }) as never,
@@ -1219,6 +1221,7 @@ describe('voice profile model preview API', () => {
       },
       modelPreview: {
         previewModel: 'qwen3-tts-1.7b-base',
+        qwenCloneMode: 'speaker-embedding',
         comparison: { original: { base64: 'original' }, enhanced: { base64: 'enhanced' } },
       },
       previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
@@ -1226,6 +1229,7 @@ describe('voice profile model preview API', () => {
     expect(generateQwen3TtsModelPreview).toHaveBeenCalledExactlyOnceWith(
       profile,
       'resemble-enhance',
+      'speaker-embedding',
     );
     expect(writeVoiceProfile).not.toHaveBeenCalled();
     expect(createProfile).not.toHaveBeenCalled();

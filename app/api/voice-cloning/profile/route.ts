@@ -21,6 +21,7 @@ import {
 } from '@/lib/voice-cloning/storage';
 import {
   isChatterboxModelVariant,
+  isQwen3TtsCloneMode,
   isVoiceEnhancementMode,
   isVoicePreviewModel,
   resolveVoiceProfileProvider,
@@ -257,6 +258,7 @@ export async function PATCH(req: NextRequest) {
     enhancementMode?: string;
     previewTextLanguageId?: string;
     previewModel?: string;
+    qwenCloneMode?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -296,8 +298,16 @@ export async function PATCH(req: NextRequest) {
     if (!enhancementMode) {
       return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
     }
+    const qwenCloneMode = body.qwenCloneMode ?? 'speaker-embedding';
+    if (!isQwen3TtsCloneMode(qwenCloneMode)) {
+      return apiError('INVALID_REQUEST', 400, 'Unsupported Qwen3-TTS clone mode');
+    }
     try {
-      const modelPreview = await generateQwen3TtsModelPreview(profile, enhancementMode);
+      const modelPreview = await generateQwen3TtsModelPreview(
+        profile,
+        enhancementMode,
+        qwenCloneMode,
+      );
       return apiSuccess({
         profile: toPublicVoiceProfile(profile),
         modelPreview,

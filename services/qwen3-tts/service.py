@@ -31,6 +31,7 @@ ATTENTION_IMPLEMENTATION = os.getenv(
     "QWEN3_TTS_ATTENTION_IMPLEMENTATION", "flash_attention_2"
 )
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+CLONE_MODES = {"speaker-embedding", "icl"}
 app = FastAPI(title="Sahaya Qwen3-TTS Preview Service")
 log = logging.getLogger("sahaya.qwen3_tts_preview")
 
@@ -44,7 +45,7 @@ model_error: str | None = None
 class VoicePrompt:
     reference_audio: Path
     reference_text: str
-    prompt: Any
+    prompts: dict[str, Any]
 
 
 profiles: dict[str, VoicePrompt] = {}
@@ -55,6 +56,7 @@ class ProfileCreateRequest(BaseModel):
     referenceAudioPath: str = Field(min_length=1)
     referenceText: str = Field(min_length=1)
     referenceLanguage: str = "en"
+    cloneMode: str = "speaker-embedding"
 
     @field_validator("profileId")
     @classmethod
@@ -78,11 +80,19 @@ class ProfileCreateRequest(BaseModel):
             raise ValueError("Qwen3-TTS preview requires an English reference transcript")
         return "en"
 
+    @field_validator("cloneMode")
+    @classmethod
+    def validate_clone_mode(cls, value: str) -> str:
+        if value not in CLONE_MODES:
+            raise ValueError("unsupported Qwen3-TTS clone mode")
+        return value
+
 
 class SynthesizeRequest(BaseModel):
     profileId: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1)
     language: str = "en"
+    cloneMode: str = "speaker-embedding"
 
     @field_validator("profileId")
     @classmethod
@@ -105,6 +115,13 @@ class SynthesizeRequest(BaseModel):
         if value.strip().lower() not in {"en", "english"}:
             raise ValueError("Qwen3-TTS preview currently supports English text only")
         return "en"
+
+    @field_validator("cloneMode")
+    @classmethod
+    def validate_clone_mode(cls, value: str) -> str:
+        if value not in CLONE_MODES:
+            raise ValueError("unsupported Qwen3-TTS clone mode")
+        return value
 
 
 def validate_reference(path_value: str) -> Path:
@@ -178,19 +195,46 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
         existing is not None
         and existing.reference_audio == reference
         and existing.reference_text == req.referenceText
+        and req.cloneMode in existing.prompts
     ):
         return {"providerReferenceId": req.profileId}
 
     if not generation_lock.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Qwen3-TTS preview service is busy")
     try:
+        with state_lock:
+            existing = profiles.get(req.profileId)
+        if (
+            existing is not None
+            and existing.reference_audio == reference
+            and existing.reference_text == req.referenceText
+            and req.cloneMode in existing.prompts
+        ):
+            return {"providerReferenceId": req.profileId}
+        x_vector_only = req.cloneMode == "speaker-embedding"
         prompt = active_model.create_voice_clone_prompt(
             ref_audio=str(reference),
-            ref_text=req.referenceText,
-            x_vector_only_mode=False,
+            ref_text=None if x_vector_only else req.referenceText,
+            x_vector_only_mode=x_vector_only,
         )
         with state_lock:
-            profiles[req.profileId] = VoicePrompt(reference, req.referenceText, prompt)
+            previous_prompts = (
+                existing.prompts
+                if existing is not None
+                and existing.reference_audio == reference
+                and existing.reference_text == req.referenceText
+                else {}
+            )
+            profiles[req.profileId] = VoicePrompt(
+                reference,
+                req.referenceText,
+                {**previous_prompts, req.cloneMode: prompt},
+            )
+        log.info(
+            "Qwen3-TTS prompt cached profileId=%s cloneMode=%s",
+            req.profileId,
+            req.cloneMode,
+        )
         return {"providerReferenceId": req.profileId}
     except Exception as exc:
         log.error(
@@ -223,6 +267,9 @@ def synthesize(req: SynthesizeRequest) -> Response:
         profile = profiles.get(req.profileId)
     if profile is None:
         raise HTTPException(status_code=404, detail="voice profile not found")
+    prompt = profile.prompts.get(req.cloneMode)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="voice clone mode is not registered")
     validate_reference(str(profile.reference_audio))
     if not generation_lock.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Qwen3-TTS preview service is busy")
@@ -231,14 +278,15 @@ def synthesize(req: SynthesizeRequest) -> Response:
             waveforms, sample_rate = active_model.generate_voice_clone(
                 text=req.text,
                 language="English",
-                voice_clone_prompt=profile.prompt,
+                voice_clone_prompt=prompt,
             )
         if waveforms is None or len(waveforms) == 0:
             raise ValueError("model returned no audio")
         payload = serialize_wav(waveforms[0], int(sample_rate))
         log.info(
-            "Qwen3-TTS preview completed profileId=%s textChars=%d outputBytes=%d",
+            "Qwen3-TTS preview completed profileId=%s cloneMode=%s textChars=%d outputBytes=%d",
             req.profileId,
+            req.cloneMode,
             len(req.text),
             len(payload),
         )

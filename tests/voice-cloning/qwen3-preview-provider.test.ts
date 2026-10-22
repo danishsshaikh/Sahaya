@@ -28,10 +28,12 @@ describe('Qwen3-TTS preview provider', () => {
       profileId: 'vcp_existing',
       referenceAudioPath: '/private/reference.wav',
       referenceText: 'This is the exact English transcript.',
+      cloneMode: 'speaker-embedding',
     });
     const result = await provider.generatePreview({
       profileId: 'vcp_existing',
       text: 'Welcome to today’s lesson.',
+      cloneMode: 'speaker-embedding',
     });
 
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
@@ -39,11 +41,13 @@ describe('Qwen3-TTS preview provider', () => {
       referenceAudioPath: '/private/reference.wav',
       referenceText: 'This is the exact English transcript.',
       referenceLanguage: 'en',
+      cloneMode: 'speaker-embedding',
     });
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       profileId: 'vcp_existing',
       text: 'Welcome to today’s lesson.',
       language: 'en',
+      cloneMode: 'speaker-embedding',
     });
     expect(result).toEqual({ audio: new Uint8Array([82, 73, 70, 70]), format: 'wav' });
   });
@@ -60,10 +64,35 @@ describe('Qwen3-TTS preview provider', () => {
     );
 
     await expect(
-      new Qwen3TtsPreviewProvider().generatePreview({ profileId: 'vcp_existing', text: 'Hello' }),
+      new Qwen3TtsPreviewProvider().generatePreview({
+        profileId: 'vcp_existing',
+        text: 'Hello',
+        cloneMode: 'icl',
+      }),
     ).rejects.toMatchObject({
       status: 429,
       metadata: { provider: 'qwen3-tts', endpoint: '/synthesize' },
+    });
+  });
+
+  it('registers ICL separately with the exact saved transcript', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ providerReferenceId: 'vcp_existing' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new Qwen3TtsPreviewProvider().registerProfile({
+      profileId: 'vcp_existing',
+      referenceAudioPath: '/private/reference.wav',
+      referenceText: 'This is the exact English transcript.',
+      cloneMode: 'icl',
+    });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      referenceText: 'This is the exact English transcript.',
+      cloneMode: 'icl',
     });
   });
 });

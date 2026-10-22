@@ -115,16 +115,13 @@ describe('Qwen3-TTS enhancement branching', () => {
       attemptEnhancement: true,
       source: 'qwen3-tts',
       originalMasteringPreset: null,
+      enhancedMasteringPreset: null,
     });
 
     expect(result.original).toEqual({ audio: raw.audio, format: 'wav' });
     expect(mocks.enhance).toHaveBeenCalledExactlyOnceWith(raw);
-    expect(mocks.master).toHaveBeenCalledExactlyOnceWith(
-      new Uint8Array([7, 8]),
-      'wav',
-      'chatterbox-enhanced',
-    );
-    expect(result.enhanced?.audio).toEqual(new Uint8Array([7, 8, 9]));
+    expect(mocks.master).not.toHaveBeenCalled();
+    expect(result.enhanced?.audio).toEqual(new Uint8Array([7, 8]));
   });
 
   it('preserves the original Qwen preview when enhancement fails', async () => {
@@ -136,6 +133,7 @@ describe('Qwen3-TTS enhancement branching', () => {
       attemptEnhancement: true,
       source: 'qwen3-tts',
       originalMasteringPreset: null,
+      enhancedMasteringPreset: null,
     });
 
     expect(result.original.audio).toBe(raw.audio);

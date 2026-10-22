@@ -2,6 +2,7 @@ import { getQwen3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
 import {
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
+  type Qwen3TtsCloneMode,
   type TeachingVoiceProviderOperation,
 } from '@/lib/voice-cloning/types';
 
@@ -85,6 +86,7 @@ export class Qwen3TtsPreviewProvider {
     profileId: string;
     referenceAudioPath: string;
     referenceText: string;
+    cloneMode: Qwen3TtsCloneMode;
   }): Promise<void> {
     const response = await request(
       '/profiles',
@@ -96,6 +98,7 @@ export class Qwen3TtsPreviewProvider {
           referenceAudioPath: input.referenceAudioPath,
           referenceText: input.referenceText,
           referenceLanguage: 'en',
+          cloneMode: input.cloneMode,
         }),
       },
       'provider_registration',
@@ -114,6 +117,7 @@ export class Qwen3TtsPreviewProvider {
   async generatePreview(input: {
     profileId: string;
     text: string;
+    cloneMode: Qwen3TtsCloneMode;
   }): Promise<{ audio: Uint8Array; format: 'wav' }> {
     const response = await request(
       '/synthesize',
@@ -124,6 +128,7 @@ export class Qwen3TtsPreviewProvider {
           profileId: input.profileId,
           text: input.text,
           language: 'en',
+          cloneMode: input.cloneMode,
         }),
       },
       'preview_generation',

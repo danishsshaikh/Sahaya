@@ -224,6 +224,9 @@ describe('Teaching Voice customization previews', () => {
     const enhanced = { format: 'wav', base64: 'cXdlbi1lbmhhbmNlZA==', createdAt: 'later' };
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PATCH') {
+        const request = JSON.parse(String(init.body)) as {
+          qwenCloneMode: 'speaker-embedding' | 'icl';
+        };
         return Promise.resolve(
           jsonResponse({
             success: true,
@@ -231,8 +234,9 @@ describe('Teaching Voice customization previews', () => {
             previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
             modelPreview: {
               previewModel: 'qwen3-tts-1.7b-base',
-              enhancementMode: 'resemble-enhance',
-              preview: enhanced,
+              qwenCloneMode: request.qwenCloneMode,
+              enhancementMode: 'standard',
+              preview: original,
               comparison: { original, enhanced },
             },
           }),
@@ -253,9 +257,10 @@ describe('Teaching Voice customization previews', () => {
     click(button(host, 'Qwen3-TTS 1.7B'));
 
     expect(host.querySelector('#voice-language-id')).toBeNull();
-    expect(host.textContent).toContain('Uses your saved English recording and transcript');
+    expect(host.textContent).toContain('Uses your saved English recording');
+    expect(button(host, 'Speaker only').getAttribute('aria-pressed')).toBe('true');
+    expect(host.textContent).toContain('Avoids carrying enrollment words into the preview');
     expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).toBeNull();
-    click(button(host, 'Enhanced'));
     click(button(host, 'Preview Changes'));
     await flush();
 
@@ -264,10 +269,29 @@ describe('Teaching Voice customization previews', () => {
       profileId: PROFILE_ID,
       action: 'preview-model',
       previewModel: 'qwen3-tts-1.7b-base',
-      enhancementMode: 'resemble-enhance',
+      enhancementMode: 'standard',
+      qwenCloneMode: 'speaker-embedding',
     });
     expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Resemble Enhance preview"]')).not.toBeNull();
+    expect(button(host, 'Original').getAttribute('aria-pressed')).toBe('true');
+    click(button(host, 'Enhanced'));
+    expect(button(host, 'Enhanced').getAttribute('aria-pressed')).toBe('true');
+
+    click(button(host, 'Full reference (ICL)'));
+    expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).toBeNull();
+    expect(button(host, 'Original').getAttribute('aria-pressed')).toBe('true');
+    click(button(host, 'Preview Changes'));
+    await flush();
+    const previewRequests = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(previewRequests.at(-1)?.[1]?.body))).toMatchObject({
+      qwenCloneMode: 'icl',
+      enhancementMode: 'standard',
+    });
+    expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
+
+    click(button(host, 'Speaker only'));
+    expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
     expect(host.textContent).toContain('Preview only. Your saved Chatterbox voice remains active.');
     expect(host.textContent).not.toContain('Use These Settings');
     expect(host.textContent).toContain('Using Voice');

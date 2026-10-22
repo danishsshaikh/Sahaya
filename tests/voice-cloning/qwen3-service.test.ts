@@ -13,16 +13,18 @@ describe('Qwen3-TTS preview service scaffold', () => {
     expect(source).toContain('local_files_only=True');
   });
 
-  it('caches a full voice-clone prompt from the saved WAV and exact transcript', () => {
+  it('caches isolated ICL and speaker-only prompts from the unchanged reference WAV', () => {
     expect(source).toContain('active_model.create_voice_clone_prompt(');
     expect(source).toContain('ref_audio=str(reference)');
-    expect(source).toContain('ref_text=req.referenceText');
-    expect(source).toContain('x_vector_only_mode=False');
+    expect(source).toContain('ref_text=None if x_vector_only else req.referenceText');
+    expect(source).toContain('x_vector_only_mode=x_vector_only');
+    expect(source).toContain('req.cloneMode: prompt');
   });
 
   it('serializes generated Qwen audio as PCM16 WAV without provider fallback', () => {
     expect(source).toContain('active_model.generate_voice_clone(');
-    expect(source).toContain('voice_clone_prompt=profile.prompt');
+    expect(source).toContain('prompt = profile.prompts.get(req.cloneMode)');
+    expect(source).toContain('voice_clone_prompt=prompt');
     expect(source).toContain('subtype="PCM_16"');
     expect(source).not.toContain('chatterbox');
     expect(source).not.toContain('indicf5');

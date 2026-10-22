@@ -36,6 +36,7 @@ import {
   resolveVoiceProfileProvider,
   type ChatterboxModelVariant,
   type PublicVoiceProfile,
+  type Qwen3TtsCloneMode,
   type VoiceConfiguration,
   type VoiceEnhancementMode,
   type VoiceGenerationSettings,
@@ -228,7 +229,11 @@ export function TeachingVoiceCard({
     'chatterbox-v3',
   ]);
   const [draftPreviewModel, setDraftPreviewModel] = useState<VoicePreviewModel>('chatterbox-v3');
-  const [qwenModelPreview, setQwenModelPreview] = useState<VoiceModelPreviewResult | null>(null);
+  const [qwenCloneMode, setQwenCloneMode] = useState<Qwen3TtsCloneMode>('speaker-embedding');
+  const [qwenEnhancementMode, setQwenEnhancementMode] = useState<VoiceEnhancementMode>('standard');
+  const [qwenModelPreviews, setQwenModelPreviews] = useState<
+    Partial<Record<Qwen3TtsCloneMode, VoiceModelPreviewResult>>
+  >({});
   const [busy, setBusy] = useState(false);
   const [busyPhase, setBusyPhase] = useState<BusyPhase | null>(null);
   const [busyStartedAt, setBusyStartedAt] = useState<number | null>(null);
@@ -260,6 +265,8 @@ export function TeachingVoiceCard({
     : false;
   const isChatterboxProfile = !!profile && resolveVoiceProfileProvider(profile) === 'chatterbox';
   const isQwenPreview = draftPreviewModel === 'qwen3-tts-1.7b-base';
+  const selectedEnhancementMode = isQwenPreview ? qwenEnhancementMode : draftEnhancementMode;
+  const qwenModelPreview = qwenModelPreviews[qwenCloneMode];
   const draftConfiguration: VoiceConfiguration = {
     languageId: draftLanguageId,
     ...(isChatterboxProfile
@@ -295,12 +302,12 @@ export function TeachingVoiceCard({
       (acceptedPreviewMatches ? readyProfile?.previewComparison : undefined));
   const selectedPreview = isQwenPreview
     ? selectedComparison
-      ? draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
+      ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
         ? selectedComparison.enhanced
         : selectedComparison.original
       : undefined
     : selectedComparison
-      ? draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
+      ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
         ? selectedComparison.enhanced
         : selectedComparison.original
       : matchingDraftPreview &&
@@ -384,7 +391,9 @@ export function TeachingVoiceCard({
         setDraftPreviewModel((current) =>
           previewModels.includes(current) ? current : 'chatterbox-v3',
         );
-        setQwenModelPreview(null);
+        setQwenCloneMode('speaker-embedding');
+        setQwenEnhancementMode('standard');
+        setQwenModelPreviews({});
         setProfile(next);
         if (next?.status === 'preview-ready' || next?.status === 'ready') {
           setSetupStep('review');
@@ -637,6 +646,9 @@ export function TeachingVoiceCard({
                 aria-pressed={draftPreviewModel === value}
                 onClick={() => {
                   setDraftPreviewModel(value);
+                  if (value === 'qwen3-tts-1.7b-base') {
+                    setQwenEnhancementMode('standard');
+                  }
                   setPreviewError(null);
                 }}
                 className={cn(
@@ -682,10 +694,47 @@ export function TeachingVoiceCard({
           </p>
         </div>
       ) : (
-        <p className="max-w-[62ch] text-xs leading-snug text-muted-foreground">
-          Uses your saved English recording and transcript for this comparison only. Your active
-          Chatterbox voice and settings stay unchanged.
-        </p>
+        <div className="space-y-3">
+          <p className="max-w-[62ch] text-xs leading-snug text-muted-foreground">
+            Uses your saved English recording for this comparison only. Your active Chatterbox voice
+            and settings stay unchanged.
+          </p>
+          <fieldset className="space-y-2">
+            <legend className="text-xs font-medium text-foreground">Clone Method</legend>
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  ['speaker-embedding', 'Speaker only'],
+                  ['icl', 'Full reference (ICL)'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={qwenCloneMode === value}
+                  onClick={() => {
+                    setQwenCloneMode(value);
+                    setQwenEnhancementMode('standard');
+                    setPreviewError(null);
+                  }}
+                  className={cn(
+                    'rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
+                    qwenCloneMode === value
+                      ? 'border-primary bg-primary/5 text-foreground'
+                      : 'border-border/70 text-muted-foreground hover:bg-muted/40',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="max-w-[62ch] text-xs leading-snug text-muted-foreground">
+              {qwenCloneMode === 'speaker-embedding'
+                ? 'Recommended. Avoids carrying enrollment words into the preview, with a possible reduction in voice similarity.'
+                : 'Uses the recording and exact saved transcript for closer matching, but may repeat words from the recording.'}
+            </p>
+          </fieldset>
+        </div>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -728,7 +777,7 @@ export function TeachingVoiceCard({
                 ['resemble-enhance', 'Enhanced'],
               ] as const
             ).map(([value, label]) => {
-              const selected = draftEnhancementMode === value;
+              const selected = selectedEnhancementMode === value;
               const unavailable =
                 value === 'resemble-enhance' &&
                 !!selectedComparison &&
@@ -739,7 +788,9 @@ export function TeachingVoiceCard({
                   type="button"
                   aria-pressed={selected}
                   disabled={unavailable}
-                  onClick={() => setDraftEnhancementMode(value)}
+                  onClick={() =>
+                    isQwenPreview ? setQwenEnhancementMode(value) : setDraftEnhancementMode(value)
+                  }
                   className={cn(
                     'rounded px-3 py-1.5 text-xs font-medium transition-colors',
                     selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground',
@@ -975,7 +1026,7 @@ export function TeachingVoiceCard({
           action: 'preview-model',
           previewModel: draftPreviewModel,
           ...(isQwenPreview
-            ? { enhancementMode: draftEnhancementMode }
+            ? { enhancementMode: qwenEnhancementMode, qwenCloneMode }
             : { ...previewConfiguration, previewTextLanguageId }),
         }),
       });
@@ -985,7 +1036,13 @@ export function TeachingVoiceCard({
         if (!data.modelPreview || data.modelPreview.previewModel !== 'qwen3-tts-1.7b-base') {
           throw new Error('Qwen3-TTS returned an invalid preview.');
         }
-        setQwenModelPreview(data.modelPreview);
+        if (data.modelPreview.qwenCloneMode !== qwenCloneMode) {
+          throw new Error('Qwen3-TTS returned a preview for the wrong clone method.');
+        }
+        setQwenModelPreviews((current) => ({
+          ...current,
+          [qwenCloneMode]: data.modelPreview,
+        }));
         setSetupStep('review');
         return;
       }
@@ -1132,7 +1189,9 @@ export function TeachingVoiceCard({
         <div className="border border-border/70 p-3">
           <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
             <span>Original</span>
-            {draftEnhancementMode === 'standard' && <span className="text-primary">Selected</span>}
+            {selectedEnhancementMode === 'standard' && (
+              <span className="text-primary">Selected</span>
+            )}
           </div>
           <audio
             controls
@@ -1147,7 +1206,7 @@ export function TeachingVoiceCard({
         <div className="border border-border/70 p-3">
           <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
             <span>Enhanced</span>
-            {draftEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced && (
+            {selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced && (
               <span className="text-primary">Selected</span>
             )}
           </div>

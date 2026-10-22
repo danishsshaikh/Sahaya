@@ -5,6 +5,7 @@ import { Qwen3TtsPreviewProvider } from '@/lib/voice-cloning/providers/qwen3-pre
 import { referenceAudioExists, resolveReferenceAudioPath } from '@/lib/voice-cloning/storage';
 import {
   TeachingVoiceError,
+  type Qwen3TtsCloneMode,
   type VoiceEnhancementMode,
   type VoiceModelPreviewResult,
   type VoicePreview,
@@ -22,6 +23,7 @@ function voicePreview(audio: Uint8Array, format: string): VoicePreview {
 export async function generateQwen3TtsModelPreview(
   profile: VoiceProfile,
   enhancementMode: VoiceEnhancementMode,
+  cloneMode: Qwen3TtsCloneMode,
 ): Promise<VoiceModelPreviewResult> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Teaching Voice reference audio was not found.', 404);
@@ -43,10 +45,12 @@ export async function generateQwen3TtsModelPreview(
     profileId: profile.id,
     referenceAudioPath: resolveReferenceAudioPath(profile.referenceAudioKey),
     referenceText,
+    cloneMode,
   });
   const raw = await provider.generatePreview({
     profileId: profile.id,
     text: getVoicePreviewText('en', 'chatterbox'),
+    cloneMode,
   });
   const enhancementAllowed = isVoiceEnhancementAllowed('qwen3-tts', 'en', 'preview');
   const variants = await processVoiceAudioVariants(raw, {
@@ -56,6 +60,7 @@ export async function generateQwen3TtsModelPreview(
     languageId: 'en',
     source: 'qwen3-tts',
     originalMasteringPreset: null,
+    enhancedMasteringPreset: null,
   });
   const original = voicePreview(variants.original.audio, variants.original.format);
   const enhanced = variants.enhanced
@@ -72,8 +77,9 @@ export async function generateQwen3TtsModelPreview(
   };
   return {
     previewModel: 'qwen3-tts-1.7b-base',
+    qwenCloneMode: cloneMode,
     enhancementMode,
-    preview: enhancementMode === 'resemble-enhance' && enhanced ? enhanced : comparison.original,
+    preview: comparison.original,
     comparison,
   };
 }

@@ -25,6 +25,7 @@ interface VoiceAudioVariantOptions {
   languageId: string;
   source: 'chatterbox' | 'qwen3-tts';
   originalMasteringPreset: GeneratedVoiceMasteringPreset | null;
+  enhancedMasteringPreset: GeneratedVoiceMasteringPreset | null;
 }
 
 export async function processVoiceAudioVariants(
@@ -39,11 +40,13 @@ export async function processVoiceAudioVariants(
   const startedAt = Date.now();
   try {
     const enhanced = await enhanceGeneratedVoiceAudio(raw);
-    const mastered = await masterGeneratedVoiceAudio(
-      enhanced.audio,
-      enhanced.format,
-      'chatterbox-enhanced',
-    );
+    const mastered = options.enhancedMasteringPreset
+      ? await masterGeneratedVoiceAudio(
+          enhanced.audio,
+          enhanced.format,
+          options.enhancedMasteringPreset,
+        )
+      : { audio: enhanced.audio, format: 'wav' as const };
     log.info('[VoiceEnhancement]', {
       event: 'completed',
       source: options.source,
@@ -88,5 +91,6 @@ export async function processChatterboxAudioVariants(
     ...options,
     source: 'chatterbox',
     originalMasteringPreset: 'chatterbox-clarity',
+    enhancedMasteringPreset: 'chatterbox-enhanced',
   });
 }

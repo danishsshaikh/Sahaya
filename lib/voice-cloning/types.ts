@@ -3,8 +3,10 @@ export type ChatterboxModelVariant = 'v2' | 'v3';
 export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'custom';
 export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
 export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
+export type Qwen3TtsCloneMode = 'speaker-embedding' | 'icl';
 
 export const VOICE_PREVIEW_MODELS = ['chatterbox-v3', 'qwen3-tts-1.7b-base'] as const;
+export const QWEN3_TTS_CLONE_MODES = ['speaker-embedding', 'icl'] as const;
 
 export const CHATTERBOX_MODEL_VARIANTS = ['v2', 'v3'] as const;
 export const DEFAULT_CHATTERBOX_MODEL_VARIANT: ChatterboxModelVariant = 'v3';
@@ -78,6 +80,7 @@ export interface VoicePreviewComparison {
 
 export interface VoiceModelPreviewResult {
   previewModel: VoicePreviewModel;
+  qwenCloneMode?: Qwen3TtsCloneMode;
   enhancementMode: VoiceEnhancementMode;
   preview: VoicePreview;
   comparison: VoicePreviewComparison;
@@ -185,6 +188,10 @@ export function isChatterboxModelVariant(value: unknown): value is ChatterboxMod
 
 export function isVoicePreviewModel(value: unknown): value is VoicePreviewModel {
   return VOICE_PREVIEW_MODELS.includes(value as VoicePreviewModel);
+}
+
+export function isQwen3TtsCloneMode(value: unknown): value is Qwen3TtsCloneMode {
+  return QWEN3_TTS_CLONE_MODES.includes(value as Qwen3TtsCloneMode);
 }
 
 export function resolveVoiceProfileProvider(profile: { provider?: string }): string {
