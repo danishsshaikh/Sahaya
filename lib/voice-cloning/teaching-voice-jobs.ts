@@ -4,8 +4,9 @@ import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 
 export const CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:chatterbox';
 export const INDICF5_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:indicf5';
+export const QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:qwen3-tts';
 
-export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5';
+export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5' | 'qwen3-tts';
 
 export interface TeachingVoiceJobResult {
   audio: Uint8Array;
@@ -49,9 +50,9 @@ export function createTeachingVoiceIdempotencyKey(
 }
 
 function resourceKeyForProvider(providerId: QueuedTeachingVoiceProvider): string {
-  return providerId === 'indicf5'
-    ? INDICF5_TEACHING_VOICE_RESOURCE_KEY
-    : CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY;
+  if (providerId === 'indicf5') return INDICF5_TEACHING_VOICE_RESOURCE_KEY;
+  if (providerId === 'qwen3-tts') return QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY;
+  return CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY;
 }
 
 export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {

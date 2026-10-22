@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChatterboxVoiceCloningProvider } from '@/lib/voice-cloning/providers/chatterbox';
 import { IndicF5VoiceCloningProvider } from '@/lib/voice-cloning/providers/indicf5';
+import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import { getTeachingVoiceServiceConfig } from '@/lib/voice-cloning/config';
 import { normalizeIndicTeachingText } from '@/lib/voice-cloning/indic-text-normalizer';
@@ -104,6 +105,7 @@ describe('Teaching Voice language boundary', () => {
     expect(() => getVoiceCloningProvider('unknown')).toThrow('Unsupported');
     vi.stubEnv('VOICE_CLONING_PROVIDER', 'chatterbox');
     expect(getVoiceCloningProvider('chatterbox')).toBeInstanceOf(ChatterboxVoiceCloningProvider);
+    expect(getVoiceCloningProvider('qwen3-tts')).toBeInstanceOf(Qwen3TtsVoiceCloningProvider);
     expect(() => getVoiceCloningProvider('qwen3')).toThrow('Unsupported');
   });
 

@@ -1,4 +1,8 @@
-import { isVoiceCloningServerEnabled, isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
+import {
+  isQwen3TtsClassroomEnabled,
+  isVoiceCloningServerEnabled,
+  isVoiceEnhancementAllowed,
+} from '@/lib/voice-cloning/config';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
   readVoiceProfile,
@@ -6,17 +10,25 @@ import {
   writeVoiceProfile,
   resolveReferenceAudioPath,
 } from '@/lib/voice-cloning/storage';
-import { validateTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import {
+  resolveTeachingVoiceLanguage,
+  resolveVoiceProfileReferenceLanguage,
+  validateTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { masterGeneratedVoiceAudio } from '@/lib/voice-cloning/audio-validation';
-import { processChatterboxAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
+import {
+  processChatterboxAudioVariants,
+  processVoiceAudioVariants,
+} from '@/lib/voice-cloning/audio-enhancement';
 import { createLogger } from '@/lib/logger';
 import {
   isVoiceProviderProfileNotFoundError,
+  resolveVoiceProfileActiveEngine,
   resolveVoiceProfileGenerationSettings,
   resolveVoiceProfileEnhancementMode,
   resolveVoiceProfileLanguageId,
-  resolveVoiceProfileProvider,
   resolveVoiceProfileModelVariant,
+  resolveVoiceProfileQwenEnhancementMode,
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
 } from '@/lib/voice-cloning/types';
@@ -81,6 +93,30 @@ function isProviderTimeoutError(error: unknown): boolean {
     error.metadata.operation === 'synthesis' &&
     /timed out/i.test(error.message)
   );
+}
+
+function resolveSynthesisLanguage(
+  profile: Parameters<typeof resolveVoiceProfileActiveEngine>[0] &
+    Parameters<typeof validateTeachingVoiceLanguage>[0],
+  providerId: string,
+  requestedLanguage?: string,
+): string {
+  if (providerId !== 'qwen3-tts') {
+    return validateTeachingVoiceLanguage(
+      profile,
+      providerId === 'chatterbox' ? resolveVoiceProfileLanguageId(profile) : requestedLanguage,
+    );
+  }
+  if (resolveVoiceProfileReferenceLanguage(profile) !== 'en') {
+    throw new TeachingVoiceError('Qwen3-TTS requires an English reference recording.');
+  }
+  if (requestedLanguage && resolveTeachingVoiceLanguage(requestedLanguage) !== 'en') {
+    throw new TeachingVoiceError('Qwen3-TTS currently supports English narration only.');
+  }
+  if (!profile.referenceText?.trim()) {
+    throw new TeachingVoiceError('Qwen3-TTS requires the saved reference transcript.');
+  }
+  return 'en';
 }
 
 async function synthesizeWithBusyRetry<T>(
@@ -174,13 +210,11 @@ export async function resolveFacultyVoiceSelection(
   if (!profile || profile.ownerId !== ownerId || profile.status === 'deleted') {
     throw new TeachingVoiceError('Voice profile not found.', 404);
   }
-  const providerId = resolveVoiceProfileProvider(profile);
-  const synthesisLanguage = validateTeachingVoiceLanguage(
-    profile,
-    providerId === 'chatterbox'
-      ? resolveVoiceProfileLanguageId(profile)
-      : (requestedLanguage ?? resolveVoiceProfileLanguageId(profile)),
-  );
+  const providerId = resolveVoiceProfileActiveEngine(profile);
+  if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
+    throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
+  }
+  const synthesisLanguage = resolveSynthesisLanguage(profile, providerId, requestedLanguage);
   return {
     providerId,
     synthesisLanguage,
@@ -208,17 +242,29 @@ export async function synthesizeFacultyVoice(input: {
   if (!profile || profile.ownerId !== input.ownerId || profile.status === 'deleted') {
     throw new TeachingVoiceError('Voice profile not found.', 404);
   }
-  if (profile.status !== 'ready' || !profile.providerReferenceId) {
+  if (profile.status !== 'ready') {
     throw new TeachingVoiceError('Voice profile is not ready.');
   }
   if (!(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Voice profile reference audio not found. Re-enroll this voice.');
   }
-  const providerId = resolveVoiceProfileProvider(profile);
-  const language = validateTeachingVoiceLanguage(
-    profile,
-    providerId === 'chatterbox' ? resolveVoiceProfileLanguageId(profile) : input.language,
-  );
+  const providerId = resolveVoiceProfileActiveEngine(profile);
+  if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
+    throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
+  }
+  if (providerId !== 'qwen3-tts' && !profile.providerReferenceId) {
+    throw new TeachingVoiceError('Voice profile is not ready.');
+  }
+  const language = resolveSynthesisLanguage(profile, providerId, input.language);
+  const qwenEnhancementRequested =
+    providerId === 'qwen3-tts' &&
+    resolveVoiceProfileQwenEnhancementMode(profile) === 'resemble-enhance';
+  if (qwenEnhancementRequested && !isVoiceEnhancementAllowed('qwen3-tts', language, 'classroom')) {
+    throw new TeachingVoiceError(
+      'Enhanced Qwen3-TTS classroom narration is disabled for this deployment.',
+      503,
+    );
+  }
   const settings =
     providerId === 'chatterbox'
       ? {
@@ -268,6 +314,23 @@ export async function synthesizeFacultyVoice(input: {
           reason: 'disabled-for-classroom-or-language',
         });
       }
+    } else if (providerId === 'qwen3-tts') {
+      const variants = await processVoiceAudioVariants(result, {
+        attemptEnhancement: qwenEnhancementRequested,
+        context: 'classroom',
+        profileId: profile.id,
+        languageId: language,
+        source: 'qwen3-tts',
+        originalMasteringPreset: null,
+        enhancedMasteringPreset: null,
+      });
+      if (qwenEnhancementRequested && !variants.enhanced) {
+        throw new TeachingVoiceError(
+          variants.enhancementError || 'Enhanced Qwen3-TTS narration could not be generated.',
+          502,
+        );
+      }
+      mastered = variants.enhanced ?? variants.original;
     } else {
       mastered = await masterGeneratedVoiceAudio(result.audio, result.format, 'indicf5-natural');
     }
@@ -281,7 +344,7 @@ export async function synthesizeFacultyVoice(input: {
     return mastered;
   };
 
-  if (profile.provider === 'qwen3') {
+  if (profile.provider === 'qwen3' && providerId === 'chatterbox') {
     const { providerReferenceId } = await provider.createProfile({
       profileId: profile.id,
       referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
@@ -305,27 +368,29 @@ export async function synthesizeFacultyVoice(input: {
     return synthesize(providerReferenceId);
   }
 
+  const providerReferenceId =
+    providerId === 'qwen3-tts' ? profile.id : profile.providerReferenceId!;
   try {
-    return await synthesize(profile.providerReferenceId);
+    return await synthesize(providerReferenceId);
   } catch (error) {
     if (!isVoiceProviderProfileNotFoundError(error)) {
       throw error;
     }
   }
 
-  const { providerReferenceId } = await provider.createProfile({
+  const { providerReferenceId: recreatedProviderReferenceId } = await provider.createProfile({
     profileId: profile.id,
     referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey!),
     ...(profile.referenceText ? { referenceText: profile.referenceText } : {}),
     language: profile.language,
     ...settings,
   });
-  if (providerReferenceId !== profile.providerReferenceId) {
+  if (providerId !== 'qwen3-tts' && recreatedProviderReferenceId !== profile.providerReferenceId) {
     await writeVoiceProfile({
       ...profile,
-      providerReferenceId,
+      providerReferenceId: recreatedProviderReferenceId,
       updatedAt: new Date().toISOString(),
     });
   }
-  return synthesize(providerReferenceId);
+  return synthesize(recreatedProviderReferenceId);
 }

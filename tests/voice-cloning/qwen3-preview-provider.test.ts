@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Qwen3TtsPreviewProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
+import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -22,18 +22,18 @@ describe('Qwen3-TTS preview provider', () => {
         }),
       );
     vi.stubGlobal('fetch', fetchMock);
-    const provider = new Qwen3TtsPreviewProvider();
+    const provider = new Qwen3TtsVoiceCloningProvider();
 
-    await provider.registerProfile({
+    await provider.createProfile({
       profileId: 'vcp_existing',
-      referenceAudioPath: '/private/reference.wav',
+      referenceAudioKey: '/private/reference.wav',
       referenceText: 'This is the exact English transcript.',
-      cloneMode: 'speaker-embedding',
+      language: 'en',
     });
     const result = await provider.generatePreview({
-      profileId: 'vcp_existing',
+      providerReferenceId: 'vcp_existing',
       text: 'Welcome to today’s lesson.',
-      cloneMode: 'speaker-embedding',
+      language: 'en',
     });
 
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
@@ -64,10 +64,10 @@ describe('Qwen3-TTS preview provider', () => {
     );
 
     await expect(
-      new Qwen3TtsPreviewProvider().generatePreview({
-        profileId: 'vcp_existing',
+      new Qwen3TtsVoiceCloningProvider().generatePreview({
+        providerReferenceId: 'vcp_existing',
         text: 'Hello',
-        cloneMode: 'icl',
+        language: 'en',
       }),
     ).rejects.toMatchObject({
       status: 429,
@@ -83,7 +83,7 @@ describe('Qwen3-TTS preview provider', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await new Qwen3TtsPreviewProvider().registerProfile({
+    await new Qwen3TtsVoiceCloningProvider().registerProfile({
       profileId: 'vcp_existing',
       referenceAudioPath: '/private/reference.wav',
       referenceText: 'This is the exact English transcript.',
@@ -94,5 +94,25 @@ describe('Qwen3-TTS preview provider', () => {
       referenceText: 'This is the exact English transcript.',
       cloneMode: 'icl',
     });
+  });
+
+  it('reports a missing in-memory prompt as recoverable after service restart', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: 'voice profile not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+
+    await expect(
+      new Qwen3TtsVoiceCloningProvider().synthesize({
+        providerReferenceId: 'vcp_existing',
+        text: 'Resume the lesson.',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({ name: 'VoiceProviderProfileNotFoundError' });
   });
 });

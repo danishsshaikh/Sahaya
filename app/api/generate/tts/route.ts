@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
           user.id,
           requestedLanguage ?? undefined,
         );
-        if (providerId === 'chatterbox' || providerId === 'indicf5') {
+        if (providerId === 'chatterbox' || providerId === 'indicf5' || providerId === 'qwen3-tts') {
           const { job } = enqueueTeachingVoiceJob({
             providerId,
             ownerId: user.id,

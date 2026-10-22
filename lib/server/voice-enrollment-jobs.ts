@@ -766,13 +766,14 @@ export async function acceptVoiceProfilePreview(
   config: VoiceConfiguration,
   ownerId: string,
 ): Promise<VoiceProfile> {
-  const next = {
+  const next: VoiceProfile = {
     ...profile,
     status: 'ready' as const,
     languageId: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
     enhancementMode: config.enhancementMode ?? 'standard',
+    activeEngine: resolveVoiceProfileProvider(profile) === 'indicf5' ? 'indicf5' : 'chatterbox',
     preview: profile.draftPreview?.preview,
     previewComparison: profile.draftPreview?.comparison,
     previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
@@ -807,6 +808,7 @@ export async function acceptVoiceProfilePreview(
         previewTextLanguageId: undefined,
         previewVariants: undefined,
         draftPreview: undefined,
+        qwenPreviewCache: undefined,
         updatedAt: new Date().toISOString(),
       });
     }

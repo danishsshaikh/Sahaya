@@ -1,9 +1,9 @@
-# Qwen3-TTS 1.7B Preview Service
+# Qwen3-TTS 1.7B Teaching Voice Service
 
-This localhost-only service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a comparison
-model for Sahaya's Teaching Voice preview screen. It does not enroll, replace, or
-activate a Teaching Voice provider. Sahaya supplies the existing private reference
-WAV and its exact saved transcript, then keeps the generated audio in browser state.
+This localhost-only service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a selectable
+Teaching Voice engine and preview option. It does not enroll or replace a Teaching
+Voice profile. Sahaya supplies the existing private reference WAV and its exact saved
+transcript, and stores engine selection separately from the enrollment provider.
 
 The service uses the already validated POC checkout, Python environment, and cached
 model. It sets `local_files_only=True`; the startup command also forces Hugging Face
@@ -37,25 +37,26 @@ curl --fail-with-body http://127.0.0.1:8771/health
 `ok: true` and `modelLoaded: true` confirm that the cached model loaded. Registered
 prompts are rebuilt from the unchanged reference WAV and transcript after a restart.
 
-## Clone Comparison
+## Clone Prompt
 
-Sahaya exposes two transient Qwen preview modes without modifying the Teaching Voice profile:
+Normal Sahaya preview and classroom generation always use `speaker-embedding`. It sets
+`x_vector_only_mode=True`, so Qwen receives the speaker embedding but does not continue from the
+reference speech codes or transcript.
 
-- `speaker-embedding` is the default. It sets `x_vector_only_mode=True`, so Qwen receives the
-  speaker embedding but does not continue from the reference speech codes or transcript.
-- `icl` sets `x_vector_only_mode=False` and uses the exact saved enrollment transcript with the
-  reference speech codes. It can improve similarity, but Qwen's upstream
+The service retains internal support for `icl` regression testing. ICL sets
+`x_vector_only_mode=False` and uses the exact saved enrollment transcript with the reference speech
+codes. It can improve similarity, but Qwen's upstream
   [reference-tail echo issue](https://github.com/QwenLM/Qwen3-TTS/issues/341) can repeat the end
   of the enrollment recording before the requested text.
 
-The service caches each mode separately. Sahaya does not trim generated beginnings because the
-echo duration is variable and fixed trimming can remove genuine preview words. Compare both modes
-with the same recording and text before deciding which sounds closer on the target GPU.
+The service caches prompts in memory. Sahaya does not trim generated beginnings because the echo
+duration is variable and fixed trimming can remove genuine narration words.
 
 ## Sahaya Configuration
 
 ```bash
 QWEN3_TTS_PREVIEW_ENABLED=true
+QWEN3_TTS_CLASSROOM_ENABLED=true
 QWEN3_TTS_BASE_URL=http://127.0.0.1:8771
 QWEN3_TTS_TIMEOUT_MS=180000
 ```
@@ -63,6 +64,8 @@ QWEN3_TTS_TIMEOUT_MS=180000
 Resemble Enhanced comparison additionally follows the existing preview gates:
 `VOICE_ENHANCEMENT_ENABLED=true` and `VOICE_ENHANCEMENT_PREVIEW_ENABLED=true`.
 `VOICE_ENHANCEMENT_CLASSROOM_ENABLED` remains independent and can stay `false`.
+Set it to `true` only when faculty should be able to select Enhanced Qwen audio for classroom
+narration. Original Qwen classroom audio does not require Resemble Enhance.
 
 Qwen Original remains the selected preview by default. Enhanced is produced from the same Qwen
 waveform and remains optional. Unlike Chatterbox, Qwen's enhanced result is not passed through the

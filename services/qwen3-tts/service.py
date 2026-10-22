@@ -32,8 +32,8 @@ ATTENTION_IMPLEMENTATION = os.getenv(
 )
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 CLONE_MODES = {"speaker-embedding", "icl"}
-app = FastAPI(title="Sahaya Qwen3-TTS Preview Service")
-log = logging.getLogger("sahaya.qwen3_tts_preview")
+app = FastAPI(title="Sahaya Qwen3-TTS Teaching Voice Service")
+log = logging.getLogger("sahaya.qwen3_tts")
 
 generation_lock = threading.Lock()
 state_lock = threading.Lock()
@@ -200,7 +200,7 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
         return {"providerReferenceId": req.profileId}
 
     if not generation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="Qwen3-TTS preview service is busy")
+        raise HTTPException(status_code=429, detail="Qwen3-TTS Teaching Voice service is busy")
     try:
         with state_lock:
             existing = profiles.get(req.profileId)
@@ -247,6 +247,15 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
         generation_lock.release()
 
 
+@app.delete("/profiles/{profile_id}")
+def delete_profile(profile_id: str) -> dict[str, bool]:
+    if not PROFILE_ID_PATTERN.fullmatch(profile_id):
+        raise HTTPException(status_code=400, detail="invalid profile ID")
+    with state_lock:
+        profiles.pop(profile_id, None)
+    return {"ok": True}
+
+
 def serialize_wav(waveform: Any, sample_rate: int) -> bytes:
     if torch.is_tensor(waveform):
         waveform = waveform.detach().cpu().float().numpy()
@@ -272,7 +281,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
         raise HTTPException(status_code=404, detail="voice clone mode is not registered")
     validate_reference(str(profile.reference_audio))
     if not generation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="Qwen3-TTS preview service is busy")
+        raise HTTPException(status_code=429, detail="Qwen3-TTS Teaching Voice service is busy")
     try:
         with torch.inference_mode():
             waveforms, sample_rate = active_model.generate_voice_clone(

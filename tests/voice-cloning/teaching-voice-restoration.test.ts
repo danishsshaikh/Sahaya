@@ -10,7 +10,10 @@ const roots: Root[] = [];
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-function readyEnglishProfileResponse(): Response {
+function readyEnglishProfileResponse(
+  activeEngine: 'chatterbox' | 'qwen3-tts' = 'chatterbox',
+): Response {
+  const original = { format: 'wav', base64: 'cXdlbi1vcmlnaW5hbA==', createdAt: 'now' };
   return new Response(
     JSON.stringify({
       success: true,
@@ -23,12 +26,28 @@ function readyEnglishProfileResponse(): Response {
         status: 'ready',
         modelVariant: 'v3',
         enhancementMode: 'resemble-enhance',
+        activeEngine,
+        qwenEnhancementMode: 'standard',
+        ...(activeEngine === 'qwen3-tts'
+          ? {
+              qwenPreview: {
+                previewModel: 'qwen3-tts-1.7b-base',
+                qwenCloneMode: 'speaker-embedding',
+                enhancementMode: 'standard',
+                preview: original,
+                comparison: { original },
+              },
+            }
+          : {}),
         createdAt: '2026-10-16T07:00:00.000Z',
         updatedAt: '2026-10-16T07:10:00.000Z',
         consentTimestamp: '2026-10-16T07:00:00.000Z',
         consentVersion: '1',
         profileVersion: 1,
       },
+      previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
+      qwenClassroomEnabled: true,
+      qwenClassroomEnhancementAvailable: false,
     }),
     { status: 200, headers: { 'content-type': 'application/json' } },
   );
@@ -108,5 +127,34 @@ describe('Teaching Voice profile restoration', () => {
     expect(refreshedRender.textContent).toContain('Using Voice');
     expect(refreshedRender.textContent).toContain('Manage Voice');
     expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?language=en');
+  });
+
+  it('restores the active Qwen engine and cached preview after refresh', async () => {
+    vi.mocked(fetch).mockImplementation(async () => readyEnglishProfileResponse('qwen3-tts'));
+
+    const firstRender = await mountTeachingVoiceCard();
+    expect(firstRender.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
+    const manage = [...firstRender.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
+    );
+    if (!(manage instanceof HTMLButtonElement)) throw new Error('Manage Voice button not found');
+    act(() => manage.click());
+    const customize = [...firstRender.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Customize Voice',
+    );
+    if (!(customize instanceof HTMLButtonElement))
+      throw new Error('Customize Voice button not found');
+    act(() => customize.click());
+
+    const qwen = [...firstRender.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Qwen3-TTS 1.7B',
+    );
+    expect(qwen?.getAttribute('aria-pressed')).toBe('true');
+    expect(firstRender.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
+
+    act(() => roots.shift()?.unmount());
+    firstRender.remove();
+    const refreshedRender = await mountTeachingVoiceCard();
+    expect(refreshedRender.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
   });
 });

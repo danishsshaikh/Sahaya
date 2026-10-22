@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceProfile } from '@/lib/voice-cloning/types';
 
 const mocks = vi.hoisted(() => ({
-  registerProfile: vi.fn(),
+  createProfile: vi.fn(),
   generatePreview: vi.fn(),
   referenceAudioExists: vi.fn(),
   processVoiceAudioVariants: vi.fn(),
@@ -10,8 +10,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/voice-cloning/providers/qwen3-preview', () => ({
-  Qwen3TtsPreviewProvider: class {
-    registerProfile = mocks.registerProfile;
+  Qwen3TtsVoiceCloningProvider: class {
+    createProfile = mocks.createProfile;
     generatePreview = mocks.generatePreview;
   },
 }));
@@ -26,7 +26,11 @@ vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceEnhancementAllowed: mocks.isVoiceEnhancementAllowed,
 }));
 
-import { generateQwen3TtsModelPreview } from '@/lib/server/qwen3-tts-preview';
+import {
+  createQwen3TtsPreviewCacheKey,
+  currentQwen3TtsPreview,
+  generateQwen3TtsModelPreview,
+} from '@/lib/server/qwen3-tts-preview';
 
 const profile: VoiceProfile = {
   id: 'vcp_existing',
@@ -48,6 +52,7 @@ const profile: VoiceProfile = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.createProfile.mockResolvedValue({ providerReferenceId: profile.id });
   mocks.referenceAudioExists.mockResolvedValue(true);
   mocks.generatePreview.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
   mocks.isVoiceEnhancementAllowed.mockReturnValue(true);
@@ -59,20 +64,16 @@ beforeEach(() => {
 
 describe('Qwen3-TTS model preview generation', () => {
   it('uses the saved English recording transcript even when Chatterbox languageId is hi', async () => {
-    const result = await generateQwen3TtsModelPreview(
-      profile,
-      'resemble-enhance',
-      'speaker-embedding',
-    );
+    const result = await generateQwen3TtsModelPreview(profile, 'resemble-enhance');
 
-    expect(mocks.registerProfile).toHaveBeenCalledExactlyOnceWith({
+    expect(mocks.createProfile).toHaveBeenCalledExactlyOnceWith({
       profileId: profile.id,
-      referenceAudioPath: profile.referenceAudioKey,
+      referenceAudioKey: profile.referenceAudioKey,
       referenceText: profile.referenceText,
-      cloneMode: 'speaker-embedding',
+      language: 'en',
     });
     expect(mocks.generatePreview).toHaveBeenCalledWith(
-      expect.objectContaining({ profileId: profile.id, cloneMode: 'speaker-embedding' }),
+      expect.objectContaining({ providerReferenceId: profile.id, language: 'en' }),
     );
     expect(mocks.isVoiceEnhancementAllowed).toHaveBeenCalledWith('qwen3-tts', 'en', 'preview');
     expect(mocks.processVoiceAudioVariants).toHaveBeenCalledWith(
@@ -92,5 +93,32 @@ describe('Qwen3-TTS model preview generation', () => {
         enhanced: { base64: Buffer.from([3, 4]).toString('base64') },
       },
     });
+  });
+
+  it('isolates persisted previews by profile and reference identity', () => {
+    const result = {
+      previewModel: 'qwen3-tts-1.7b-base' as const,
+      qwenCloneMode: 'speaker-embedding' as const,
+      enhancementMode: 'standard' as const,
+      preview: { format: 'wav', base64: 'audio', createdAt: 'now' },
+      comparison: {
+        original: { format: 'wav', base64: 'audio', createdAt: 'now' },
+      },
+    };
+    const cacheKey = createQwen3TtsPreviewCacheKey(profile);
+    expect(
+      currentQwen3TtsPreview({
+        ...profile,
+        qwenPreviewCache: { cacheKey, result },
+      }),
+    ).toBe(result);
+    expect(
+      currentQwen3TtsPreview({
+        ...profile,
+        referenceAudioKey: '/private/replacement.wav',
+        qwenPreviewCache: { cacheKey, result },
+      }),
+    ).toBeUndefined();
+    expect(createQwen3TtsPreviewCacheKey({ ...profile, id: 'vcp_other' })).not.toBe(cacheKey);
   });
 });

@@ -3,7 +3,9 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import {
   getVoiceCloningDefaultLanguage,
   getChatterboxDefaultModelVariant,
+  isQwen3TtsClassroomEnabled,
   isQwen3TtsPreviewEnabled,
+  isVoiceEnhancementAllowed,
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
 import { requireSessionUser } from '@/lib/auth/server';
@@ -21,10 +23,10 @@ import {
 } from '@/lib/voice-cloning/storage';
 import {
   isChatterboxModelVariant,
-  isQwen3TtsCloneMode,
   isVoiceEnhancementMode,
   isVoicePreviewModel,
   resolveVoiceProfileProvider,
+  resolveVoiceProfileQwenEnhancementMode,
   TeachingVoiceError,
   resolveVoiceProfileGenerationSettings,
   resolveVoiceProfileEnhancementMode,
@@ -51,7 +53,11 @@ import {
   voiceEnrollmentErrorResponse,
   voiceEnrollmentResponse,
 } from '@/lib/server/voice-enrollment-jobs';
-import { generateQwen3TtsModelPreview } from '@/lib/server/qwen3-tts-preview';
+import {
+  createQwen3TtsPreviewCacheKey,
+  currentQwen3TtsPreview,
+  generateQwen3TtsModelPreview,
+} from '@/lib/server/qwen3-tts-preview';
 
 const log = createLogger('VoiceCloningProfileAPI');
 
@@ -66,6 +72,18 @@ function availablePreviewModels(): VoicePreviewModel[] {
     'chatterbox-v3',
     ...(isQwen3TtsPreviewEnabled() ? (['qwen3-tts-1.7b-base'] as const) : []),
   ];
+}
+
+function qwenClassroomEnhancementAvailable(): boolean {
+  return isVoiceEnhancementAllowed('qwen3-tts', 'en', 'classroom');
+}
+
+function publicVoiceProfile(profile: VoiceProfile | null) {
+  const result = toPublicVoiceProfile(profile);
+  if (result && profile && !currentQwen3TtsPreview(profile)) {
+    result.qwenPreview = undefined;
+  }
+  return result;
 }
 
 function serverDefaultModelVariant(): ChatterboxModelVariant {
@@ -216,8 +234,10 @@ export async function GET(req: NextRequest) {
       validateTeachingVoiceLanguage(profile, requested ?? undefined);
     }
     return apiSuccess({
-      profile: toPublicVoiceProfile(profile),
+      profile: publicVoiceProfile(profile),
       previewModels: availablePreviewModels(),
+      qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+      qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
     });
   } catch (error) {
     return apiError(
@@ -258,7 +278,6 @@ export async function PATCH(req: NextRequest) {
     enhancementMode?: string;
     previewTextLanguageId?: string;
     previewModel?: string;
-    qwenCloneMode?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -272,9 +291,69 @@ export async function PATCH(req: NextRequest) {
   if (!isVoicePreviewModel(previewModel)) {
     return apiError('INVALID_REQUEST', 400, 'Unsupported preview model');
   }
+  if (body.action === 'activate-engine') {
+    if (profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready');
+    }
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'Engine selection requires an English Teaching Voice recording',
+      );
+    }
+    const activeEngine = previewModel === 'qwen3-tts-1.7b-base' ? 'qwen3-tts' : 'chatterbox';
+    let qwenEnhancementMode = resolveVoiceProfileQwenEnhancementMode(profile);
+    if (activeEngine === 'qwen3-tts') {
+      if (!isQwen3TtsPreviewEnabled() || !isQwen3TtsClassroomEnabled()) {
+        return apiError('PROVIDER_DISABLED', 404, 'Qwen3-TTS classroom narration is disabled');
+      }
+      const qwenPreview = currentQwen3TtsPreview(profile);
+      if (!qwenPreview) {
+        return apiError('INVALID_REQUEST', 400, 'Preview Qwen3-TTS before using it in class');
+      }
+      const requestedEnhancementMode =
+        body.enhancementMode === undefined
+          ? qwenEnhancementMode
+          : isVoiceEnhancementMode(body.enhancementMode)
+            ? body.enhancementMode
+            : null;
+      if (!requestedEnhancementMode) {
+        return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
+      }
+      qwenEnhancementMode = requestedEnhancementMode;
+      if (qwenEnhancementMode === 'resemble-enhance' && !qwenClassroomEnhancementAvailable()) {
+        return apiError(
+          'PROVIDER_DISABLED',
+          400,
+          'Enhanced Qwen3-TTS classroom narration is disabled for this deployment',
+        );
+      }
+      if (qwenEnhancementMode === 'resemble-enhance' && !qwenPreview.comparison.enhanced) {
+        return apiError(
+          'INVALID_REQUEST',
+          400,
+          'Generate a successful Enhanced Qwen3-TTS preview before selecting it',
+        );
+      }
+    }
+    const next: VoiceProfile = {
+      ...profile,
+      activeEngine,
+      ...(activeEngine === 'qwen3-tts' ? { qwenEnhancementMode } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    await writeVoiceProfile(next);
+    return apiSuccess({
+      profile: publicVoiceProfile(next),
+      previewModels: availablePreviewModels(),
+      qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+      qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+    });
+  }
   if (previewModel === 'qwen3-tts-1.7b-base') {
     if (body.action !== 'preview-model') {
-      return apiError('INVALID_REQUEST', 400, 'Qwen3-TTS is available for comparison only');
+      return apiError('INVALID_REQUEST', 400, 'Invalid Qwen3-TTS profile action');
     }
     if (!isQwen3TtsPreviewEnabled()) {
       return apiError('PROVIDER_DISABLED', 404, 'Qwen3-TTS preview is disabled');
@@ -298,20 +377,23 @@ export async function PATCH(req: NextRequest) {
     if (!enhancementMode) {
       return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
     }
-    const qwenCloneMode = body.qwenCloneMode ?? 'speaker-embedding';
-    if (!isQwen3TtsCloneMode(qwenCloneMode)) {
-      return apiError('INVALID_REQUEST', 400, 'Unsupported Qwen3-TTS clone mode');
-    }
     try {
-      const modelPreview = await generateQwen3TtsModelPreview(
-        profile,
-        enhancementMode,
-        qwenCloneMode,
-      );
+      const modelPreview = await generateQwen3TtsModelPreview(profile, enhancementMode);
+      const next: VoiceProfile = {
+        ...profile,
+        qwenPreviewCache: {
+          cacheKey: createQwen3TtsPreviewCacheKey(profile),
+          result: modelPreview,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      await writeVoiceProfile(next);
       return apiSuccess({
-        profile: toPublicVoiceProfile(profile),
+        profile: publicVoiceProfile(next),
         modelPreview,
         previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
       });
     } catch (error) {
       return apiError(
@@ -373,7 +455,7 @@ export async function PATCH(req: NextRequest) {
       updatedAt: new Date().toISOString(),
     };
     await writeVoiceProfile(next);
-    return apiSuccess({ profile: toPublicVoiceProfile(next) });
+    return apiSuccess({ profile: publicVoiceProfile(next) });
   }
 
   if (body.action !== 'accept-preview') {
@@ -421,7 +503,7 @@ export async function PATCH(req: NextRequest) {
     return apiError('INVALID_REQUEST', 400, 'Preview must be generated before accepting');
   }
   const next = await acceptVoiceProfilePreview(profileForAcceptance, config, user.id);
-  return apiSuccess({ profile: toPublicVoiceProfile(next) });
+  return apiSuccess({ profile: publicVoiceProfile(next) });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -452,6 +534,7 @@ export async function DELETE(req: NextRequest) {
       previewComparison: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
+      qwenPreviewCache: undefined,
       updatedAt: new Date().toISOString(),
     });
     log.info('voice profile deleted', {

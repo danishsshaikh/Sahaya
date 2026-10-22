@@ -4,7 +4,10 @@ import {
   TeachingVoiceProviderOperationError,
   VoiceProviderProfileNotFoundError,
 } from '@/lib/voice-cloning/types';
-import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
+import {
+  resolveFacultyVoiceSelection,
+  synthesizeFacultyVoice,
+} from '@/lib/voice-cloning/synthesis';
 
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
@@ -13,10 +16,12 @@ const mocks = vi.hoisted(() => ({
   register: vi.fn(),
   resolve: vi.fn(),
   processAudio: vi.fn(),
+  processQwenAudio: vi.fn(),
   masterAudio: vi.fn(),
 }));
 vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceCloningServerEnabled: () => true,
+  isQwen3TtsClassroomEnabled: () => true,
   isVoiceEnhancementAllowed: () => true,
 }));
 vi.mock('@/lib/voice-cloning/storage', () => ({
@@ -31,6 +36,7 @@ vi.mock('@/lib/voice-cloning/audio-validation', () => ({
 }));
 vi.mock('@/lib/voice-cloning/audio-enhancement', () => ({
   processChatterboxAudioVariants: mocks.processAudio,
+  processVoiceAudioVariants: mocks.processQwenAudio,
 }));
 
 let profile: VoiceProfile;
@@ -65,6 +71,9 @@ beforeEach(() => {
     format,
   }));
   mocks.processAudio.mockImplementation(async (raw: { audio: Uint8Array; format: string }) => ({
+    original: raw,
+  }));
+  mocks.processQwenAudio.mockImplementation(async (raw: { audio: Uint8Array; format: string }) => ({
     original: raw,
   }));
 });
@@ -294,5 +303,88 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.write).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'chatterbox', providerReferenceId: 'vcp_example' }),
     );
+  });
+
+  it('routes an active Qwen profile to Qwen with exact narration and no profile mutation', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts', languageId: 'hi' };
+
+    await expect(resolveFacultyVoiceSelection(profile.id, profile.ownerId, 'en')).resolves.toEqual({
+      providerId: 'qwen3-tts',
+      synthesisLanguage: 'en',
+    });
+
+    const result = await synthesizeFacultyVoice({
+      ...request,
+      text: 'Exact classroom narration.',
+      language: 'en',
+    });
+
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3-tts');
+    expect(mocks.synthesize).toHaveBeenCalledExactlyOnceWith({
+      providerReferenceId: profile.id,
+      text: 'Exact classroom narration.',
+      language: 'en',
+    });
+    expect(mocks.processQwenAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptEnhancement: false,
+        source: 'qwen3-tts',
+        originalMasteringPreset: null,
+        enhancedMasteringPreset: null,
+      }),
+    );
+    expect(result.audio).toEqual(new Uint8Array([1]));
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it('recreates a Qwen speaker prompt after service restart without overwriting Chatterbox IDs', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts' };
+    mocks.synthesize
+      .mockRejectedValueOnce(new VoiceProviderProfileNotFoundError('missing prompt'))
+      .mockResolvedValueOnce({ audio: new Uint8Array([2]), format: 'wav' });
+
+    await synthesizeFacultyVoice(request);
+
+    expect(mocks.register).toHaveBeenCalledExactlyOnceWith({
+      profileId: profile.id,
+      referenceAudioKey: '/shared/reference.wav',
+      referenceText: 'Exact transcript.',
+      language: 'en',
+    });
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it('uses explicitly selected Qwen Enhanced output and fails visibly when enhancement fails', async () => {
+    profile = {
+      ...profile,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+    };
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+    await expect(synthesizeFacultyVoice(request)).resolves.toEqual({
+      audio: new Uint8Array([9]),
+      format: 'wav',
+    });
+
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhancementError: 'Enhancement unavailable.',
+    });
+    await expect(synthesizeFacultyVoice(request)).rejects.toThrow('Enhancement unavailable');
+    expect(mocks.resolve).toHaveBeenCalledWith('qwen3-tts');
+  });
+
+  it('does not fall back to Chatterbox when active Qwen synthesis fails', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts' };
+    mocks.synthesize.mockRejectedValue(new Error('Qwen unavailable'));
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toThrow('Qwen unavailable');
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3-tts');
+    expect(mocks.register).not.toHaveBeenCalled();
   });
 });

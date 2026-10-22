@@ -1,11 +1,11 @@
+import { createHash } from 'node:crypto';
 import { getVoicePreviewText } from '@/lib/voice-cloning/phrases';
 import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
 import { processVoiceAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
-import { Qwen3TtsPreviewProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
+import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
 import { referenceAudioExists, resolveReferenceAudioPath } from '@/lib/voice-cloning/storage';
 import {
   TeachingVoiceError,
-  type Qwen3TtsCloneMode,
   type VoiceEnhancementMode,
   type VoiceModelPreviewResult,
   type VoicePreview,
@@ -23,7 +23,6 @@ function voicePreview(audio: Uint8Array, format: string): VoicePreview {
 export async function generateQwen3TtsModelPreview(
   profile: VoiceProfile,
   enhancementMode: VoiceEnhancementMode,
-  cloneMode: Qwen3TtsCloneMode,
 ): Promise<VoiceModelPreviewResult> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Teaching Voice reference audio was not found.', 404);
@@ -40,17 +39,17 @@ export async function generateQwen3TtsModelPreview(
     );
   }
 
-  const provider = new Qwen3TtsPreviewProvider();
-  await provider.registerProfile({
+  const provider = new Qwen3TtsVoiceCloningProvider();
+  const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
-    referenceAudioPath: resolveReferenceAudioPath(profile.referenceAudioKey),
+    referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
     referenceText,
-    cloneMode,
+    language: profile.language,
   });
   const raw = await provider.generatePreview({
-    profileId: profile.id,
+    providerReferenceId,
     text: getVoicePreviewText('en', 'chatterbox'),
-    cloneMode,
+    language: 'en',
   });
   const enhancementAllowed = isVoiceEnhancementAllowed('qwen3-tts', 'en', 'preview');
   const variants = await processVoiceAudioVariants(raw, {
@@ -77,9 +76,29 @@ export async function generateQwen3TtsModelPreview(
   };
   return {
     previewModel: 'qwen3-tts-1.7b-base',
-    qwenCloneMode: cloneMode,
+    qwenCloneMode: 'speaker-embedding',
     enhancementMode,
     preview: comparison.original,
     comparison,
   };
+}
+
+export function createQwen3TtsPreviewCacheKey(profile: VoiceProfile): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        profileId: profile.id,
+        profileVersion: profile.profileVersion,
+        referenceAudioKey: profile.referenceAudioKey ?? null,
+        referenceText: profile.referenceText ?? null,
+        previewText: getVoicePreviewText('en', 'chatterbox'),
+        cloneMode: 'speaker-embedding',
+      }),
+    )
+    .digest('hex');
+}
+
+export function currentQwen3TtsPreview(profile: VoiceProfile): VoiceModelPreviewResult | undefined {
+  const cache = profile.qwenPreviewCache;
+  return cache?.cacheKey === createQwen3TtsPreviewCacheKey(profile) ? cache.result : undefined;
 }

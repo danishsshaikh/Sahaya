@@ -97,6 +97,8 @@ describe('voice profile privacy', () => {
       languageId: 'hi',
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
       enhancementMode: 'standard',
+      activeEngine: 'chatterbox',
+      qwenEnhancementMode: 'standard',
       createdAt: '2026-08-11T00:00:00.000Z',
       updatedAt: '2026-08-11T00:00:00.000Z',
       consentTimestamp: '2026-08-11T00:00:00.000Z',
@@ -175,11 +177,16 @@ describe('explicit cloned voice TTS routing', () => {
   const synthesizeFacultyVoice = vi.fn();
   const generateTTS = vi.fn();
   const enqueueTeachingVoiceJob = vi.fn();
+  const resolveFacultyVoiceSelection = vi.fn();
 
   beforeEach(async () => {
     vi.resetModules();
     synthesizeFacultyVoice.mockReset();
     generateTTS.mockReset();
+    resolveFacultyVoiceSelection.mockReset().mockResolvedValue({
+      providerId: 'indicf5',
+      synthesisLanguage: 'hi',
+    });
     enqueueTeachingVoiceJob.mockReset().mockReturnValue({
       job: {
         id: 'rq_indicf5_test_job_123456789',
@@ -192,10 +199,7 @@ describe('explicit cloned voice TTS routing', () => {
       reused: false,
     });
     vi.doMock('@/lib/voice-cloning/synthesis', () => ({
-      resolveFacultyVoiceSelection: vi.fn(async () => ({
-        providerId: 'indicf5',
-        synthesisLanguage: 'hi',
-      })),
+      resolveFacultyVoiceSelection,
       synthesizeFacultyVoice,
     }));
     vi.doMock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
@@ -285,6 +289,42 @@ describe('explicit cloned voice TTS routing', () => {
       success: false,
       errorCode: 'GENERATION_FAILED',
     });
+    expect(generateTTS).not.toHaveBeenCalled();
+  });
+
+  it('queues Qwen classroom narration with Qwen provider metadata', async () => {
+    resolveFacultyVoiceSelection.mockResolvedValue({
+      providerId: 'qwen3-tts',
+      synthesisLanguage: 'en',
+    });
+    enqueueTeachingVoiceJob.mockReturnValue({
+      job: {
+        id: 'rq_qwen3_test_job_1234567890',
+        status: 'queued',
+        queuePosition: 1,
+        jobsAhead: 0,
+        queueDepth: 1,
+        estimatedWaitMs: null,
+      },
+      reused: false,
+    });
+    const { POST } = await import('@/app/api/generate/tts/route');
+
+    const response = await POST(
+      request({ teacherVoiceProfileId: 'vcp_ready', language: 'en' }) as never,
+    );
+    const data = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(data).toMatchObject({ teachingVoiceProvider: 'qwen3-tts', status: 'queued' });
+    expect(enqueueTeachingVoiceJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: 'qwen3-tts',
+        profileId: 'vcp_ready',
+        text: 'Hello class',
+        language: 'en',
+      }),
+    );
     expect(generateTTS).not.toHaveBeenCalled();
   });
 });
@@ -690,7 +730,9 @@ describe('voice profile model preview API', () => {
   const processChatterboxAudioVariants = vi.fn();
   const isVoiceEnhancementAllowed = vi.fn();
   const isQwen3TtsPreviewEnabled = vi.fn();
+  const isQwen3TtsClassroomEnabled = vi.fn();
   const generateQwen3TtsModelPreview = vi.fn();
+  const currentQwen3TtsPreview = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
   beforeEach(async () => {
@@ -710,7 +752,9 @@ describe('voice profile model preview API', () => {
     processChatterboxAudioVariants.mockReset();
     isVoiceEnhancementAllowed.mockReset();
     isQwen3TtsPreviewEnabled.mockReset();
+    isQwen3TtsClassroomEnabled.mockReset();
     generateQwen3TtsModelPreview.mockReset();
+    currentQwen3TtsPreview.mockReset();
     createVoiceProfileId.mockClear();
     referenceAudioExists.mockResolvedValue(true);
     createProfile.mockImplementation(async ({ profileId }) => ({ providerReferenceId: profileId }));
@@ -750,17 +794,22 @@ describe('voice profile model preview API', () => {
     }));
     isVoiceEnhancementAllowed.mockReturnValue(false);
     isQwen3TtsPreviewEnabled.mockReturnValue(false);
+    isQwen3TtsClassroomEnabled.mockReturnValue(false);
+    currentQwen3TtsPreview.mockImplementation((profile) => profile.qwenPreviewCache?.result);
     vi.doMock('@/lib/voice-cloning/config', () => ({
       getVoiceCloningDefaultLanguage: () => 'en',
       getChatterboxDefaultModelVariant: () => 'v3',
       isVoiceCloningServerEnabled: () => true,
       isVoiceEnhancementAllowed,
       isQwen3TtsPreviewEnabled,
+      isQwen3TtsClassroomEnabled,
     }));
     vi.doMock('@/lib/voice-cloning/audio-enhancement', () => ({
       processChatterboxAudioVariants,
     }));
     vi.doMock('@/lib/server/qwen3-tts-preview', () => ({
+      createQwen3TtsPreviewCacheKey: vi.fn(() => 'qwen-cache-v1'),
+      currentQwen3TtsPreview,
       generateQwen3TtsModelPreview,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', () => ({
@@ -1206,7 +1255,6 @@ describe('voice profile model preview API', () => {
           profileId: profile.id,
           action: 'preview-model',
           previewModel: 'qwen3-tts-1.7b-base',
-          qwenCloneMode: 'speaker-embedding',
           enhancementMode: 'resemble-enhance',
         }),
       }) as never,
@@ -1229,9 +1277,17 @@ describe('voice profile model preview API', () => {
     expect(generateQwen3TtsModelPreview).toHaveBeenCalledExactlyOnceWith(
       profile,
       'resemble-enhance',
-      'speaker-embedding',
     );
-    expect(writeVoiceProfile).not.toHaveBeenCalled();
+    expect(writeVoiceProfile).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        provider: 'chatterbox',
+        providerReferenceId: 'accepted-chatterbox-reference',
+        qwenPreviewCache: {
+          cacheKey: 'qwen-cache-v1',
+          result: expect.objectContaining({ previewModel: 'qwen3-tts-1.7b-base' }),
+        },
+      }),
+    );
     expect(createProfile).not.toHaveBeenCalled();
   });
 
@@ -1254,6 +1310,136 @@ describe('voice profile model preview API', () => {
     expect(response.status).toBe(400);
     expect(writeVoiceProfile).not.toHaveBeenCalled();
     expect(generateQwen3TtsModelPreview).not.toHaveBeenCalled();
+  });
+
+  it('persists Qwen as the active classroom engine without replacing Chatterbox identity', async () => {
+    const qwenPreview = {
+      previewModel: 'qwen3-tts-1.7b-base' as const,
+      qwenCloneMode: 'speaker-embedding' as const,
+      enhancementMode: 'standard' as const,
+      preview: { format: 'wav', base64: 'original', createdAt: 'now' },
+      comparison: {
+        original: { format: 'wav', base64: 'original', createdAt: 'now' },
+      },
+    };
+    const profile = {
+      ...readyProfile('v3'),
+      providerReferenceId: 'accepted-chatterbox-reference',
+      qwenPreviewCache: { cacheKey: 'qwen-cache-v1', result: qwenPreview },
+    };
+    readVoiceProfile.mockResolvedValue(profile);
+    isQwen3TtsPreviewEnabled.mockReturnValue(true);
+    isQwen3TtsClassroomEnabled.mockReturnValue(true);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: profile.id,
+          action: 'activate-engine',
+          previewModel: 'qwen3-tts-1.7b-base',
+          enhancementMode: 'standard',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      profile: {
+        activeEngine: 'qwen3-tts',
+        qwenEnhancementMode: 'standard',
+        provider: 'chatterbox',
+      },
+    });
+    expect(writeVoiceProfile).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        activeEngine: 'qwen3-tts',
+        provider: 'chatterbox',
+        providerReferenceId: 'accepted-chatterbox-reference',
+        referenceAudioKey: profile.referenceAudioKey,
+      }),
+    );
+  });
+
+  it('rejects an ineffective Qwen Enhanced classroom preference', async () => {
+    const profile = {
+      ...readyProfile('v3'),
+      qwenPreviewCache: {
+        cacheKey: 'qwen-cache-v1',
+        result: {
+          previewModel: 'qwen3-tts-1.7b-base' as const,
+          qwenCloneMode: 'speaker-embedding' as const,
+          enhancementMode: 'standard' as const,
+          preview: { format: 'wav', base64: 'original', createdAt: 'now' },
+          comparison: {
+            original: { format: 'wav', base64: 'original', createdAt: 'now' },
+          },
+        },
+      },
+    };
+    readVoiceProfile.mockResolvedValue(profile);
+    isQwen3TtsPreviewEnabled.mockReturnValue(true);
+    isQwen3TtsClassroomEnabled.mockReturnValue(true);
+    isVoiceEnhancementAllowed.mockReturnValue(false);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: profile.id,
+          action: 'activate-engine',
+          previewModel: 'qwen3-tts-1.7b-base',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+  });
+
+  it('requires a genuine Enhanced Qwen preview before activating Enhanced narration', async () => {
+    const profile = {
+      ...readyProfile('v3'),
+      qwenPreviewCache: {
+        cacheKey: 'qwen-cache-v1',
+        result: {
+          previewModel: 'qwen3-tts-1.7b-base' as const,
+          qwenCloneMode: 'speaker-embedding' as const,
+          enhancementMode: 'resemble-enhance' as const,
+          preview: { format: 'wav', base64: 'original', createdAt: 'now' },
+          comparison: {
+            original: { format: 'wav', base64: 'original', createdAt: 'now' },
+            enhancementError: 'Enhancement failed',
+          },
+        },
+      },
+    };
+    readVoiceProfile.mockResolvedValue(profile);
+    isQwen3TtsPreviewEnabled.mockReturnValue(true);
+    isQwen3TtsClassroomEnabled.mockReturnValue(true);
+    isVoiceEnhancementAllowed.mockReturnValue(true);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: profile.id,
+          action: 'activate-engine',
+          previewModel: 'qwen3-tts-1.7b-base',
+          enhancementMode: 'resemble-enhance',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining('successful Enhanced Qwen3-TTS preview'),
+    });
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported languages and mismatched phrase IDs clearly', async () => {

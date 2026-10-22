@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 const source = readFileSync(join(process.cwd(), 'services/qwen3-tts/service.py'), 'utf8');
 
-describe('Qwen3-TTS preview service scaffold', () => {
+describe('Qwen3-TTS Teaching Voice service scaffold', () => {
   it('loads the cached 1.7B Base model once on logical CUDA device zero', () => {
     expect(source).toContain('Qwen/Qwen3-TTS-12Hz-1.7B-Base');
     expect(source).toContain('@app.on_event("startup")');
@@ -28,5 +28,12 @@ describe('Qwen3-TTS preview service scaffold', () => {
     expect(source).toContain('subtype="PCM_16"');
     expect(source).not.toContain('chatterbox');
     expect(source).not.toContain('indicf5');
+  });
+
+  it('keeps prompts transient and supports explicit cache removal', () => {
+    expect(source).toContain('profiles: dict[str, VoicePrompt] = {}');
+    expect(source).toContain('@app.delete("/profiles/{profile_id}")');
+    expect(source).toContain('profiles.pop(profile_id, None)');
+    expect(source).toContain('detail="voice profile not found"');
   });
 });

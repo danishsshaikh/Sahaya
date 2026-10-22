@@ -36,6 +36,10 @@ export function isQwen3TtsPreviewEnabled(): boolean {
   return envFlag('QWEN3_TTS_PREVIEW_ENABLED', false);
 }
 
+export function isQwen3TtsClassroomEnabled(): boolean {
+  return envFlag('QWEN3_TTS_CLASSROOM_ENABLED', false);
+}
+
 export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs: number } {
   return {
     baseUrl: (process.env.QWEN3_TTS_BASE_URL || 'http://127.0.0.1:8771').trim().replace(/\/$/, ''),
@@ -117,7 +121,6 @@ export function isVoiceEnhancementAllowed(
 ): boolean {
   const config = getVoiceEnhancementConfig();
   if (providerId === 'indicf5') return false;
-  if (providerId === 'qwen3-tts' && surface !== 'preview') return false;
   if (!config.enabled) return false;
   if (surface === 'preview' && !config.previewEnabled) return false;
   if (surface === 'classroom' && !config.classroomEnabled) return false;

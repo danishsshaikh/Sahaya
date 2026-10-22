@@ -2,8 +2,10 @@ import { getQwen3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
 import {
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
+  VoiceProviderProfileNotFoundError,
   type Qwen3TtsCloneMode,
   type TeachingVoiceProviderOperation,
+  type VoiceCloningProvider,
 } from '@/lib/voice-cloning/types';
 
 function providerError(
@@ -37,12 +39,19 @@ async function request(
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
       const detail = typeof body?.detail === 'string' ? body.detail : undefined;
+      if (
+        endpoint === '/synthesize' &&
+        response.status === 404 &&
+        (detail === 'voice profile not found' || detail === 'voice clone mode is not registered')
+      ) {
+        throw new VoiceProviderProfileNotFoundError('Qwen3-TTS voice prompt must be recreated.');
+      }
       const message =
         response.status === 429
-          ? 'Qwen3-TTS is busy. Try again after the current preview finishes.'
+          ? 'Qwen3-TTS is busy. Try again after the current generation finishes.'
           : response.status === 503
-            ? 'Qwen3-TTS is unavailable. Check the preview service health.'
-            : 'Qwen3-TTS could not generate this preview.';
+            ? 'Qwen3-TTS is unavailable. Check the Teaching Voice service health.'
+            : 'Qwen3-TTS could not generate audio.';
       throw providerError(
         message,
         response.status === 429 ? 429 : 502,
@@ -54,11 +63,13 @@ async function request(
     }
     return response;
   } catch (error) {
-    if (error instanceof TeachingVoiceError) throw error;
+    if (error instanceof TeachingVoiceError || error instanceof VoiceProviderProfileNotFoundError) {
+      throw error;
+    }
     throw providerError(
       controller.signal.aborted
-        ? 'Qwen3-TTS preview timed out. Your saved Teaching Voice is unchanged.'
-        : 'Qwen3-TTS preview service is unreachable.',
+        ? 'Qwen3-TTS generation timed out. Your saved Teaching Voice is unchanged.'
+        : 'Qwen3-TTS Teaching Voice service is unreachable.',
       502,
       endpoint,
       operation,
@@ -68,7 +79,7 @@ async function request(
   }
 }
 
-export class Qwen3TtsPreviewProvider {
+export class Qwen3TtsVoiceCloningProvider implements VoiceCloningProvider {
   async healthCheck(): Promise<{ ok: boolean; provider: string; modelLoaded: boolean }> {
     const response = await request('/health', {}, 'health_check');
     const result = (await response.json()) as {
@@ -114,24 +125,56 @@ export class Qwen3TtsPreviewProvider {
     }
   }
 
-  async generatePreview(input: {
-    profileId: string;
-    text: string;
-    cloneMode: Qwen3TtsCloneMode;
-  }): Promise<{ audio: Uint8Array; format: 'wav' }> {
+  async createProfile(input: Parameters<VoiceCloningProvider['createProfile']>[0]): Promise<{
+    providerReferenceId: string;
+  }> {
+    if (!input.referenceText?.trim()) {
+      throw new TeachingVoiceError('Qwen3-TTS requires the saved reference transcript.');
+    }
+    if (input.language !== 'en') {
+      throw new TeachingVoiceError('Qwen3-TTS requires an English reference recording.');
+    }
+    await this.registerProfile({
+      profileId: input.profileId,
+      referenceAudioPath: input.referenceAudioKey,
+      referenceText: input.referenceText,
+      cloneMode: 'speaker-embedding',
+    });
+    return { providerReferenceId: input.profileId };
+  }
+
+  async generatePreview(
+    input: Parameters<VoiceCloningProvider['generatePreview']>[0],
+  ): Promise<{ audio: Uint8Array; format: 'wav' }> {
+    return this.synthesizeWithOperation(input, 'preview_generation');
+  }
+
+  async synthesize(
+    input: Parameters<VoiceCloningProvider['synthesize']>[0],
+  ): Promise<{ audio: Uint8Array; format: 'wav' }> {
+    return this.synthesizeWithOperation(input, 'synthesis');
+  }
+
+  private async synthesizeWithOperation(
+    input: Parameters<VoiceCloningProvider['synthesize']>[0],
+    operation: 'preview_generation' | 'synthesis',
+  ): Promise<{ audio: Uint8Array; format: 'wav' }> {
+    if (input.language !== 'en') {
+      throw new TeachingVoiceError('Qwen3-TTS currently supports English narration only.');
+    }
     const response = await request(
       '/synthesize',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          profileId: input.profileId,
+          profileId: input.providerReferenceId,
           text: input.text,
           language: 'en',
-          cloneMode: input.cloneMode,
+          cloneMode: 'speaker-embedding',
         }),
       },
-      'preview_generation',
+      operation,
     );
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('audio/wav') && !contentType.includes('audio/x-wav')) {
@@ -139,7 +182,7 @@ export class Qwen3TtsPreviewProvider {
         'Qwen3-TTS returned non-WAV audio.',
         502,
         '/synthesize',
-        'preview_generation',
+        operation,
         response,
       );
     }
@@ -149,10 +192,20 @@ export class Qwen3TtsPreviewProvider {
         'Qwen3-TTS returned empty audio.',
         502,
         '/synthesize',
-        'preview_generation',
+        operation,
         response,
       );
     }
     return { audio, format: 'wav' };
   }
+
+  async deleteProfile(input: { providerReferenceId: string }): Promise<void> {
+    await request(
+      `/profiles/${encodeURIComponent(input.providerReferenceId)}`,
+      { method: 'DELETE' },
+      'profile_deletion',
+    );
+  }
 }
+
+export { Qwen3TtsVoiceCloningProvider as Qwen3TtsPreviewProvider };

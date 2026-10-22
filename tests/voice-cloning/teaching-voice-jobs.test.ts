@@ -117,4 +117,28 @@ describe('IndicF5 Teaching Voice jobs', () => {
     expect(first.reused).toBe(false);
     expect(second.reused).toBe(false);
   });
+
+  it('isolates Qwen jobs under Qwen resource and provider metadata', async () => {
+    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([4]), format: 'wav' });
+
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen', 'Exact Qwen narration'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+
+    expect(job).toMatchObject({
+      resourceKey: 'teaching-voice:qwen3-tts',
+      metadata: { provider: 'qwen3-tts', profileId: 'vcp_english' },
+    });
+    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledOnce());
+    expect(mocks.synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: 'vcp_english',
+        text: 'Exact Qwen narration',
+        language: 'en',
+      }),
+    );
+  });
 });

@@ -4,6 +4,7 @@ export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'cu
 export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
 export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
 export type Qwen3TtsCloneMode = 'speaker-embedding' | 'icl';
+export type TeachingVoiceEngine = 'chatterbox' | 'qwen3-tts' | 'indicf5';
 
 export const VOICE_PREVIEW_MODELS = ['chatterbox-v3', 'qwen3-tts-1.7b-base'] as const;
 export const QWEN3_TTS_CLONE_MODES = ['speaker-embedding', 'icl'] as const;
@@ -86,6 +87,11 @@ export interface VoiceModelPreviewResult {
   comparison: VoicePreviewComparison;
 }
 
+export interface Qwen3TtsPreviewCache {
+  cacheKey: string;
+  result: VoiceModelPreviewResult;
+}
+
 export interface VoiceDraftPreview {
   config: VoicePreviewConfiguration;
   preview: VoicePreview;
@@ -116,6 +122,9 @@ export interface VoiceProfile {
   languageId?: string;
   generationSettings?: VoiceGenerationSettings;
   enhancementMode?: VoiceEnhancementMode;
+  activeEngine?: TeachingVoiceEngine;
+  qwenEnhancementMode?: VoiceEnhancementMode;
+  qwenPreviewCache?: Qwen3TtsPreviewCache;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
   profileVersion: number;
@@ -144,6 +153,9 @@ export interface PublicVoiceProfile {
   languageId: string;
   generationSettings?: VoiceGenerationSettings;
   enhancementMode?: VoiceEnhancementMode;
+  activeEngine: TeachingVoiceEngine;
+  qwenEnhancementMode?: VoiceEnhancementMode;
+  qwenPreview?: VoiceModelPreviewResult;
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
@@ -200,6 +212,23 @@ export function resolveVoiceProfileProvider(profile: { provider?: string }): str
   // metadata until a successful Chatterbox registration migrates the profile.
   if (profile.provider === undefined || profile.provider === 'qwen3') return 'chatterbox';
   return profile.provider;
+}
+
+export function resolveVoiceProfileActiveEngine(profile: {
+  provider?: string;
+  activeEngine?: string | null;
+}): TeachingVoiceEngine {
+  const provider = resolveVoiceProfileProvider(profile);
+  if (provider === 'indicf5') return 'indicf5';
+  return profile.activeEngine === 'qwen3-tts' ? 'qwen3-tts' : 'chatterbox';
+}
+
+export function resolveVoiceProfileQwenEnhancementMode(profile: {
+  qwenEnhancementMode?: string | null;
+}): VoiceEnhancementMode {
+  return isVoiceEnhancementMode(profile.qwenEnhancementMode)
+    ? profile.qwenEnhancementMode
+    : 'standard';
 }
 
 export class TeachingVoiceError extends Error {
@@ -354,6 +383,10 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     provider: resolveVoiceProfileProvider(profile),
     language: profile.language,
     status: profile.status,
+    activeEngine: resolveVoiceProfileActiveEngine(profile),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
+      ? { qwenEnhancementMode: resolveVoiceProfileQwenEnhancementMode(profile) }
+      : {}),
     languageId: resolveVoiceProfileLanguageId(profile),
     ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
       ? {
@@ -378,6 +411,9 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
       ? { previewVariants: profile.previewVariants }
       : {}),
     ...(!legacyQwenProfile && profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
+    ...(!legacyQwenProfile && profile.qwenPreviewCache
+      ? { qwenPreview: profile.qwenPreviewCache.result }
+      : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
 }
