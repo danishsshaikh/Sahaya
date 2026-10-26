@@ -3,8 +3,7 @@ import path from 'path';
 import { nanoid } from 'nanoid';
 import { getVoiceCloningStorageDir } from '@/lib/voice-cloning/config';
 import type { VoiceProfile } from '@/lib/voice-cloning/types';
-import { resolveVoiceProfileLanguageId } from '@/lib/voice-cloning/types';
-import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import { resolveVoiceProfileReferenceLanguage } from '@/lib/voice-cloning/language';
 
 const PROFILE_FILE = 'profile.json';
 const REFERENCE_FILE = 'reference.wav';
@@ -114,8 +113,7 @@ export async function findCurrentVoiceProfile(
       profile?.ownerId === ownerId &&
       profile.status !== 'deleted' &&
       (!readyOnly || profile.status === 'ready') &&
-      (language === undefined ||
-        resolveTeachingVoiceLanguage(resolveVoiceProfileLanguageId(profile)) === language)
+      (language === undefined || resolveVoiceProfileReferenceLanguage(profile) === language)
     ) {
       profiles.push(profile);
     }

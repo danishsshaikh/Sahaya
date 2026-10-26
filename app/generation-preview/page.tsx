@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   Bot,
   FileText,
+  ListTree,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -30,6 +31,14 @@ import {
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
+import {
+  GenerationTeachingVoiceProfileError,
+  resolveGenerationTeachingVoiceProfileId,
+} from '@/lib/voice-cloning/selection-client';
+import {
+  normalizeTeachingVoiceLanguageId,
+  type TeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
   fetchSceneActions,
@@ -66,7 +75,11 @@ import {
   teacherOnlyAgentIds,
   teacherOnlyAgentInfo,
 } from '@/lib/generation/agent-mode';
-import { isGeneratedClassroomAgentsEnabled } from '@/lib/config/feature-flags';
+import {
+  isGeneratedClassroomAgentsEnabled,
+  isStaticVoiceEnabled,
+  isVoiceCloningEnabled,
+} from '@/lib/config/feature-flags';
 import { nanoid } from 'nanoid';
 import type { GeneratedAgentConfig, Stage } from '@/lib/types/stage';
 import type {
@@ -87,8 +100,14 @@ import {
 } from './types';
 import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
+import {
+  normalizeGenerationPreviewLanguageState,
+  resolveGenerationPreviewLanguage,
+  validateGenerationPreviewVoiceSelection,
+} from './voice-language';
 import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
 import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
+import { toast } from 'sonner';
 
 const log = createLogger('GenerationPreview');
 const OUTLINE_REVIEW_AUTO_CONTINUE_MS = 2500;
@@ -299,7 +318,7 @@ function GenerationPreviewContent() {
     const saved = sessionStorage.getItem('generationSession');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as GenerationSessionState;
+        let parsed = JSON.parse(saved) as GenerationSessionState;
         if (!parsed.previewPhase) {
           parsed.previewPhase = parsed.sceneOutlines?.length ? 'outline-ready' : 'preparing';
         }
@@ -310,6 +329,8 @@ function GenerationPreviewContent() {
           outlineReviewIntentRef.current = true;
         }
         parsed.taskEngineMode = parsed.taskEngineMode === true;
+        parsed = normalizeGenerationPreviewLanguageState(parsed);
+        sessionStorage.setItem('generationSession', JSON.stringify(parsed));
         sessionRef.current = parsed;
         setSession(parsed);
       } catch (e) {
@@ -688,6 +709,7 @@ function GenerationPreviewContent() {
       // ── Generate outlines first (infers languageDirective) ──
       let outlines = currentSession.sceneOutlines;
       let languageDirective = currentSession.languageDirective;
+      let lessonLanguage = normalizeTeachingVoiceLanguageId(currentSession.lessonLanguage);
       let courseTitle = currentSession.courseTitle;
 
       const outlineStepIdx = activeSteps.findIndex((s) => s.id === 'outline');
@@ -707,11 +729,13 @@ function GenerationPreviewContent() {
         const outlineResult = await new Promise<{
           outlines: SceneOutline[];
           languageDirective: string;
+          lessonLanguage?: TeachingVoiceLanguage;
           courseTitle?: string;
           taskEngineMode: boolean;
         }>((resolve, reject) => {
           const collected: SceneOutline[] = [];
           let directive: string | undefined;
+          let sseLanguage: string | null = null;
           let title: string | undefined;
 
           fetch('/api/generate/scene-outlines-stream', {
@@ -757,6 +781,19 @@ function GenerationPreviewContent() {
                         const evt = JSON.parse(line.slice(6));
                         if (evt.type === 'languageDirective') {
                           directive = evt.data;
+                          sseLanguage =
+                            typeof evt.lessonLanguage === 'string' ? evt.lessonLanguage : null;
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-languageDirective',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                         } else if (evt.type === 'courseTitle') {
                           title = evt.data;
                         } else if (evt.type === 'outline') {
@@ -769,16 +806,32 @@ function GenerationPreviewContent() {
                           // succeeding attempt that omits them must fall back, not
                           // inherit the previous attempt's stale values.
                           directive = undefined;
+                          sseLanguage = null;
                           title = undefined;
                           setStreamingOutlines([]);
                           setStatusMessage(t('generation.outlineRetrying'));
                         } else if (evt.type === 'done') {
                           directive = evt.languageDirective || directive;
+                          if (typeof evt.lessonLanguage === 'string') {
+                            sseLanguage = evt.lessonLanguage;
+                          }
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-done',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                           resolve({
                             outlines: evt.outlines || collected,
                             languageDirective:
                               directive ||
                               'Teach in the language that matches the user requirement.',
+                            lessonLanguage: resolution.language || undefined,
                             courseTitle: evt.courseTitle || title,
                             taskEngineMode: resolveTaskEngineModeFromOutlineDoneEvent(evt),
                           });
@@ -794,10 +847,15 @@ function GenerationPreviewContent() {
                   }
                   if (done) {
                     if (collected.length > 0) {
+                      const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                        sseLanguage,
+                        languageDirective: directive,
+                      });
                       resolve({
                         outlines: collected,
                         languageDirective:
                           directive || 'Teach in the language that matches the user requirement.',
+                        lessonLanguage: resolution.language || undefined,
                         // Carry any title latched from a streaming `courseTitle`
                         // event here too — symmetric with languageDirective — so
                         // a stream that ends without an explicit `done` event
@@ -820,6 +878,7 @@ function GenerationPreviewContent() {
 
         outlines = outlineResult.outlines;
         languageDirective = outlineResult.languageDirective;
+        lessonLanguage = outlineResult.lessonLanguage || null;
         courseTitle = outlineResult.courseTitle;
         const effectiveTaskEngineMode = outlineResult.taskEngineMode;
         setIsOutlineStreaming(false);
@@ -840,6 +899,7 @@ function GenerationPreviewContent() {
           ...currentSession,
           sceneOutlines: outlines,
           languageDirective,
+          lessonLanguage: lessonLanguage || undefined,
           courseTitle,
           taskEngineMode: effectiveTaskEngineMode,
           previewPhase: shouldReviewOutlines ? 'review' : 'outline-ready',
@@ -878,22 +938,92 @@ function GenerationPreviewContent() {
       }
       stage.taskEngineMode = currentSession.taskEngineMode === true;
 
+      // Older preview sessions predate the structured field. Resolve once from
+      // the retained directive, then persist it separately for refresh/re-entry.
+      const normalizedLanguageSession = normalizeGenerationPreviewLanguageState(
+        currentSession,
+        languageDirective,
+      );
+      if (normalizedLanguageSession !== currentSession) {
+        currentSession = normalizedLanguageSession;
+        persistSession(currentSession);
+      }
+      lessonLanguage = currentSession.lessonLanguage || null;
+
       // Store languageDirective on the stage
       if (languageDirective) {
         stage.languageDirective = languageDirective;
       }
+      if (lessonLanguage) {
+        stage.lessonLanguage = lessonLanguage;
+      }
       // Voice selection precedes language inference. Verify before generating media.
       if (stage.teacherVoiceProfileId) {
-        const query = new URLSearchParams({
-          profileId: stage.teacherVoiceProfileId,
-          language: languageDirective || '',
+        const languageResolution = resolveGenerationPreviewLanguage(currentSession, {
+          languageDirective,
         });
-        const response = await fetch(`/api/voice-cloning/profile?${query}`);
-        const result = await response.json();
-        if (!response.ok || !result.profile) {
-          throw new Error(
-            result.error || 'Select a Teaching Voice matching the narration language.',
-          );
+        log.info('[LessonLanguageTrace]', {
+          event: 'preview-validation-start',
+          lessonLanguage: languageResolution.language,
+          source: languageResolution.source,
+          reason: languageResolution.reason,
+          profileId: stage.teacherVoiceProfileId,
+        });
+        try {
+          const profile = await validateGenerationPreviewVoiceSelection(currentSession);
+          log.info('[LessonLanguageTrace]', {
+            event: 'preview-validation-success',
+            lessonLanguage,
+            stageLanguage: stage.lessonLanguage,
+            profileId: profile?.id,
+            provider: profile?.provider,
+            profileLanguage: profile?.language,
+          });
+        } catch (error) {
+          log.warn('[LessonLanguageTrace]', {
+            event: 'preview-validation-failure',
+            lessonLanguage: languageResolution.language,
+            source: languageResolution.source,
+            reason: error instanceof Error ? error.message : languageResolution.reason || 'unknown',
+            profileId: stage.teacherVoiceProfileId,
+          });
+          const compatibleProfileId = lessonLanguage
+            ? await resolveGenerationTeachingVoiceProfileId(
+                undefined,
+                fetch,
+                undefined,
+                lessonLanguage,
+              )
+            : undefined;
+          if (compatibleProfileId) {
+            stage.teacherVoiceProfileId = compatibleProfileId;
+            currentSession = {
+              ...currentSession,
+              teacherVoiceProfileId: compatibleProfileId,
+            };
+            persistSession(currentSession);
+            await validateGenerationPreviewVoiceSelection(currentSession);
+          } else {
+            stage.teacherVoiceProfileId = undefined;
+            currentSession = { ...currentSession, teacherVoiceProfileId: undefined };
+            persistSession(currentSession);
+            toast.warning(
+              'No Teaching Voice matches this lesson language. The visual lesson will continue without narration.',
+            );
+          }
+        }
+      } else if (lessonLanguage && isVoiceCloningEnabled()) {
+        const compatibleProfileId = await resolveGenerationTeachingVoiceProfileId(
+          undefined,
+          fetch,
+          undefined,
+          lessonLanguage,
+        );
+        if (compatibleProfileId) {
+          stage.teacherVoiceProfileId = compatibleProfileId;
+          currentSession = { ...currentSession, teacherVoiceProfileId: compatibleProfileId };
+          persistSession(currentSession);
+          await validateGenerationPreviewVoiceSelection(currentSession);
         }
       }
 
@@ -1144,6 +1274,12 @@ function GenerationPreviewContent() {
 
       const firstOutline = outlines[0];
       const firstSceneStartedAt = Date.now();
+      log.info('[LessonLanguageTrace]', {
+        event: 'scene-1-generation-start',
+        lessonLanguage: stage.lessonLanguage,
+        profileId: stage.teacherVoiceProfileId,
+        outlineId: firstOutline.id,
+      });
       updateGenerationProgress('current-scene-changed', {
         stageId: stage.id,
         sceneIndex: 1,
@@ -1222,7 +1358,8 @@ function GenerationPreviewContent() {
       }
       const narrationEnabled = Boolean(
         stage.teacherVoiceProfileId ||
-        (settings.ttsEnabled &&
+        (isStaticVoiceEnabled() &&
+          settings.ttsEnabled &&
           settings.ttsProviderId !== 'browser-native-tts' &&
           isTTSProviderEnabled(
             settings.ttsProviderId,
@@ -1282,7 +1419,9 @@ function GenerationPreviewContent() {
         log.info('[GenerationPreview] Generation aborted');
         return;
       }
-      sessionStorage.removeItem('generationSession');
+      if (!(err instanceof GenerationTeachingVoiceProfileError)) {
+        sessionStorage.removeItem('generationSession');
+      }
       setError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -1714,9 +1853,6 @@ function GenerationPreviewContent() {
                         stepId={activeStep.id}
                         outlines={session.sceneOutlines ?? streamingOutlines}
                         webSearchSources={webSearchSources}
-                        onExpandOutline={
-                          activeStep.id === 'outline' ? handleExpandStreamingOutline : undefined
-                        }
                       />
                     </motion.div>
                   )}
@@ -1816,6 +1952,19 @@ function GenerationPreviewContent() {
                   )}
                 </AnimatePresence>
               </div>
+
+              {activeStep.id === 'outline' && !error ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full max-w-xs"
+                  onClick={handleExpandStreamingOutline}
+                >
+                  <ListTree className="size-4" />
+                  {t('generation.outlineExpandHint')}
+                </Button>
+              ) : null}
 
               {isReviewingSources ? (
                 <div className="w-full max-w-sm border-t border-border/70 pt-4 text-left">

@@ -63,6 +63,47 @@ const GENERATED_AUDIO_MASTERING_FILTER = [
   `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
 ].join(',');
 
+// IndicF5 already returns a complete synthesized waveform. Keep its pauses and
+// dynamics intact, applying only a conservative output-level normalization.
+const INDICF5_NATURAL_MASTERING_FILTER = 'loudnorm=I=-20:TP=-3:LRA=14';
+
+const CHATTERBOX_CLARITY_MASTERING_FILTER = [
+  [
+    'silenceremove=start_periods=1:start_duration=0.2',
+    `start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    'stop_periods=-1:stop_duration=0.2',
+    `stop_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    `stop_silence=${VOICE_AUDIO_PROCESSING_CONFIG.generatedTrailingSilenceSeconds}`,
+  ].join(':'),
+  'highpass=f=70',
+  'equalizer=f=250:t=q:w=1:g=-1.5',
+  'equalizer=f=3000:t=q:w=1:g=1.25',
+  'acompressor=threshold=0.125:ratio=2:attack=20:release=200:makeup=1.1',
+  `loudnorm=I=${VOICE_AUDIO_PROCESSING_CONFIG.outputLoudnessTarget}:TP=${VOICE_AUDIO_PROCESSING_CONFIG.outputPeakCeiling}:LRA=11`,
+  `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
+].join(',');
+
+const CHATTERBOX_ENHANCED_MASTERING_FILTER = [
+  [
+    'silenceremove=start_periods=1:start_duration=0.2',
+    `start_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    'stop_periods=-1:stop_duration=0.2',
+    `stop_threshold=${VOICE_AUDIO_PROCESSING_CONFIG.generatedSilenceThresholdDb}dB`,
+    `stop_silence=${VOICE_AUDIO_PROCESSING_CONFIG.generatedTrailingSilenceSeconds}`,
+  ].join(':'),
+  'highpass=f=60',
+  `loudnorm=I=${VOICE_AUDIO_PROCESSING_CONFIG.outputLoudnessTarget}:TP=${VOICE_AUDIO_PROCESSING_CONFIG.outputPeakCeiling}:LRA=11`,
+  `alimiter=limit=${VOICE_AUDIO_PROCESSING_CONFIG.outputLimiterLevel}`,
+].join(',');
+
+export type GeneratedVoiceMasteringPreset =
+  | 'standard'
+  | 'indicf5-natural'
+  | 'chatterbox-clarity'
+  | 'chatterbox-enhanced';
+
+export type VoiceReferenceProcessingPreset = 'standard' | 'indicf5-natural';
+
 export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/webm',
   'audio/webm;codecs=opus',
@@ -488,6 +529,7 @@ export async function validateVoiceClipDecodability(filePath: string): Promise<n
 
 export async function normalizeVoiceEnrollmentRecording(
   recording: IncomingVoiceClip,
+  preset: VoiceReferenceProcessingPreset = 'standard',
 ): Promise<NormalizedVoiceReference> {
   validateIncomingClipMetadata(recording);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openmaic-voice-'));
@@ -498,6 +540,9 @@ export async function normalizeVoiceEnrollmentRecording(
 
     const { metrics: quality, decision: qualityDecision } =
       await analyzeVoiceRecordingQuality(inputPath);
+    const processingArgs =
+      preset === 'indicf5-natural' ? [] : ['-af', REFERENCE_PREPROCESSING_FILTER];
+    const encodingArgs = preset === 'indicf5-natural' ? ['-c:a', 'pcm_s16le'] : [];
     await execFileAsync('ffmpeg', [
       '-y',
       '-hide_banner',
@@ -509,8 +554,8 @@ export async function normalizeVoiceEnrollmentRecording(
       '1',
       '-ar',
       String(VOICE_REFERENCE_SAMPLE_RATE),
-      '-af',
-      REFERENCE_PREPROCESSING_FILTER,
+      ...processingArgs,
+      ...encodingArgs,
       outputPath,
     ]);
     const durationSeconds = await validateVoiceClipDecodability(outputPath);
@@ -540,6 +585,7 @@ export async function normalizeVoiceEnrollmentClips(clips: IncomingVoiceClip[]):
 export async function masterGeneratedVoiceAudio(
   audio: Uint8Array,
   format: string,
+  preset: GeneratedVoiceMasteringPreset = 'standard',
 ): Promise<{ audio: Uint8Array; format: 'wav' }> {
   if (audio.byteLength < MIN_RECORDING_SIZE_BYTES) {
     throw new Error('Generated voice audio is empty');
@@ -561,11 +607,64 @@ export async function masterGeneratedVoiceAudio(
       '-ar',
       String(VOICE_REFERENCE_SAMPLE_RATE),
       '-af',
-      GENERATED_AUDIO_MASTERING_FILTER,
+      preset === 'chatterbox-clarity'
+        ? CHATTERBOX_CLARITY_MASTERING_FILTER
+        : preset === 'chatterbox-enhanced'
+          ? CHATTERBOX_ENHANCED_MASTERING_FILTER
+          : preset === 'indicf5-natural'
+            ? INDICF5_NATURAL_MASTERING_FILTER
+            : GENERATED_AUDIO_MASTERING_FILTER,
+      ...(preset === 'indicf5-natural' ? ['-c:a', 'pcm_s16le'] : []),
       outputPath,
     ]);
     await probeDuration(outputPath);
     return { audio: new Uint8Array(await fs.readFile(outputPath)), format: 'wav' };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function validateEnhancedVoiceAudio(input: {
+  originalAudio: Uint8Array;
+  originalFormat: string;
+  enhancedAudio: Uint8Array;
+  enhancedFormat: string;
+}): Promise<{ originalDurationSeconds: number; enhancedDurationSeconds: number }> {
+  if (input.enhancedAudio.byteLength < MIN_RECORDING_SIZE_BYTES) {
+    throw new Error('Enhanced voice audio is empty');
+  }
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openmaic-voice-enhanced-check-'));
+  try {
+    const originalPath = path.join(
+      tempDir,
+      `original.${extensionForMime(`audio/${input.originalFormat}`)}`,
+    );
+    const enhancedPath = path.join(
+      tempDir,
+      `enhanced.${extensionForMime(`audio/${input.enhancedFormat}`)}`,
+    );
+    await Promise.all([
+      fs.writeFile(originalPath, input.originalAudio),
+      fs.writeFile(enhancedPath, input.enhancedAudio),
+    ]);
+    const [originalDurationSeconds, enhancedDurationSeconds, clipping] = await Promise.all([
+      probeDuration(originalPath),
+      probeDuration(enhancedPath),
+      analyzeClipping(enhancedPath),
+    ]);
+    const durationRatio = enhancedDurationSeconds / originalDurationSeconds;
+    if (durationRatio < 0.8 || durationRatio > 1.2) {
+      throw new Error(
+        `Enhanced voice duration changed unexpectedly (${durationRatio.toFixed(3)}x)`,
+      );
+    }
+    if (
+      clipping.clippedSampleRatio >= VOICE_AUDIO_PROCESSING_CONFIG.clippingRejectSampleRatio ||
+      clipping.maxConsecutiveClippingMs >= VOICE_AUDIO_PROCESSING_CONFIG.clippingRejectConsecutiveMs
+    ) {
+      throw new Error('Enhanced voice audio contains sustained clipping');
+    }
+    return { originalDurationSeconds, enhancedDurationSeconds };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }

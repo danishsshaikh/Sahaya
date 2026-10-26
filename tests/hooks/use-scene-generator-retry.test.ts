@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import {
+  normalizeGenerationPreviewLanguageState,
+  validateGenerationPreviewVoiceSelection,
+} from '@/app/generation-preview/voice-language';
+import type { GenerationSessionState } from '@/app/generation-preview/types';
 import type { SceneOutline } from '@/lib/types/generation';
 
 const mocks = vi.hoisted(() => ({
@@ -15,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   listAgents: vi.fn(),
   stageState: vi.fn(),
   toastWarning: vi.fn(),
+  staticVoiceEnabled: vi.fn(),
 }));
 
 vi.mock('@/lib/utils/model-config', () => ({
@@ -67,6 +73,9 @@ vi.mock('@/lib/orchestration/registry/store', () => ({
 }));
 
 vi.mock('sonner', () => ({ toast: { warning: mocks.toastWarning } }));
+vi.mock('@/lib/config/feature-flags', () => ({
+  isStaticVoiceEnabled: mocks.staticVoiceEnabled,
+}));
 
 const mockFetch = vi.fn() as Mock;
 vi.stubGlobal('fetch', mockFetch);
@@ -135,10 +144,12 @@ describe('browser scene generation retry wrappers', () => {
     });
     mocks.isTTSProviderEnabled.mockReturnValue(true);
     mocks.pickNarratorAgent.mockReturnValue(undefined);
+    mocks.resolveAgentVoiceOptions.mockClear();
     mocks.resolveAgentVoiceOptions.mockResolvedValue({});
     mocks.listAgents.mockReturnValue([]);
     mocks.stageState.mockReturnValue({ stage: { id: 'stage-1' } });
     mocks.toastWarning.mockReset();
+    mocks.staticVoiceEnabled.mockReturnValue(true);
   });
 
   it('retries transient scene content HTTP failures before returning success', async () => {
@@ -506,24 +517,44 @@ describe('browser scene generation retry wrappers', () => {
     );
   });
 
-  it('sends a canonical cloned-voice language code instead of raw language directives', async () => {
+  it('does not initialize or request a generic narrator when static voice is disabled', async () => {
+    mocks.staticVoiceEnabled.mockReturnValue(false);
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+
+    await expect(generateAndStoreTTS('tts_static_off', 'Hello class')).resolves.toBeNull();
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mocks.resolveAgentVoiceOptions).not.toHaveBeenCalled();
+  });
+
+  it('uses the structured lesson language instead of an ambiguous narration directive', async () => {
     mocks.stageState.mockReturnValue({
-      stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready' },
+      stage: { id: 'stage-1', teacherVoiceProfileId: 'vcp_ready', lessonLanguage: 'hi' },
     });
     const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
-    mockFetch.mockResolvedValue(
-      jsonResponse(200, {
-        success: true,
-        teachingVoiceProvider: 'indicf5',
-        base64: btoa('audio-data'),
-        format: 'wav',
-      }),
-    );
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'indicf5',
+          jobId: 'rq_completed_indicf5_language_test',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_completed_indicf5_language_test',
+          audioUrl: '/api/generate/tts/jobs/rq_completed_indicf5_language_test/audio',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new TextEncoder().encode('audio-data'), {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
 
     await generateAndStoreTTS(
       'tts_s2_action_1',
       'Hello class',
-      'Deliver the entire course in English. Use clear wording.',
+      'Teach in Hindi while retaining technical terms in English.',
       undefined,
       retryOptions,
     );
@@ -531,9 +562,123 @@ describe('browser scene generation retry wrappers', () => {
     const body = JSON.parse(String(mockFetch.mock.calls[0][1]?.body));
     expect(body).toMatchObject({
       teacherVoiceProfileId: 'vcp_ready',
-      ttsLanguageCode: 'en',
+      ttsLanguageCode: 'hi',
     });
     expect(body.language).toBeUndefined();
+  });
+
+  it('takes the exact Hindi Force preview through Scene 1 and IndicF5 queue admission', async () => {
+    const outlines: SceneOutline[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `force-outline-${index + 1}`,
+      type: index === 2 ? 'quiz' : 'slide',
+      title: `Force ${index + 1}`,
+      description: 'Force lesson scene.',
+      keyPoints: ['Force'],
+      order: index + 1,
+    }));
+    const previewSession = normalizeGenerationPreviewLanguageState({
+      sessionId: 'force-hindi-session',
+      requirements: {
+        requirement:
+          'Generate a short 4-slide lesson on Force in Hindi, including 2 explanation slides, 1 quiz, and 1 summary slide. Use simple Hindi throughout.',
+      },
+      pdfText: '',
+      sceneOutlines: outlines,
+      currentStep: 'generating',
+      previewPhase: 'generating-content',
+      teacherVoiceProfileId: 'vcp_force_hindi',
+      languageDirective: 'Teach in the language that matches the user requirement.',
+    } satisfies GenerationSessionState);
+    const profileFetch = vi.fn(async () =>
+      jsonResponse(200, {
+        profile: {
+          id: 'vcp_force_hindi',
+          status: 'ready',
+          provider: 'indicf5',
+          language: 'hi',
+          languageId: 'hi',
+        },
+      }),
+    );
+
+    const profile = await validateGenerationPreviewVoiceSelection(
+      previewSession,
+      profileFetch as typeof fetch,
+    );
+    mocks.stageState.mockReturnValue({
+      stage: {
+        id: 'stage-force-hindi',
+        teacherVoiceProfileId: previewSession.teacherVoiceProfileId,
+        lessonLanguage: previewSession.lessonLanguage,
+      },
+    });
+    const { fetchSceneContent, generateAndStoreTTS } =
+      await import('@/lib/hooks/use-scene-generator');
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          content: { elements: [] },
+          attemptId: 'attempt-force-scene-1',
+          generationVersion: 'version-force-1',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(202, {
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'indicf5',
+          jobId: 'rq_force_hindi_scene_1',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_force_hindi_scene_1',
+          audioUrl: '/api/generate/tts/jobs/rq_force_hindi_scene_1/audio',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new TextEncoder().encode('force-hindi-audio'), {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
+
+    const scene = await fetchSceneContent(
+      {
+        outline: outlines[0],
+        allOutlines: outlines,
+        stageId: 'stage-force-hindi',
+        stageInfo: { name: 'Force in Hindi' },
+        languageDirective: previewSession.languageDirective,
+        requirements: previewSession.requirements,
+      },
+      undefined,
+      retryOptions,
+    );
+    const audioId = await generateAndStoreTTS(
+      'tts_force_hindi_scene_1',
+      'बल किसी वस्तु की गति को बदल सकता है।',
+      previewSession.languageDirective,
+      undefined,
+      retryOptions,
+      undefined,
+      'stage-force-hindi',
+      undefined,
+      0,
+      'scene-force-hindi-1',
+      undefined,
+      outlines[0].id,
+    );
+
+    expect(previewSession.lessonLanguage).toBe('hi');
+    expect(profile).toMatchObject({ provider: 'indicf5', language: 'hi' });
+    expect(scene).toMatchObject({ success: true, attemptId: 'attempt-force-scene-1' });
+    expect(audioId).toBe('tts_force_hindi_scene_1');
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/generate/scene-content');
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toMatchObject({
+      teacherVoiceProfileId: 'vcp_force_hindi',
+      ttsLanguageCode: 'hi',
+      stageId: 'stage-force-hindi',
+      outlineId: 'force-outline-1',
+    });
   });
 
   it('keeps scene content requests independent from selected faculty voice profiles', async () => {

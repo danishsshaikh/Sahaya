@@ -4,12 +4,28 @@ import { describe, expect, it } from 'vitest';
 import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 
 describe('Teaching Voice queue progress UI', () => {
-  it('shows compact server queue position without a fake ETA', () => {
+  it('keeps the collapsed toolbar indicator compact and removes overall percentage', () => {
+    const html = renderToStaticMarkup(
+      createElement(LessonGenerationProgress, {
+        sceneIndex: 2,
+        totalScenes: 5,
+        phase: 'content',
+      }),
+    );
+    expect(html).toContain('Generating');
+    expect(html).toContain('Slide 2/5');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('%');
+    expect(html).not.toContain('Lesson generation details');
+  });
+
+  it('shows queue position but omits wait text when the server supplies no ETA', () => {
     const html = renderToStaticMarkup(
       createElement(LessonGenerationProgress, {
         sceneIndex: 2,
         totalScenes: 5,
         phase: 'narration',
+        defaultExpanded: true,
         teachingVoiceQueue: {
           status: 'queued',
           queuePosition: 3,
@@ -20,16 +36,17 @@ describe('Teaching Voice queue progress UI', () => {
     );
     expect(html).toContain('Teaching Voice queued');
     expect(html).toContain('2 requests ahead');
-    expect(html).toContain('Estimating wait...');
-    expect(html).not.toMatch(/\d+:\d+/);
+    expect(html).not.toContain('Estimating wait...');
+    expect(html).not.toContain('>96%<');
   });
 
-  it("shows You're next and a coarse ETA supplied by the server", () => {
+  it("shows You're next and a coarse ETA only when supplied by the server", () => {
     const html = renderToStaticMarkup(
       createElement(LessonGenerationProgress, {
         sceneIndex: 2,
         totalScenes: 5,
         phase: 'narration',
+        defaultExpanded: true,
         teachingVoiceQueue: {
           status: 'queued',
           queuePosition: 1,
@@ -42,12 +59,13 @@ describe('Teaching Voice queue progress UI', () => {
     expect(html).toContain('About 2 min wait');
   });
 
-  it('returns to active narration copy when the job starts running', () => {
-    const html = renderToStaticMarkup(
+  it('shows running narration and finalizing states independently from slide progress', () => {
+    const running = renderToStaticMarkup(
       createElement(LessonGenerationProgress, {
-        sceneIndex: 2,
-        totalScenes: 5,
+        sceneIndex: 4,
+        totalScenes: 4,
         phase: 'narration',
+        defaultExpanded: true,
         teachingVoiceQueue: {
           status: 'running',
           queuePosition: null,
@@ -56,7 +74,17 @@ describe('Teaching Voice queue progress UI', () => {
         },
       }),
     );
-    expect(html).toContain('Creating voice narration...');
-    expect(html).not.toContain('Teaching Voice queued');
+    const finalizing = renderToStaticMarkup(
+      createElement(LessonGenerationProgress, {
+        sceneIndex: 4,
+        totalScenes: 4,
+        phase: 'finalizing',
+        defaultExpanded: true,
+      }),
+    );
+
+    expect(running).toContain('Creating voice narration');
+    expect(running).toContain('Current slide content ready');
+    expect(finalizing).toContain('Narration ready');
   });
 });

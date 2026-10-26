@@ -8,7 +8,8 @@ import {
 } from '@/lib/voice-cloning/phrases';
 import {
   newTeachingVoiceProvider,
-  resolveTeachingVoiceLanguage,
+  normalizeTeachingVoiceLanguageId,
+  resolveVoiceProfileReferenceLanguage,
   validateTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
 import {
@@ -28,8 +29,10 @@ import {
   normalizeVoiceEnrollmentRecording,
   type IncomingVoiceClip,
 } from '@/lib/voice-cloning/audio-validation';
+import { processChatterboxAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import {
+  RECOMMENDED_VOICE_GENERATION_SETTINGS,
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
   resolveVoiceProfileProvider,
@@ -37,9 +40,14 @@ import {
   type TeachingVoiceProviderOperation,
   type VoiceConfiguration,
   type VoicePreview,
+  type VoicePreviewComparison,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { createLogger } from '@/lib/logger';
+import {
+  getChatterboxDefaultModelVariant,
+  isVoiceEnhancementAllowed,
+} from '@/lib/voice-cloning/config';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -65,7 +73,7 @@ export interface VoiceEnrollmentJob {
   startedAt?: number;
   completedAt?: number;
   languageId?: string;
-  provider?: 'qwen3' | 'indicf5';
+  provider?: 'chatterbox' | 'indicf5';
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
@@ -87,7 +95,7 @@ interface VoiceEnrollmentInput {
   ownerUserId: string;
   displayName: string;
   languageId: string;
-  providerId: 'qwen3' | 'indicf5';
+  providerId: 'chatterbox' | 'indicf5';
   referenceText: string;
   recording: IncomingVoiceClip;
 }
@@ -212,20 +220,29 @@ export async function generateVariantPreview(
   options: {
     onPhase?: (phase: VoiceEnrollmentJobPhase) => void;
     attemptId?: string;
+    previewTextLanguageId?: 'en' | 'hi';
   } = {},
-): Promise<{ providerReferenceId: string; preview: VoicePreview }> {
+): Promise<{
+  providerReferenceId: string;
+  preview: VoicePreview;
+  comparison?: VoicePreviewComparison;
+}> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new Error('Voice profile reference audio not found');
   }
   const providerId = resolveVoiceProfileProvider(profile);
   validateTeachingVoiceLanguage(profile, config.languageId);
+  const referenceLanguage = resolveVoiceProfileReferenceLanguage(profile);
+  if (!referenceLanguage) {
+    throw new TeachingVoiceError('The voice profile reference language is unsupported.');
+  }
   const provider = getVoiceCloningProvider(providerId);
   options.onPhase?.('provider_registration');
   const { providerReferenceId } = await provider.createProfile({
     profileId: profile.id,
     referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
     referenceText: profile.referenceText,
-    language: config.languageId,
+    language: referenceLanguage,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
   });
@@ -240,7 +257,7 @@ export async function generateVariantPreview(
   options.onPhase?.('preview_generation');
   const preview = await provider.generatePreview({
     providerReferenceId,
-    text: getVoicePreviewText(config.languageId, providerId),
+    text: getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
@@ -255,7 +272,36 @@ export async function generateVariantPreview(
     format: preview.format,
   });
   options.onPhase?.('mastering');
-  const mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format);
+  let mastered: { audio: Uint8Array; format: string };
+  let comparison: VoicePreviewComparison | undefined;
+  if (providerId === 'chatterbox') {
+    const enhancementAllowed = isVoiceEnhancementAllowed(providerId, config.languageId, 'preview');
+    const variants = await processChatterboxAudioVariants(preview, {
+      attemptEnhancement: enhancementAllowed,
+      context: 'preview',
+      profileId: profile.id,
+      languageId: config.languageId,
+    });
+    const original = voicePreviewFromAudio(variants.original.audio, variants.original.format);
+    const enhanced = variants.enhanced
+      ? voicePreviewFromAudio(variants.enhanced.audio, variants.enhanced.format)
+      : undefined;
+    comparison = {
+      original,
+      ...(enhanced ? { enhanced } : {}),
+      ...(variants.enhancementError
+        ? { enhancementError: variants.enhancementError }
+        : !enhancementAllowed
+          ? { enhancementError: 'Enhanced preview is disabled for this language or deployment.' }
+          : {}),
+    };
+    mastered =
+      config.enhancementMode === 'resemble-enhance' && variants.enhanced
+        ? variants.enhanced
+        : variants.original;
+  } else {
+    mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format, 'indicf5-natural');
+  }
   log.info('voice output mastering completed', {
     attemptId: options.attemptId,
     profileId: profile.id,
@@ -268,6 +314,7 @@ export async function generateVariantPreview(
   return {
     providerReferenceId,
     preview: voicePreviewFromAudio(mastered.audio, mastered.format),
+    ...(comparison ? { comparison } : {}),
   };
 }
 
@@ -275,7 +322,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
   attemptId: string;
   ownerUserId: string;
   languageId: string;
-  provider: 'qwen3' | 'indicf5';
+  provider: 'chatterbox' | 'indicf5';
 }): { job: VoiceEnrollmentJob; reused: boolean } {
   const now = nowMs();
   cleanupVoiceEnrollmentJobs(now);
@@ -360,6 +407,8 @@ export async function readVoiceEnrollmentStatus(
 
 async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<VoiceProfile> {
   const startedAt = nowMs();
+  const chatterboxModelVariant =
+    input.providerId === 'chatterbox' ? getChatterboxDefaultModelVariant() : undefined;
   let profile: VoiceProfile | null = null;
   let currentPhase: VoiceEnrollmentJobPhase = 'queued';
   try {
@@ -372,7 +421,10 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       provider: input.providerId,
       recordingBytes: input.recording.bytes.byteLength,
     });
-    const normalizedReference = await normalizeVoiceEnrollmentRecording(input.recording);
+    const normalizedReference =
+      input.providerId === 'indicf5'
+        ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
+        : await normalizeVoiceEnrollmentRecording(input.recording);
     log.info('voice enrollment quality check passed', {
       attemptId: input.attemptId,
       operation: 'enroll',
@@ -408,6 +460,13 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       provider: input.providerId,
       language: input.languageId,
       languageId: input.languageId,
+      ...(input.providerId === 'chatterbox'
+        ? {
+            modelVariant: chatterboxModelVariant,
+            generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+            enhancementMode: 'standard' as const,
+          }
+        : { modelVariant: undefined, generationSettings: undefined }),
       referenceText: input.referenceText,
       status: 'processing',
       createdAt: existingAttemptProfile?.createdAt ?? now,
@@ -419,6 +478,7 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       enrollmentAttemptId: input.attemptId,
       providerReferenceId: undefined,
       preview: undefined,
+      previewComparison: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
       failureReason: undefined,
@@ -452,14 +512,27 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       qualityDecision: normalizedReference.qualityDecision.severity,
     });
 
-    const config: VoiceConfiguration = { languageId: input.languageId };
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config, {
-      attemptId: input.attemptId,
-      onPhase: (phase) => {
-        currentPhase = phase;
-        updateJob(input.attemptId, { phase });
+    const config: VoiceConfiguration = {
+      languageId: input.languageId,
+      ...(input.providerId === 'chatterbox'
+        ? {
+            modelVariant: chatterboxModelVariant,
+            generationSettings: { ...RECOMMENDED_VOICE_GENERATION_SETTINGS },
+            enhancementMode: 'standard' as const,
+          }
+        : {}),
+    };
+    const { providerReferenceId, preview, comparison } = await generateVariantPreview(
+      profile,
+      config,
+      {
+        attemptId: input.attemptId,
+        onPhase: (phase) => {
+          currentPhase = phase;
+          updateJob(input.attemptId, { phase });
+        },
       },
-    });
+    );
     currentPhase = 'finalizing';
     updateJob(input.attemptId, { phase: currentPhase });
     profile = {
@@ -467,7 +540,7 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       providerReferenceId,
       status: 'preview-ready',
       updatedAt: new Date().toISOString(),
-      draftPreview: { config, preview },
+      draftPreview: { config, preview, ...(comparison ? { comparison } : {}) },
     };
     await writeVoiceProfile(profile);
 
@@ -613,8 +686,12 @@ export async function parseVoiceEnrollmentForm(
       ? String(formData.get('displayName')).trim().slice(0, 80)
       : '';
   const languageValue = formData.get('languageId') ?? formData.get('language');
-  const languageId =
-    resolveTeachingVoiceLanguage(typeof languageValue === 'string' ? languageValue : null) || '';
+  const languageId = normalizeTeachingVoiceLanguageId(
+    typeof languageValue === 'string' ? languageValue : null,
+  );
+  if (!languageId) {
+    throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
+  }
   const providerId = newTeachingVoiceProvider(languageId);
   const phrase = getVoiceEnrollmentPhrases(languageId).find(
     (item) => item.id === formData.get('phraseId'),
@@ -689,14 +766,17 @@ export async function acceptVoiceProfilePreview(
   config: VoiceConfiguration,
   ownerId: string,
 ): Promise<VoiceProfile> {
-  const next = {
+  const next: VoiceProfile = {
     ...profile,
     status: 'ready' as const,
-    language: config.languageId,
     languageId: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
+    enhancementMode: config.enhancementMode ?? 'standard',
+    activeEngine: resolveVoiceProfileProvider(profile) === 'indicf5' ? 'indicf5' : 'chatterbox',
     preview: profile.draftPreview?.preview,
+    previewComparison: profile.draftPreview?.comparison,
+    previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
     draftPreview: undefined,
     updatedAt: new Date().toISOString(),
   };
@@ -707,8 +787,8 @@ export async function acceptVoiceProfilePreview(
     if (
       previousProfile &&
       previousProfile.ownerId === ownerId &&
-      resolveTeachingVoiceLanguage(previousProfile.languageId ?? previousProfile.language) ===
-        config.languageId &&
+      resolveVoiceProfileReferenceLanguage(previousProfile) ===
+        resolveVoiceProfileReferenceLanguage(profile) &&
       previousProfile.status !== 'deleted'
     ) {
       if (previousProfile.providerReferenceId) {
@@ -724,8 +804,11 @@ export async function acceptVoiceProfilePreview(
         referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,
+        previewComparison: undefined,
+        previewTextLanguageId: undefined,
         previewVariants: undefined,
         draftPreview: undefined,
+        qwenPreviewCache: undefined,
         updatedAt: new Date().toISOString(),
       });
     }

@@ -74,7 +74,10 @@ vi.mock('@/lib/audio/unavailable-voice-bindings', () => ({
   markVoiceBindingUnavailable: vi.fn(),
   voiceBindingKey: () => 'voice',
 }));
-vi.mock('@/lib/voice-cloning/language', () => ({ resolveTeachingVoiceLanguage: () => 'en' }));
+vi.mock('@/lib/voice-cloning/language', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/voice-cloning/language')>()),
+  resolveTeachingVoiceLanguage: () => 'en',
+}));
 vi.mock('@/lib/audio/audio-duration', () => ({ measureAudioDuration: () => undefined }));
 vi.mock('@/lib/i18n', () => ({ getClientTranslation: (key: string) => key }));
 vi.mock('@/lib/logger', () => ({
@@ -343,7 +346,7 @@ describe('scene generator visual and narration pipelines', () => {
               jsonResponse({
                 success: true,
                 async: true,
-                teachingVoiceProvider: 'qwen3',
+                teachingVoiceProvider: 'chatterbox',
                 jobId: 'rq_shared_teaching_voice_job',
                 status: 'queued',
                 statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
@@ -354,7 +357,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_shared_teaching_voice_job',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_shared_teaching_voice_job',
@@ -434,7 +437,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: `rq_${actionId}`,
               status: 'completed',
               statusUrl: `/api/generate/tts/jobs/rq_${actionId}`,
@@ -499,7 +502,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_stale_completion',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_stale_completion',
@@ -554,7 +557,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_delayed_teaching_voice_job',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_delayed_teaching_voice_job',
@@ -606,7 +609,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'chatterbox',
               jobId: 'rq_fifo_delayed_teaching_voice',
               status: 'queued',
               statusUrl: '/api/generate/tts/jobs/rq_fifo_delayed_teaching_voice',
@@ -662,7 +665,7 @@ describe('scene generator visual and narration pipelines', () => {
     expect(statusChecks).toBe(4);
   });
 
-  it('publishes the first completed speech clip before the second clip finishes', async () => {
+  it('publishes the first completed IndicF5 clip before the second clip finishes', async () => {
     const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
     committedScene.actions = [
       { id: 'speech-1', type: 'speech', text: 'First narration' },
@@ -685,7 +688,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'indicf5',
               jobId: 'rq_first_clip_ready_immediately',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_first_clip_ready_immediately',
@@ -717,7 +720,7 @@ describe('scene generator visual and narration pipelines', () => {
     await vi.waitFor(() => expect(mocks.stageState.saveToStorage).toHaveBeenCalled());
   });
 
-  it('reuses completed clips while recovering only missing narration', async () => {
+  it('reuses completed IndicF5 clips while recovering only missing narration', async () => {
     const committedScene = ((await actionResponse(1).json()) as { scene: Scene }).scene;
     committedScene.actions = [
       { id: 'speech-ready', type: 'speech', text: 'Already ready', audioId: 'ast_existing' },
@@ -740,7 +743,7 @@ describe('scene generator visual and narration pipelines', () => {
             jsonResponse({
               success: true,
               async: true,
-              teachingVoiceProvider: 'qwen3',
+              teachingVoiceProvider: 'indicf5',
               jobId: 'rq_missing_only',
               status: 'completed',
               statusUrl: '/api/generate/tts/jobs/rq_missing_only',

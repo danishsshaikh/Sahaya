@@ -18,11 +18,11 @@ function enqueue(
   ownerId = 'faculty-a',
 ) {
   return queue.enqueue({
-    resourceKey: 'teaching-voice:qwen3',
+    resourceKey: 'teaching-voice:chatterbox',
     concurrency: 1,
     ownerId,
     idempotencyKey: key,
-    metadata: { provider: 'qwen3', stageId: `stage-${key}` },
+    metadata: { provider: 'chatterbox', stageId: `stage-${key}` },
     run,
   });
 }

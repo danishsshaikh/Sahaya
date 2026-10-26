@@ -14,6 +14,7 @@ import { resolveAudioBlob } from '@/lib/media/resolve-audio-bytes';
 import { assetRefExists } from '@/lib/media/use-asset-url';
 import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
+import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
 /** Legacy deterministic Dexie key used before pool allocation. */
 export function speechAudioId(sceneOrder: number, actionId: string): string {
@@ -46,7 +47,7 @@ export function isManagedTtsActive(): boolean {
   const s = useSettingsStore.getState();
   return (
     Boolean(useStageStore.getState().stage?.teacherVoiceProfileId) ||
-    (s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts')
+    (isStaticVoiceEnabled() && s.ttsEnabled && s.ttsProviderId !== 'browser-native-tts')
   );
 }
 

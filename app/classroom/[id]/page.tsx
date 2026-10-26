@@ -455,19 +455,21 @@ export default function ClassroomDetailPage() {
             </div>
           ) : (
             <>
-              <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
-              {generationProgress ? (
-                <div className="pointer-events-none absolute right-4 top-4 z-30 w-full max-w-xs">
-                  <LessonGenerationProgress
-                    sceneIndex={generationProgress.sceneIndex}
-                    totalScenes={generationProgress.totalScenes}
-                    phase={generationProgress.phase}
-                    sceneType={generationProgress.sceneType}
-                    etaLabel={generationProgress.etaLabel}
-                    teachingVoiceQueue={generationProgress.teachingVoiceQueue}
-                  />
-                </div>
-              ) : null}
+              <Stage
+                onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
+                generationStatus={
+                  generationProgress ? (
+                    <LessonGenerationProgress
+                      sceneIndex={generationProgress.sceneIndex}
+                      totalScenes={generationProgress.totalScenes}
+                      phase={generationProgress.phase}
+                      sceneType={generationProgress.sceneType}
+                      etaLabel={generationProgress.etaLabel}
+                      teachingVoiceQueue={generationProgress.teachingVoiceQueue}
+                    />
+                  ) : undefined
+                }
+              />
             </>
           )}
         </div>

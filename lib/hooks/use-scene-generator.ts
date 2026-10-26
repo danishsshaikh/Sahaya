@@ -16,7 +16,10 @@ import type { AgentInfo } from '@openmaic/generation';
 import type { Scene } from '@/lib/types/stage';
 import type { Action, SpeechAction } from '@/lib/types/action';
 import { splitLongSpeechActions } from '@/lib/audio/tts-utils';
-import { resolveTeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import {
+  normalizeTeachingVoiceLanguageId,
+  resolveTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { resolveAgentVoiceOptions, pickNarratorAgent } from '@/lib/audio/agent-voice';
@@ -55,6 +58,7 @@ import {
   sceneForNarrationSynthesis,
   sceneWithPendingNarration,
 } from '@/lib/generation/scene-narration';
+import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
 const log = createLogger('SceneGenerator');
 type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
@@ -571,8 +575,8 @@ async function resolveTeachingVoiceJob(
     throw new Error('Teaching Voice response is missing provider metadata.');
   }
   if (!initial.async || !initial.jobId || !initial.statusUrl) {
-    if (initial.teachingVoiceProvider === 'qwen3') {
-      throw new Error('Qwen Teaching Voice must use the asynchronous synthesis job API.');
+    if (initial.teachingVoiceProvider) {
+      throw new Error('Teaching Voice must use the asynchronous synthesis job API.');
     }
     return initial;
   }
@@ -693,10 +697,13 @@ export async function generateAndStoreTTS(
   traceContext?: NarrationTraceContext,
 ): Promise<string | null> {
   const settings = useSettingsStore.getState();
-  const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
-  const narrationLanguage = language || useStageStore.getState().stage?.languageDirective;
+  const stage = useStageStore.getState().stage;
+  const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
+  if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) return null;
+  const lessonLanguage = normalizeTeachingVoiceLanguageId(stage?.lessonLanguage);
+  const narrationLanguage = lessonLanguage || language || stage?.languageDirective;
   const ttsLanguageCode = teacherVoiceProfileId
-    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? narrationLanguage)
+    ? (resolveTeachingVoiceLanguage(narrationLanguage) ?? undefined)
     : undefined;
   // A generated roster's explicit voice binding is the course voice source of truth.
   // Global settings remain the fallback for classrooms without a binding.
@@ -1050,6 +1057,9 @@ export async function generateTTSForScene(
 ): Promise<{ success: boolean; failedCount: number; error?: string }> {
   const providerId = useSettingsStore.getState().ttsProviderId;
   const teacherVoiceProfileId = useStageStore.getState().stage?.teacherVoiceProfileId;
+  if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) {
+    return { success: true, failedCount: 0 };
+  }
   scene.actions = splitLongSpeechActions(scene.actions || [], providerId);
   const speechActions = scene.actions.filter(
     (a): a is SpeechAction =>
@@ -1847,7 +1857,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             const teacherVoiceProfileId = store.getState().stage?.teacherVoiceProfileId;
             const narrationEnabled = Boolean(
               teacherVoiceProfileId ||
-              (settings.ttsEnabled &&
+              (isStaticVoiceEnabled() &&
+                settings.ttsEnabled &&
                 settings.ttsProviderId !== 'browser-native-tts' &&
                 isTTSProviderEnabled(
                   settings.ttsProviderId,
@@ -2149,7 +2160,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         const teacherVoiceProfileId = state.stage.teacherVoiceProfileId;
         const narrationEnabled = Boolean(
           teacherVoiceProfileId ||
-          (settings.ttsEnabled &&
+          (isStaticVoiceEnabled() &&
+            settings.ttsEnabled &&
             settings.ttsProviderId !== 'browser-native-tts' &&
             isTTSProviderEnabled(
               settings.ttsProviderId,

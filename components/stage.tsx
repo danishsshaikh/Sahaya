@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'motion/react';
 import { useStageStore } from '@/lib/store';
@@ -62,9 +62,11 @@ import { enterEditMode } from '@/lib/edit/enter-edit-mode';
 export function Stage({
   classroomId,
   onRetryOutline,
+  generationStatus,
 }: {
   classroomId?: string;
   onRetryOutline?: (outlineId: string) => Promise<void>;
+  generationStatus?: ReactNode;
 }) {
   const { mode, setMode, scenes, currentSceneId, generatingOutlines, stage } = useStageStore();
   const router = useRouter();
@@ -356,6 +358,7 @@ export function Stage({
             hideHeader={!classroomHeaderControls.showHeader}
             hideHeaderGlobalControls={!classroomHeaderControls.showGlobalControls}
             hideHeaderCourseActions={!classroomHeaderControls.showCourseActions}
+            headerStatus={generationStatus}
           />
         </motion.div>
       ) : (
@@ -377,6 +380,9 @@ export function Stage({
           and there is no longer an "agent modified this page" banner or a manual
           reload entry. */}
       {classroomChrome}
+      {!classroomHeaderControls.showHeader && generationStatus ? (
+        <div className="absolute right-3 top-3 z-40">{generationStatus}</div>
+      ) : null}
       {/* Full-screen playback steps the workspace aside; the return to the
           conversation lives in the classroom header's left slot (passed as
           `headerBackControl` above), so it never floats over the courseware.

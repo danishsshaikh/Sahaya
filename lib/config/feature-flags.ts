@@ -15,6 +15,11 @@ export type FeatureFlag =
   | 'companionSelector'
   | 'classroomChat'
   | 'voiceCloning'
+  | 'staticVoice'
+  | 'promptPersonalization'
+  | 'webSearch'
+  | 'classroomImport'
+  | 'whiteboard'
   | 'interactiveScenes'
   | 'deterministicInteractives'
   | 'discussionScenes'
@@ -181,6 +186,13 @@ const featureFlags = {
   companionSelector: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_COMPANION_SELECTOR),
   classroomChat: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_CLASSROOM_CHAT),
   voiceCloning: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_VOICE_CLONING),
+  staticVoice: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_STATIC_VOICE),
+  promptPersonalization: readFeatureFlagBoolean(
+    process.env.NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION,
+  ),
+  webSearch: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_WEB_SEARCH),
+  classroomImport: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT),
+  whiteboard: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_WHITEBOARD),
   interactiveScenes: readFeatureFlagBoolean(process.env.NEXT_PUBLIC_FEATURE_INTERACTIVE_SCENES),
   deterministicInteractives:
     process.env.NEXT_PUBLIC_FEATURE_DETERMINISTIC_INTERACTIVES == null
@@ -217,6 +229,26 @@ export function isClassroomChatEnabled(): boolean {
 
 export function isVoiceCloningEnabled(): boolean {
   return isFeatureEnabled('voiceCloning');
+}
+
+export function isStaticVoiceEnabled(): boolean {
+  return isFeatureEnabled('staticVoice');
+}
+
+export function isPromptPersonalizationEnabled(): boolean {
+  return isFeatureEnabled('promptPersonalization');
+}
+
+export function isWebSearchEnabled(): boolean {
+  return isFeatureEnabled('webSearch');
+}
+
+export function isClassroomImportEnabled(): boolean {
+  return isFeatureEnabled('classroomImport');
+}
+
+export function isWhiteboardEnabled(): boolean {
+  return isFeatureEnabled('whiteboard');
 }
 
 export function isInteractiveScenesEnabled(): boolean {

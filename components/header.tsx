@@ -29,6 +29,8 @@ interface HeaderProps {
   readonly hideGlobalControls?: boolean;
   /** Hide course-level share/export in a workbench-attached classroom. */
   readonly hideCourseActions?: boolean;
+  /** Compact, transient classroom status rendered between the title and controls. */
+  readonly statusSlot?: ReactNode;
 }
 
 export function Header({
@@ -41,6 +43,7 @@ export function Header({
   hideBackControl,
   hideGlobalControls,
   hideCourseActions,
+  statusSlot,
 }: HeaderProps) {
   const { t } = useI18n();
   const router = useRouter();
@@ -49,7 +52,7 @@ export function Header({
 
   return (
     <>
-      <header className="h-20 px-8 flex items-center justify-between z-10 bg-transparent gap-4">
+      <header className="z-10 flex h-20 items-center justify-between gap-2 bg-transparent px-3 sm:gap-4 sm:px-8">
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {hideBackControl
             ? null
@@ -73,7 +76,9 @@ export function Header({
               briefly stack on top of the incoming EditChromeRoot's
               CommandBar title during the cross-fade. */}
           {mode !== 'edit' && (
-            <div className="flex flex-col min-w-0">
+            <div
+              className={statusSlot ? 'hidden min-w-0 flex-col sm:flex' : 'flex min-w-0 flex-col'}
+            >
               <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 dark:text-gray-500 mb-0.5">
                 {t('stage.currentScene')}
               </span>
@@ -86,6 +91,8 @@ export function Header({
             </div>
           )}
         </div>
+
+        {statusSlot}
 
         {/* Standalone classroom keeps the full cluster. Workbench-attached
             classrooms omit both the global capsule and course share/export. */}

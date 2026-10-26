@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
   requireSessionUser: vi.fn(),
-  resolveProvider: vi.fn(),
+  resolveSelection: vi.fn(),
   synthesize: vi.fn(),
   enqueue: vi.fn(),
   read: vi.fn(),
@@ -19,11 +19,11 @@ vi.mock('@/lib/audio/tts-providers', async (importOriginal) => {
   return { ...actual, generateTTS: mocks.generateTTS };
 });
 vi.mock('@/lib/voice-cloning/synthesis', () => ({
-  resolveFacultyVoiceProviderId: mocks.resolveProvider,
+  resolveFacultyVoiceSelection: mocks.resolveSelection,
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 vi.mock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-  enqueueQwenTeachingVoiceJob: mocks.enqueue,
+  enqueueTeachingVoiceJob: mocks.enqueue,
   readTeachingVoiceJob: mocks.read,
   readTeachingVoiceJobResult: mocks.result,
   cancelTeachingVoiceJob: mocks.cancel,
@@ -37,7 +37,7 @@ import { GET as getAudio } from '@/app/api/generate/tts/jobs/[jobId]/audio/route
 const jobId = 'rq_abcdefghijklmnopqrstuvwxyz';
 const user = { id: 'faculty-a' };
 
-function postRequest() {
+function postRequest(language = 'en') {
   return new NextRequest('http://localhost/api/generate/tts', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -45,7 +45,7 @@ function postRequest() {
       text: 'Narration',
       audioId: 'tts_s1_action-1',
       teacherVoiceProfileId: 'vcp_faculty',
-      ttsLanguageCode: 'en',
+      ttsLanguageCode: language,
       stageId: 'stage-1',
       sceneId: 'scene-1',
     }),
@@ -55,7 +55,7 @@ function postRequest() {
 function snapshot(status: 'queued' | 'running' | 'completed' = 'queued') {
   return {
     id: jobId,
-    resourceKey: 'teaching-voice:qwen3',
+    resourceKey: 'teaching-voice:chatterbox',
     status,
     enqueuedAt: 1,
     queuePosition: status === 'queued' ? 2 : null,
@@ -63,7 +63,7 @@ function snapshot(status: 'queued' | 'running' | 'completed' = 'queued') {
     queueDepth: 2,
     estimatedWaitMs: status === 'queued' ? 90_000 : null,
     attemptCount: status === 'running' ? 1 : 0,
-    metadata: { provider: 'qwen3' },
+    metadata: { provider: 'chatterbox' },
   };
 }
 
@@ -71,18 +71,18 @@ describe('Teaching Voice async TTS routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireSessionUser.mockResolvedValue(user);
-    mocks.resolveProvider.mockResolvedValue('qwen3');
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'chatterbox', synthesisLanguage: 'hi' });
     mocks.enqueue.mockReturnValue({ job: snapshot(), reused: false });
     mocks.generateTTS.mockResolvedValue({ audio: new Uint8Array([4, 5]), format: 'mp3' });
   });
 
-  it('returns Qwen queue admission immediately as HTTP 202', async () => {
+  it('returns Chatterbox queue admission immediately as HTTP 202', async () => {
     const response = await POST(postRequest());
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
       async: true,
-      teachingVoiceProvider: 'qwen3',
+      teachingVoiceProvider: 'chatterbox',
       jobId,
       status: 'queued',
       queuePosition: 2,
@@ -91,7 +91,13 @@ describe('Teaching Voice async TTS routes', () => {
       statusUrl: `/api/generate/tts/jobs/${jobId}`,
     });
     expect(mocks.enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({ ownerId: 'faculty-a', stageId: 'stage-1', sceneId: 'scene-1' }),
+      expect.objectContaining({
+        ownerId: 'faculty-a',
+        stageId: 'stage-1',
+        sceneId: 'scene-1',
+        text: 'Narration',
+        language: 'hi',
+      }),
     );
     expect(mocks.synthesize).not.toHaveBeenCalled();
   });
@@ -106,21 +112,35 @@ describe('Teaching Voice async TTS routes', () => {
     });
   });
 
-  it('preserves synchronous behavior for non-Qwen Teaching Voice', async () => {
-    mocks.resolveProvider.mockResolvedValue('indicf5');
-    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'wav' });
-    const response = await POST(postRequest());
-    expect(response.status).toBe(200);
+  it('admits Indic Teaching Voice to its recoverable queue', async () => {
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'indicf5', synthesisLanguage: 'hi' });
+    mocks.enqueue.mockReturnValue({
+      job: { ...snapshot(), resourceKey: 'teaching-voice:indicf5' },
+      reused: false,
+    });
+    const response = await POST(postRequest('hi'));
+    expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({
       success: true,
-      format: 'wav',
+      async: true,
+      status: 'queued',
       teachingVoiceProvider: 'indicf5',
     });
-    expect(mocks.enqueue).not.toHaveBeenCalled();
-    expect(mocks.synthesize).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveSelection).toHaveBeenCalledWith('vcp_faculty', 'faculty-a', 'hi');
+    expect(mocks.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'indicf5', language: 'hi' }),
+    );
+    expect(mocks.synthesize).not.toHaveBeenCalled();
   });
 
-  it('does not send Standard Voice through the Qwen resource queue', async () => {
+  it('rejects prose in the Teaching Voice language transport', async () => {
+    const response = await POST(postRequest('Deliver the entire course in Hindi'));
+    expect(response.status).toBe(400);
+    expect(mocks.resolveSelection).not.toHaveBeenCalled();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('does not send Standard Voice through the Chatterbox resource queue', async () => {
     const response = await POST(
       new NextRequest('http://localhost/api/generate/tts', {
         method: 'POST',

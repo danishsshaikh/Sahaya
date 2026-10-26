@@ -275,4 +275,52 @@ describe('authoritative scene generation attempts', () => {
 
     expect(mocks.generateSceneContent).toHaveBeenCalledTimes(2);
   });
+
+  test('keeps an order-three scene valid from content through commit', async () => {
+    const registry = await import('@/lib/server/scene-generation-attempts');
+    registry.clearSceneGenerationAttemptsForTests();
+    const sceneThreeOutline = {
+      ...outline,
+      id: 'outline-3',
+      title: 'Scene 3',
+      order: 3,
+    };
+    const generationVersion = registry.createSceneGenerationVersion({
+      outline: sceneThreeOutline,
+      allOutlines: [outline, { ...outline, id: 'outline-2', order: 2 }, sceneThreeOutline],
+    });
+    const identity = registry.admitSceneGenerationAttempt({
+      ownerUserId: 'owner-1',
+      stageId: 'stage-1',
+      outlineId: sceneThreeOutline.id,
+      generationVersion,
+      proposedAttemptId: 'scene-three-attempt',
+    }).identity;
+    const content = { elements: [{ type: 'text', content: 'Scene three' }] };
+    await registry.runSceneAttemptContent('owner-1', identity, async () => ({
+      content,
+      effectiveOutline: sceneThreeOutline,
+    }));
+    await registry.runSceneAttemptActions('owner-1', identity, content, async () => ({
+      scene: {
+        id: 'scene-3',
+        stageId: 'stage-1',
+        title: 'Scene 3',
+        order: 3,
+        type: 'slide',
+        content: { type: 'slide', elements: [] },
+        actions: [],
+      } as never,
+      previousSpeeches: [],
+    }));
+
+    expect(registry.commitSceneGenerationAttempt('owner-1', identity, 'scene-3')).toEqual({
+      accepted: true,
+      alreadyCommitted: false,
+    });
+    expect(registry.sceneGenerationAttemptSnapshotForTests(identity.attemptId)).toMatchObject({
+      status: 'committed',
+      outlineId: 'outline-3',
+    });
+  });
 });
