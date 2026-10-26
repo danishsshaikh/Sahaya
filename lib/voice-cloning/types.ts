@@ -92,6 +92,17 @@ export interface Qwen3TtsPreviewCache {
   result: VoiceModelPreviewResult;
 }
 
+export interface SarvamVoiceRegistration {
+  voiceId: string;
+  consentTimestamp: string;
+  consentVersion: string;
+  createdAt: string;
+  referenceAudioKey: string;
+  profileVersion: number;
+  referenceLanguage: string;
+  providerReferenceText?: string;
+}
+
 export interface VoiceDraftPreview {
   config: VoicePreviewConfiguration;
   preview: VoicePreview;
@@ -125,6 +136,7 @@ export interface VoiceProfile {
   activeEngine?: TeachingVoiceEngine;
   qwenEnhancementMode?: VoiceEnhancementMode;
   qwenPreviewCache?: Qwen3TtsPreviewCache;
+  sarvamVoice?: SarvamVoiceRegistration;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
   profileVersion: number;
@@ -156,6 +168,11 @@ export interface PublicVoiceProfile {
   activeEngine: TeachingVoiceEngine;
   qwenEnhancementMode?: VoiceEnhancementMode;
   qwenPreview?: VoiceModelPreviewResult;
+  sarvamVoice?: {
+    ready: true;
+    consentTimestamp: string;
+    createdAt: string;
+  };
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
@@ -413,6 +430,15 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(!legacyQwenProfile && profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
     ...(!legacyQwenProfile && profile.qwenPreviewCache
       ? { qwenPreview: profile.qwenPreviewCache.result }
+      : {}),
+    ...(!legacyQwenProfile && profile.sarvamVoice
+      ? {
+          sarvamVoice: {
+            ready: true as const,
+            consentTimestamp: profile.sarvamVoice.consentTimestamp,
+            createdAt: profile.sarvamVoice.createdAt,
+          },
+        }
       : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };

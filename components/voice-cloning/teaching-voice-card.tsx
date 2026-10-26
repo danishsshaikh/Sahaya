@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { VoiceComparisonPanel } from '@/components/voice-cloning/voice-comparison-panel';
 import { cn } from '@/lib/utils';
 import {
   CHATTERBOX_LANGUAGE_LABELS,
@@ -1454,6 +1455,7 @@ export function TeachingVoiceCard({
                 </div>
               )}
               {renderPreviewError()}
+              <VoiceComparisonPanel profile={readyProfile} />
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
