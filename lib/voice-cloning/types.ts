@@ -100,7 +100,16 @@ export interface SarvamVoiceRegistration {
   referenceAudioKey: string;
   profileVersion: number;
   referenceLanguage: string;
+  referenceProvenance?: 'original-upload' | 'processed-reference';
+  referenceMimeType?: string;
   providerReferenceText?: string;
+}
+
+export interface OriginalVoiceRecording {
+  key: string;
+  mimeType: string;
+  byteLength: number;
+  createdAt: string;
 }
 
 export interface VoiceDraftPreview {
@@ -136,7 +145,12 @@ export interface VoiceProfile {
   activeEngine?: TeachingVoiceEngine;
   qwenEnhancementMode?: VoiceEnhancementMode;
   qwenPreviewCache?: Qwen3TtsPreviewCache;
+  /** Exact bytes received from the enrollment upload. Never exposed to the browser. */
+  originalRecording?: OriginalVoiceRecording;
+  /** Legacy Sarvam registrations are preserved for reuse and never overwritten implicitly. */
   sarvamVoice?: SarvamVoiceRegistration;
+  /** Sarvam clone made from an exact, provider-supported original upload. */
+  sarvamRawVoice?: SarvamVoiceRegistration;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
   profileVersion: number;
@@ -172,7 +186,9 @@ export interface PublicVoiceProfile {
     ready: true;
     consentTimestamp: string;
     createdAt: string;
+    referenceProvenance: 'original-upload' | 'processed-reference' | 'unknown';
   };
+  originalRecordingRetained?: boolean;
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
@@ -431,15 +447,19 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(!legacyQwenProfile && profile.qwenPreviewCache
       ? { qwenPreview: profile.qwenPreviewCache.result }
       : {}),
-    ...(!legacyQwenProfile && profile.sarvamVoice
+    ...(!legacyQwenProfile && (profile.sarvamRawVoice || profile.sarvamVoice)
       ? {
           sarvamVoice: {
             ready: true as const,
-            consentTimestamp: profile.sarvamVoice.consentTimestamp,
-            createdAt: profile.sarvamVoice.createdAt,
+            consentTimestamp: (profile.sarvamRawVoice || profile.sarvamVoice)!.consentTimestamp,
+            createdAt: (profile.sarvamRawVoice || profile.sarvamVoice)!.createdAt,
+            referenceProvenance: profile.sarvamRawVoice
+              ? 'original-upload'
+              : (profile.sarvamVoice?.referenceProvenance ?? 'processed-reference'),
           },
         }
       : {}),
+    ...(profile.originalRecording ? { originalRecordingRetained: true } : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
 }

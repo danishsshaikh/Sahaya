@@ -21,6 +21,7 @@ import {
   referenceAudioExists,
   resolveReferenceAudioPath,
   writeReferenceAudio,
+  writeOriginalRecording,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
 import {
@@ -495,7 +496,17 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       input.ownerUserId,
       normalizedReference.referenceAudio,
     );
-    profile = { ...profile, referenceAudioKey, updatedAt: new Date().toISOString() };
+    const originalRecording = await writeOriginalRecording(
+      profileId,
+      input.ownerUserId,
+      input.recording,
+    );
+    profile = {
+      ...profile,
+      referenceAudioKey,
+      originalRecording,
+      updatedAt: new Date().toISOString(),
+    };
     await writeVoiceProfile(profile);
     log.info('voice reference preprocessing completed', {
       attemptId: input.attemptId,
@@ -510,6 +521,8 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       clippedSampleRatio: normalizedReference.quality.clippedSampleRatio,
       maxConsecutiveClippingMs: normalizedReference.quality.maxConsecutiveClippingMs,
       qualityDecision: normalizedReference.qualityDecision.severity,
+      originalRecordingRetained: true,
+      originalRecordingMimeType: input.recording.mimeType,
     });
 
     const config: VoiceConfiguration = {
@@ -801,6 +814,7 @@ export async function acceptVoiceProfilePreview(
         ...previousProfile,
         status: 'deleted',
         referenceAudioKey: undefined,
+        originalRecording: undefined,
         referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,

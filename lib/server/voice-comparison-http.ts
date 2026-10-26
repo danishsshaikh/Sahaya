@@ -1,16 +1,30 @@
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
 import type { VoiceComparisonProviderId } from '@/lib/voice-comparison/types';
 
+export type ExternalVoiceProviderErrorCode =
+  | 'BODHAN_AUTH_ERROR'
+  | 'BODHAN_PERMISSION_ERROR'
+  | 'BODHAN_RATE_LIMITED'
+  | 'BODHAN_UPSTREAM_ERROR'
+  | 'BODHAN_INVALID_AUDIO'
+  | 'BODHAN_TIMEOUT'
+  | 'SARVAM_UPSTREAM_ERROR';
+
 export class ExternalVoiceProviderError extends TeachingVoiceError {
   constructor(
     message: string,
     status: number,
+    readonly code: ExternalVoiceProviderErrorCode,
     readonly metadata: {
       provider: Extract<VoiceComparisonProviderId, 'sarvam' | 'bodhan'>;
       operation: 'voice_creation' | 'preview_generation';
       providerStatus?: number;
       providerCode?: string;
       requestId?: string;
+      providerContentType?: string;
+      responseBytes?: number;
+      responseSignature?: string;
+      safeDetail?: string;
     },
   ) {
     super(message, status);
@@ -47,6 +61,20 @@ export function providerStatusMessage(
     return { message: `${providerName} is temporarily unavailable.`, status: 502 };
   }
   return { message: `${providerName} rejected this preview request.`, status: 400 };
+}
+
+export function boundedProviderDetail(value: unknown, privateText?: string): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  let detail = value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (privateText?.trim()) detail = detail.split(privateText).join('[input omitted]');
+  detail = detail
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/(?:api[_ -]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, 'credential=[redacted]');
+  if (!detail) return undefined;
+  return detail.slice(0, 240);
 }
 
 function retryAfterMilliseconds(response: Response): number | null {

@@ -10,7 +10,10 @@ import {
 } from '@/lib/voice-comparison/catalog';
 import { concatenatePcmWav, readWavMetadata, splitSpeechText } from '@/lib/voice-comparison/audio';
 import { BodhanIndicSpeakPreviewProvider } from '@/lib/voice-comparison/providers/bodhan';
-import { SarvamVoiceCloningPreviewProvider } from '@/lib/voice-comparison/providers/sarvam';
+import {
+  SarvamVoiceCloningPreviewProvider,
+  sarvamReferenceUploadType,
+} from '@/lib/voice-comparison/providers/sarvam';
 import type {
   VoiceComparisonBootstrap,
   VoiceComparisonLanguageCode,
@@ -48,8 +51,11 @@ import {
   type SarvamVoiceRegistration,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
+import { createLogger } from '@/lib/logger';
 
-const SARVAM_CONSENT_VERSION = 'sarvam-external-voice-v1';
+const SARVAM_CONSENT_VERSION = 'sarvam-external-voice-raw-v2';
+const SARVAM_RAW_PROCESSING_MODE = 'raw-provider-output-v1';
+const log = createLogger('VoiceComparison');
 
 function voiceProviderAvailability(
   profile: VoiceProfile,
@@ -90,12 +96,23 @@ function voiceProviderAvailability(
     unavailableReason = available ? undefined : 'Requires a ready Hindi or Marathi IndicF5 voice.';
   } else if (providerId === 'sarvam') {
     configured = externalVoiceProviderConfigured(getSarvamVoiceCloningConfig());
-    available = configured && referenceReady && Boolean(referenceLanguage);
+    const registration = validSarvamRegistration(profile);
+    const rawReferenceAvailable = Boolean(
+      profile.originalRecording && sarvamReferenceUploadType(profile.originalRecording.mimeType),
+    );
+    available =
+      configured &&
+      Boolean(referenceLanguage) &&
+      (Boolean(registration) || (referenceReady && rawReferenceAvailable));
     unavailableReason = !configured
       ? 'Not configured'
       : available
         ? undefined
-        : 'A ready Teaching Voice recording is required.';
+        : !referenceReady
+          ? 'A ready Teaching Voice recording is required.'
+          : profile.originalRecording
+            ? 'The exact original recording format is not supported by Sarvam AI. Sahaya will not transcode it.'
+            : 'The original recording was not retained. Re-enroll the Teaching Voice before creating a raw Sarvam clone.';
   } else {
     configured = externalVoiceProviderConfigured(getBodhanTtsConfig());
     available = configured;
@@ -111,8 +128,23 @@ function voiceProviderAvailability(
       ? {
           requiresExternalConsent: !validSarvamRegistration(profile),
           externalVoiceReady: Boolean(validSarvamRegistration(profile)),
-          ...(profile.sarvamVoice?.consentTimestamp
-            ? { externalConsentTimestamp: profile.sarvamVoice.consentTimestamp }
+          ...(validSarvamRegistration(profile)?.referenceProvenance
+            ? {
+                sarvamReferenceProvenance: validSarvamRegistration(profile)!.referenceProvenance,
+              }
+            : {}),
+          sarvamRawReferenceAvailable: Boolean(
+            profile.originalRecording &&
+            sarvamReferenceUploadType(profile.originalRecording.mimeType),
+          ),
+          sarvamCanCreateRawClone: Boolean(
+            validLegacySarvamRegistration(profile) &&
+            !validRawSarvamRegistration(profile) &&
+            profile.originalRecording &&
+            sarvamReferenceUploadType(profile.originalRecording.mimeType),
+          ),
+          ...(validSarvamRegistration(profile)?.consentTimestamp
+            ? { externalConsentTimestamp: validSarvamRegistration(profile)!.consentTimestamp }
             : {}),
         }
       : {}),
@@ -128,7 +160,7 @@ export function getVoiceComparisonBootstrap(profile: VoiceProfile): VoiceCompari
   };
 }
 
-function validSarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
+function validLegacySarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
   const registration = profile.sarvamVoice;
   if (
     !registration ||
@@ -138,33 +170,65 @@ function validSarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration
   ) {
     return null;
   }
+  return {
+    ...registration,
+    referenceProvenance: registration.referenceProvenance ?? 'processed-reference',
+  };
+}
+
+function validRawSarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
+  const registration = profile.sarvamRawVoice;
+  if (
+    !registration ||
+    !profile.originalRecording ||
+    registration.referenceAudioKey !== profile.originalRecording.key ||
+    registration.profileVersion !== profile.profileVersion ||
+    registration.referenceProvenance !== 'original-upload'
+  ) {
+    return null;
+  }
   return registration;
+}
+
+function validSarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
+  return validRawSarvamRegistration(profile) ?? validLegacySarvamRegistration(profile);
 }
 
 async function ensureSarvamRegistration(input: {
   ownerId: string;
   profile: VoiceProfile;
   consent: boolean;
+  createRawVoice: boolean;
   signal?: AbortSignal;
 }): Promise<SarvamVoiceRegistration> {
   const current = validSarvamRegistration(input.profile);
-  if (current) return current;
+  if (current && !input.createRawVoice) return current;
+  const currentRaw = validRawSarvamRegistration(input.profile);
+  if (currentRaw) return currentRaw;
   if (!input.consent) {
     throw new TeachingVoiceError('Consent is required before sending your recording to Sarvam AI.');
   }
   const config = getSarvamVoiceCloningConfig();
   return runControlledVoicePreview({
     providerId: 'sarvam',
-    requestKey: `sarvam-registration:${input.ownerId}:${input.profile.id}:${input.profile.profileVersion}`,
+    requestKey: `sarvam-raw-registration:${input.ownerId}:${input.profile.id}:${input.profile.profileVersion}`,
     concurrency: config.maxConcurrency,
     task: async () => {
       const latest = await requireOwnedReadyProfile(input.ownerId, input.profile.id);
-      const existing = validSarvamRegistration(latest);
-      if (existing) return existing;
-      const referenceAudioKey = latest.referenceAudioKey;
+      const existingRaw = validRawSarvamRegistration(latest);
+      if (existingRaw) return existingRaw;
+      const originalRecording = latest.originalRecording;
       const referenceLanguage = resolveVoiceProfileReferenceLanguage(latest);
-      if (!referenceAudioKey || !(await referenceAudioExists(referenceAudioKey))) {
-        throw new TeachingVoiceError('Teaching Voice reference audio was not found.', 404);
+      if (!originalRecording || !(await referenceAudioExists(originalRecording.key))) {
+        throw new TeachingVoiceError(
+          'The original recording was not retained. Re-enroll the Teaching Voice before creating a raw Sarvam clone.',
+          409,
+        );
+      }
+      if (!sarvamReferenceUploadType(originalRecording.mimeType)) {
+        throw new TeachingVoiceError(
+          'The original recording format is not supported by Sarvam AI. Sahaya will not transcode it.',
+        );
       }
       if (!referenceLanguage) {
         throw new TeachingVoiceError('The Teaching Voice reference language is unsupported.');
@@ -172,16 +236,15 @@ async function ensureSarvamRegistration(input: {
       const provider = new SarvamVoiceCloningPreviewProvider(config);
       const created = await provider.createVoice({
         profileId: latest.id,
-        referenceAudio: new Uint8Array(
-          await fs.readFile(resolveReferenceAudioPath(referenceAudioKey)),
-        ),
+        referenceAudio: new Uint8Array(await fs.readFile(originalRecording.key)),
+        referenceMimeType: originalRecording.mimeType,
         referenceLanguage: referenceLanguage as VoiceComparisonLanguageCode,
         signal: input.signal,
       });
       const afterCreation = await requireOwnedReadyProfile(input.ownerId, input.profile.id);
       if (
         afterCreation.profileVersion !== latest.profileVersion ||
-        afterCreation.referenceAudioKey !== referenceAudioKey
+        afterCreation.originalRecording?.key !== originalRecording.key
       ) {
         throw new TeachingVoiceError(
           'The Teaching Voice changed while Sarvam AI was being prepared. Try again.',
@@ -194,12 +257,22 @@ async function ensureSarvamRegistration(input: {
         consentTimestamp: now,
         consentVersion: SARVAM_CONSENT_VERSION,
         createdAt: now,
-        referenceAudioKey,
+        referenceAudioKey: originalRecording.key,
         profileVersion: afterCreation.profileVersion,
         referenceLanguage,
+        referenceProvenance: 'original-upload',
+        referenceMimeType: originalRecording.mimeType,
         ...(created.referenceText ? { providerReferenceText: created.referenceText } : {}),
       };
-      await writeVoiceProfile({ ...afterCreation, sarvamVoice: registration, updatedAt: now });
+      await writeVoiceProfile({ ...afterCreation, sarvamRawVoice: registration, updatedAt: now });
+      log.info('Sarvam raw-reference voice registered', {
+        profileId: afterCreation.id,
+        referenceProvenance: 'original-upload',
+        referenceMimeType: originalRecording.mimeType,
+        referenceBytes: originalRecording.byteLength,
+        providerRequestId: created.requestId,
+        sahayaAudioProcessingApplied: false,
+      });
       return registration;
     },
   });
@@ -242,39 +315,45 @@ async function generateProviderAudio(input: {
   request: VoiceComparisonPreviewRequest;
   sarvamRegistration?: SarvamVoiceRegistration;
   signal?: AbortSignal;
-}): Promise<Uint8Array> {
+}): Promise<{ audio: Uint8Array; durationSeconds?: number; requestId?: string; chunked: boolean }> {
   const { profile, request } = input;
-  const chunks = splitSpeechText(request.text, request.providerId === 'bodhan' ? 700 : 1000);
-  const audioParts: Uint8Array[] = [];
   if (request.providerId === 'sarvam') {
     if (!input.sarvamRegistration) throw new TeachingVoiceError('Sarvam AI voice is not ready.');
-    const provider = new SarvamVoiceCloningPreviewProvider();
-    for (const text of chunks) {
-      audioParts.push(
-        (
-          await provider.synthesize({
-            voiceId: input.sarvamRegistration.voiceId,
-            text,
-            language: request.language,
-            signal: input.signal,
-          })
-        ).audio,
+    if (!request.text.trim()) throw new TeachingVoiceError('Enter text to compare.');
+    if (request.text.length > 1000) {
+      throw new TeachingVoiceError(
+        'Raw Sarvam comparison is limited to 1000 characters so the result remains one untouched provider response.',
       );
     }
-  } else if (request.providerId === 'bodhan') {
+    const provider = new SarvamVoiceCloningPreviewProvider();
+    const result = await provider.synthesize({
+      voiceId: input.sarvamRegistration.voiceId,
+      text: request.text,
+      language: request.language,
+      signal: input.signal,
+    });
+    return {
+      audio: result.audio,
+      durationSeconds: result.durationSeconds,
+      ...(result.requestId ? { requestId: result.requestId } : {}),
+      chunked: false,
+    };
+  }
+  const chunks = splitSpeechText(request.text, request.providerId === 'bodhan' ? 700 : 1000);
+  const audioParts: Uint8Array[] = [];
+  let requestId: string | undefined;
+  if (request.providerId === 'bodhan') {
     const provider = new BodhanIndicSpeakPreviewProvider();
     for (const text of chunks) {
-      audioParts.push(
-        (
-          await provider.synthesize({
-            text,
-            language: request.language,
-            voice: request.voice!,
-            style: request.style,
-            signal: input.signal,
-          })
-        ).audio,
-      );
+      const result = await provider.synthesize({
+        text,
+        language: request.language,
+        voice: request.voice!,
+        style: request.style,
+        signal: input.signal,
+      });
+      audioParts.push(result.audio);
+      requestId ??= result.requestId;
     }
   } else if (request.providerId === 'qwen3-tts') {
     if (!profile.referenceAudioKey || !profile.referenceText?.trim()) {
@@ -315,7 +394,11 @@ async function generateProviderAudio(input: {
       );
     }
   }
-  return concatenatePcmWav(audioParts);
+  return {
+    audio: concatenatePcmWav(audioParts),
+    ...(requestId ? { requestId } : {}),
+    chunked: chunks.length > 1,
+  };
 }
 
 export async function generateVoiceComparisonPreview(input: {
@@ -325,18 +408,29 @@ export async function generateVoiceComparisonPreview(input: {
 }): Promise<VoiceComparisonPreviewResult> {
   const profile = await requireOwnedReadyProfile(input.ownerId, input.request.profileId);
   validateRequest(profile, input.request);
+  const capability = getVoiceComparisonProvider(input.request.providerId);
+  const synthesisText =
+    input.request.providerId === 'sarvam' ? input.request.text : input.request.text.trim();
+  if (input.request.providerId === 'sarvam') {
+    if (!synthesisText.trim()) throw new TeachingVoiceError('Enter text to compare.');
+    if (synthesisText.length > 1000) {
+      throw new TeachingVoiceError(
+        'Raw Sarvam comparison is limited to 1000 characters so the result remains one untouched provider response.',
+      );
+    }
+  } else {
+    splitSpeechText(synthesisText, input.request.providerId === 'bodhan' ? 700 : 1000);
+  }
   const sarvamRegistration =
     input.request.providerId === 'sarvam'
       ? await ensureSarvamRegistration({
           ownerId: input.ownerId,
           profile,
           consent: input.request.sarvamExternalConsent === true,
+          createRawVoice: input.request.sarvamCreateRawVoice === true,
           signal: input.signal,
         })
       : undefined;
-  const capability = getVoiceComparisonProvider(input.request.providerId);
-  const normalizedText = input.request.text.trim();
-  splitSpeechText(normalizedText, input.request.providerId === 'bodhan' ? 700 : 1000);
   const cacheKey = createVoiceComparisonCacheKey({
     ownerId: input.ownerId,
     profileId: profile.id,
@@ -344,7 +438,7 @@ export async function generateVoiceComparisonPreview(input: {
     referenceAudioKey: profile.referenceAudioKey ?? null,
     providerId: input.request.providerId,
     language: input.request.language,
-    text: normalizedText,
+    text: synthesisText,
     voice: input.request.voice ?? null,
     style: input.request.style ?? null,
     sarvamVoiceId: sarvamRegistration?.voiceId ?? null,
@@ -355,9 +449,28 @@ export async function generateVoiceComparisonPreview(input: {
         ? resolveVoiceProfileGenerationSettings(profile)
         : null,
     qwenCloneMode: input.request.providerId === 'qwen3-tts' ? 'speaker-embedding' : null,
+    processingMode:
+      input.request.providerId === 'sarvam' ? SARVAM_RAW_PROCESSING_MODE : 'standard-v1',
+    outputCodec: input.request.providerId === 'sarvam' ? 'wav' : null,
+    providerGenerationParameters:
+      input.request.providerId === 'sarvam'
+        ? { enableVad: false, enableTextNormalization: false, enableQc: false }
+        : null,
   });
   const cached = await readVoiceComparisonCache(input.ownerId, cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    log.info('voice comparison preview cache hit', {
+      provider: input.request.providerId,
+      language: input.request.language,
+      outputCodec: cached.outputCodec,
+      processingMode: cached.processingMode,
+      referenceProvenance: cached.referenceProvenance,
+      providerRequestId: cached.providerRequestId,
+      cache: 'hit',
+      sahayaAudioProcessingApplied: input.request.providerId !== 'sarvam',
+    });
+    return cached;
+  }
 
   const externalConfig =
     input.request.providerId === 'sarvam'
@@ -373,13 +486,13 @@ export async function generateVoiceComparisonPreview(input: {
       const secondCached = await readVoiceComparisonCache(input.ownerId, cacheKey);
       if (secondCached) return secondCached;
       const startedAt = Date.now();
-      const audio = await generateProviderAudio({
+      const generated = await generateProviderAudio({
         profile,
-        request: { ...input.request, text: normalizedText },
+        request: { ...input.request, text: synthesisText },
         sarvamRegistration,
         signal: input.signal,
       });
-      const metadata = readWavMetadata(audio);
+      const metadata = readWavMetadata(generated.audio);
       const generatedAt = new Date().toISOString();
       const result: VoiceComparisonPreviewResult = {
         providerId: input.request.providerId,
@@ -390,15 +503,37 @@ export async function generateVoiceComparisonPreview(input: {
         ...(input.request.style ? { style: input.request.style } : {}),
         audio: {
           format: 'wav',
-          base64: Buffer.from(audio).toString('base64'),
+          base64: Buffer.from(generated.audio).toString('base64'),
           createdAt: generatedAt,
         },
-        durationSeconds: metadata.durationSeconds,
+        durationSeconds: generated.durationSeconds ?? metadata.durationSeconds,
         generationLatencyMs: Date.now() - startedAt,
         generatedAt,
         cached: false,
         cacheKey,
+        processingMode: input.request.providerId === 'sarvam' ? 'raw-provider-output' : 'standard',
+        outputCodec: 'wav',
+        ...(generated.requestId ? { providerRequestId: generated.requestId } : {}),
+        ...(input.request.providerId === 'sarvam' && sarvamRegistration
+          ? {
+              referenceProvenance: sarvamRegistration.referenceProvenance ?? 'processed-reference',
+            }
+          : {}),
+        chunked: generated.chunked,
       };
+      log.info('voice comparison preview generated', {
+        provider: input.request.providerId,
+        language: input.request.language,
+        outputCodec: result.outputCodec,
+        processingMode: result.processingMode,
+        referenceProvenance: result.referenceProvenance,
+        durationMs: Math.round(result.durationSeconds * 1000),
+        generationLatencyMs: result.generationLatencyMs,
+        providerRequestId: result.providerRequestId,
+        cache: 'miss',
+        chunked: result.chunked,
+        sahayaAudioProcessingApplied: input.request.providerId !== 'sarvam',
+      });
       await writeVoiceComparisonCache(input.ownerId, result);
       return result;
     },

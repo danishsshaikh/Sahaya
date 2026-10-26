@@ -33,12 +33,28 @@ interface SarvamSynthesisResponse {
 export interface SarvamVoiceCreationResult {
   voiceId: string;
   referenceText?: string;
+  requestId?: string;
 }
 
 export interface SarvamSynthesisResult {
   audio: Uint8Array;
   durationSeconds: number;
+  format: 'wav';
   requestId?: string;
+}
+
+const SARVAM_REFERENCE_MIME_TYPES = new Map<string, { type: string; extension: string }>([
+  ['audio/wav', { type: 'audio/wav', extension: 'wav' }],
+  ['audio/x-wav', { type: 'audio/wav', extension: 'wav' }],
+  ['audio/mpeg', { type: 'audio/mpeg', extension: 'mp3' }],
+  ['audio/flac', { type: 'audio/flac', extension: 'flac' }],
+  ['audio/ogg', { type: 'audio/ogg', extension: 'opus' }],
+  ['audio/ogg;codecs=opus', { type: 'audio/ogg', extension: 'opus' }],
+  ['audio/aac', { type: 'audio/aac', extension: 'aac' }],
+]);
+
+export function sarvamReferenceUploadType(mimeType: string) {
+  return SARVAM_REFERENCE_MIME_TYPES.get(mimeType.trim().toLowerCase()) ?? null;
 }
 
 function providerCode(body: unknown): string | undefined {
@@ -76,6 +92,7 @@ export class SarvamVoiceCloningPreviewProvider {
   async createVoice(input: {
     profileId: string;
     referenceAudio: Uint8Array;
+    referenceMimeType: string;
     referenceLanguage: VoiceComparisonLanguageCode;
     signal?: AbortSignal;
   }): Promise<SarvamVoiceCreationResult> {
@@ -89,18 +106,23 @@ export class SarvamVoiceCloningPreviewProvider {
     ) {
       throw new TeachingVoiceError('Teaching Voice reference audio exceeds Sarvam AI limits.');
     }
+    const uploadType = sarvamReferenceUploadType(input.referenceMimeType);
+    if (!uploadType) {
+      throw new TeachingVoiceError(
+        'The original recording format is not supported by Sarvam AI. Re-record in a supported format; Sahaya will not transcode it.',
+      );
+    }
     const response = await this.request(
       '/voices/create',
       () => {
         const form = new FormData();
         form.set(
           'file',
-          new Blob([Buffer.from(input.referenceAudio)], { type: 'audio/wav' }),
-          'reference.wav',
+          new Blob([Buffer.from(input.referenceAudio)], { type: uploadType.type }),
+          `reference.${uploadType.extension}`,
         );
         form.set('name', `Sahaya-${input.profileId}`.slice(0, 100));
         form.set('language', language);
-        form.set('style', 'conversational');
         return {
           method: 'POST',
           headers: { 'api-subscription-key': this.config.apiKey },
@@ -115,17 +137,23 @@ export class SarvamVoiceCloningPreviewProvider {
     if (!response.ok) this.throwProviderError(response, body, 'voice_creation');
     const voiceId = body?.data?.voice_id;
     if (typeof voiceId !== 'string' || !/^svc-[a-zA-Z0-9-]{8,}$/.test(voiceId)) {
-      throw new ExternalVoiceProviderError('Sarvam AI returned an invalid voice identifier.', 502, {
-        provider: 'sarvam',
-        operation: 'voice_creation',
-        requestId: requestIdFromResponse(response),
-      });
+      throw new ExternalVoiceProviderError(
+        'Sarvam AI returned an invalid voice identifier.',
+        502,
+        'SARVAM_UPSTREAM_ERROR',
+        {
+          provider: 'sarvam',
+          operation: 'voice_creation',
+          requestId: requestIdFromResponse(response),
+        },
+      );
     }
     return {
       voiceId,
       ...(typeof body?.data?.reference_text === 'string'
         ? { referenceText: body.data.reference_text }
         : {}),
+      ...(requestIdFromResponse(response) ? { requestId: requestIdFromResponse(response) } : {}),
     };
   }
 
@@ -149,7 +177,8 @@ export class SarvamVoiceCloningPreviewProvider {
         form.set('text', input.text);
         form.set('language_code', languageCode);
         form.set('output_audio_codec', 'wav');
-        form.set('speech_sample_rate', '24000');
+        form.set('enable_vad', 'false');
+        form.set('enable_text_normalization', 'false');
         form.set('enable_qc', 'false');
         return {
           method: 'POST',
@@ -167,10 +196,8 @@ export class SarvamVoiceCloningPreviewProvider {
     const parsedDuration = readWavMetadata(audio).durationSeconds;
     return {
       audio,
-      durationSeconds:
-        typeof body?.audio_duration === 'number' && Number.isFinite(body.audio_duration)
-          ? body.audio_duration
-          : parsedDuration,
+      format: 'wav',
+      durationSeconds: parsedDuration,
       ...(typeof body?.request_id === 'string'
         ? { requestId: body.request_id }
         : requestIdFromResponse(response)
@@ -198,10 +225,12 @@ export class SarvamVoiceCloningPreviewProvider {
       if (error instanceof ExternalVoiceProviderError || error instanceof TeachingVoiceError) {
         throw error;
       }
-      throw new ExternalVoiceProviderError('Sarvam AI could not be reached.', 502, {
-        provider: 'sarvam',
-        operation,
-      });
+      throw new ExternalVoiceProviderError(
+        'Sarvam AI could not be reached.',
+        502,
+        'SARVAM_UPSTREAM_ERROR',
+        { provider: 'sarvam', operation },
+      );
     }
   }
 
@@ -211,7 +240,7 @@ export class SarvamVoiceCloningPreviewProvider {
     operation: 'voice_creation' | 'preview_generation',
   ): never {
     const mapped = providerStatusMessage('Sarvam AI', response.status);
-    throw new ExternalVoiceProviderError(mapped.message, mapped.status, {
+    throw new ExternalVoiceProviderError(mapped.message, mapped.status, 'SARVAM_UPSTREAM_ERROR', {
       provider: 'sarvam',
       operation,
       providerStatus: response.status,

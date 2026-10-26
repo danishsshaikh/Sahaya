@@ -13,8 +13,29 @@ export interface WavMetadata {
   durationSeconds: number;
 }
 
+export type AudioFileSignature = 'wav' | 'json' | 'html' | 'mp3' | 'unknown' | 'empty';
+
 function ascii(bytes: Uint8Array, offset: number, length: number): string {
   return String.fromCharCode(...bytes.subarray(offset, offset + length));
+}
+
+export function recognizeAudioFileSignature(bytes: Uint8Array): AudioFileSignature {
+  if (bytes.byteLength === 0) return 'empty';
+  if (bytes.byteLength >= 12 && ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WAVE') {
+    return 'wav';
+  }
+  if (
+    bytes.byteLength >= 3 &&
+    (ascii(bytes, 0, 3) === 'ID3' || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0))
+  ) {
+    return 'mp3';
+  }
+  const prefix = new TextDecoder()
+    .decode(bytes.subarray(0, Math.min(bytes.byteLength, 64)))
+    .trimStart();
+  if (prefix.startsWith('{') || prefix.startsWith('[')) return 'json';
+  if (/^(?:<!doctype\s+html|<html|<head|<body)/i.test(prefix)) return 'html';
+  return 'unknown';
 }
 
 export function readWavMetadata(bytes: Uint8Array): WavMetadata {
@@ -22,6 +43,10 @@ export function readWavMetadata(bytes: Uint8Array): WavMetadata {
     throw new TeachingVoiceError('Voice provider returned invalid WAV audio.', 502);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const declaredRiffLength = view.getUint32(4, true) + 8;
+  if (declaredRiffLength > bytes.byteLength) {
+    throw new TeachingVoiceError('Voice provider returned truncated WAV audio.', 502);
+  }
   let offset = 12;
   let format: Omit<WavMetadata, 'dataOffset' | 'dataLength' | 'durationSeconds'> | undefined;
   let dataOffset = -1;
@@ -30,7 +55,9 @@ export function readWavMetadata(bytes: Uint8Array): WavMetadata {
     const chunkId = ascii(bytes, offset, 4);
     const chunkLength = view.getUint32(offset + 4, true);
     const chunkDataOffset = offset + 8;
-    if (chunkDataOffset + chunkLength > bytes.byteLength) break;
+    if (chunkDataOffset + chunkLength > bytes.byteLength) {
+      throw new TeachingVoiceError('Voice provider returned truncated WAV audio.', 502);
+    }
     if (chunkId === 'fmt ' && chunkLength >= 16) {
       format = {
         audioFormat: view.getUint16(chunkDataOffset, true),
@@ -48,7 +75,13 @@ export function readWavMetadata(bytes: Uint8Array): WavMetadata {
   if (!format || dataOffset < 0 || dataLength <= 0) {
     throw new TeachingVoiceError('Voice provider returned incomplete WAV audio.', 502);
   }
-  if (format.audioFormat !== 1 || format.channels < 1 || format.bitsPerSample < 8) {
+  if (
+    format.audioFormat !== 1 ||
+    format.channels < 1 ||
+    format.sampleRate < 1 ||
+    format.bitsPerSample < 8 ||
+    format.bitsPerSample % 8 !== 0
+  ) {
     throw new TeachingVoiceError('Voice provider returned an unsupported WAV format.', 502);
   }
   const bytesPerSecond = format.sampleRate * format.channels * (format.bitsPerSample / 8);

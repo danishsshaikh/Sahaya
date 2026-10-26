@@ -68,6 +68,9 @@ export interface VoiceComparisonProviderAvailability extends VoiceComparisonProv
   requiresExternalConsent?: boolean;
   externalVoiceReady?: boolean;
   externalConsentTimestamp?: string;
+  sarvamReferenceProvenance?: 'original-upload' | 'processed-reference' | 'unknown';
+  sarvamRawReferenceAvailable?: boolean;
+  sarvamCanCreateRawClone?: boolean;
 }
 
 export interface VoiceComparisonPreviewRequest {
@@ -78,6 +81,7 @@ export interface VoiceComparisonPreviewRequest {
   voice?: string;
   style?: string;
   sarvamExternalConsent?: boolean;
+  sarvamCreateRawVoice?: boolean;
 }
 
 export interface VoiceComparisonPreviewResult {
@@ -93,6 +97,11 @@ export interface VoiceComparisonPreviewResult {
   generatedAt: string;
   cached: boolean;
   cacheKey: string;
+  processingMode?: 'raw-provider-output' | 'standard';
+  outputCodec?: string;
+  providerRequestId?: string;
+  referenceProvenance?: 'original-upload' | 'processed-reference' | 'unknown';
+  chunked?: boolean;
 }
 
 export interface VoiceComparisonBootstrap {

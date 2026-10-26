@@ -528,6 +528,7 @@ export async function DELETE(req: NextRequest) {
       ...profile,
       status: 'deleted',
       referenceAudioKey: undefined,
+      originalRecording: undefined,
       referenceText: undefined,
       providerReferenceId: undefined,
       preview: undefined,

@@ -1,23 +1,121 @@
 import { BODHAN_STYLES, isBodhanStyle, isBodhanVoice } from '@/lib/voice-comparison/catalog';
-import { MAX_COMPARISON_AUDIO_BYTES, readWavMetadata } from '@/lib/voice-comparison/audio';
+import {
+  MAX_COMPARISON_AUDIO_BYTES,
+  readWavMetadata,
+  recognizeAudioFileSignature,
+} from '@/lib/voice-comparison/audio';
 import type { VoiceComparisonLanguageCode } from '@/lib/voice-comparison/types';
 import {
+  boundedProviderDetail,
   ExternalVoiceProviderError,
   fetchExternalVoiceProvider,
-  providerStatusMessage,
   requestIdFromResponse,
+  type ExternalVoiceProviderErrorCode,
 } from '@/lib/server/voice-comparison-http';
 import {
   externalVoiceProviderConfigured,
   getBodhanTtsConfig,
   type ExternalVoiceProviderConfig,
 } from '@/lib/server/voice-comparison-config';
+import { createLogger } from '@/lib/logger';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
+
+const log = createLogger('BodhanIndicSpeak');
 
 export interface BodhanSynthesisResult {
   audio: Uint8Array;
   durationSeconds: number;
   requestId?: string;
+}
+
+interface BodhanErrorBody {
+  code?: unknown;
+  message?: unknown;
+  detail?: unknown;
+  error?: { code?: unknown; message?: unknown; detail?: unknown } | string;
+}
+
+export function bodhanSpeechEndpoint(baseUrl: string): string {
+  const url = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, '').replace(/(?:\/v1){2,}$/, '/v1');
+  url.pathname = `${path.endsWith('/v1') ? path : `${path}/v1`}/audio/speech`.replace(
+    /\/{2,}/g,
+    '/',
+  );
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function providerErrorFields(
+  bytes: Uint8Array,
+  privateText: string,
+): {
+  code?: string;
+  detail?: string;
+} {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(bytes)) as BodhanErrorBody;
+    const nested = typeof body.error === 'object' && body.error ? body.error : undefined;
+    const code = nested?.code ?? body.code;
+    const detail =
+      nested?.message ??
+      nested?.detail ??
+      body.message ??
+      body.detail ??
+      (typeof body.error === 'string' ? body.error : undefined);
+    const safeDetail = boundedProviderDetail(detail, privateText);
+    return {
+      ...(typeof code === 'string' ? { code: code.slice(0, 80) } : {}),
+      ...(safeDetail ? { detail: safeDetail } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function statusError(status: number): {
+  code: ExternalVoiceProviderErrorCode;
+  status: number;
+  message: string;
+} {
+  if (status === 401) {
+    return {
+      code: 'BODHAN_AUTH_ERROR',
+      status: 401,
+      message: 'Bodhan API authentication failed. Check the configured API key.',
+    };
+  }
+  if (status === 402 || status === 403) {
+    return {
+      code: 'BODHAN_PERMISSION_ERROR',
+      status: 403,
+      message: 'Your Bodhan API key does not have access to this model.',
+    };
+  }
+  if (status === 429) {
+    return {
+      code: 'BODHAN_RATE_LIMITED',
+      status: 429,
+      message: 'Bodhan rate limit or credit limit reached. Try again later.',
+    };
+  }
+  if (status >= 500) {
+    return {
+      code: 'BODHAN_UPSTREAM_ERROR',
+      status: 502,
+      message: 'Bodhan is temporarily unavailable. Try again later.',
+    };
+  }
+  return {
+    code: 'BODHAN_UPSTREAM_ERROR',
+    status: status >= 400 && status < 500 ? status : 502,
+    message: 'Bodhan rejected this preview request.',
+  };
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof Error && error.name === 'TimeoutError';
 }
 
 export class BodhanIndicSpeakPreviewProvider {
@@ -50,7 +148,7 @@ export class BodhanIndicSpeakPreviewProvider {
     let response: Response;
     try {
       response = await fetchExternalVoiceProvider({
-        url: `${this.config.baseUrl}/audio/speech`,
+        url: bodhanSpeechEndpoint(this.config.baseUrl),
         init: () => ({
           method: 'POST',
           headers: {
@@ -72,43 +170,127 @@ export class BodhanIndicSpeakPreviewProvider {
       if (error instanceof ExternalVoiceProviderError || error instanceof TeachingVoiceError) {
         throw error;
       }
-      throw new ExternalVoiceProviderError('Bodhan Indic-Speak could not be reached.', 502, {
-        provider: 'bodhan',
-        operation: 'preview_generation',
-      });
+      if (isTimeout(error)) {
+        throw new ExternalVoiceProviderError(
+          'Bodhan synthesis timed out. Try again later.',
+          504,
+          'BODHAN_TIMEOUT',
+          { provider: 'bodhan', operation: 'preview_generation' },
+        );
+      }
+      throw new ExternalVoiceProviderError(
+        'Bodhan Indic-Speak could not be reached.',
+        502,
+        'BODHAN_UPSTREAM_ERROR',
+        { provider: 'bodhan', operation: 'preview_generation' },
+      );
     }
-    if (!response.ok) {
-      const mapped = providerStatusMessage('Bodhan Indic-Speak', response.status);
-      throw new ExternalVoiceProviderError(mapped.message, mapped.status, {
-        provider: 'bodhan',
-        operation: 'preview_generation',
-        providerStatus: response.status,
-        requestId: requestIdFromResponse(response),
-      });
-    }
-    const contentType = response.headers.get('content-type')?.toLowerCase() || '';
-    if (!contentType.includes('audio/wav') && !contentType.includes('audio/x-wav')) {
-      throw new ExternalVoiceProviderError('Bodhan Indic-Speak returned non-WAV audio.', 502, {
-        provider: 'bodhan',
-        operation: 'preview_generation',
-        providerStatus: response.status,
-        requestId: requestIdFromResponse(response),
-      });
+
+    const contentType = response.headers.get('content-type')?.toLowerCase() || 'unknown';
+    const requestId = requestIdFromResponse(response);
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_COMPARISON_AUDIO_BYTES) {
+      throw new ExternalVoiceProviderError(
+        'Bodhan returned an audio response that is too large.',
+        502,
+        'BODHAN_INVALID_AUDIO',
+        {
+          provider: 'bodhan',
+          operation: 'preview_generation',
+          providerStatus: response.status,
+          providerContentType: contentType,
+          responseBytes: declaredLength,
+          ...(requestId ? { requestId } : {}),
+        },
+      );
     }
     const audio = new Uint8Array(await response.arrayBuffer());
-    if (audio.byteLength === 0 || audio.byteLength > MAX_COMPARISON_AUDIO_BYTES) {
-      throw new ExternalVoiceProviderError('Bodhan Indic-Speak returned invalid audio.', 502, {
-        provider: 'bodhan',
-        operation: 'preview_generation',
-        requestId: requestIdFromResponse(response),
-      });
-    }
-    const metadata = readWavMetadata(audio);
-    return {
-      audio,
-      durationSeconds: metadata.durationSeconds,
-      ...(requestIdFromResponse(response) ? { requestId: requestIdFromResponse(response) } : {}),
+    const signature = recognizeAudioFileSignature(audio);
+    const fields = signature === 'json' ? providerErrorFields(audio, input.text) : {};
+    const diagnostics = {
+      provider: 'bodhan' as const,
+      operation: 'preview_generation' as const,
+      providerStatus: response.status,
+      providerContentType: contentType,
+      responseBytes: audio.byteLength,
+      responseSignature: signature,
+      ...(requestId ? { requestId } : {}),
+      ...(fields.code ? { providerCode: fields.code } : {}),
+      ...(fields.detail ? { safeDetail: fields.detail } : {}),
     };
+
+    if (!response.ok) {
+      const mapped = statusError(response.status);
+      log.warn('Bodhan synthesis rejected', diagnostics);
+      const actionableDetail =
+        fields.detail &&
+        response.status >= 400 &&
+        response.status < 500 &&
+        response.status !== 401 &&
+        response.status !== 402 &&
+        response.status !== 403 &&
+        response.status !== 429
+          ? ` ${fields.detail}`
+          : '';
+      throw new ExternalVoiceProviderError(
+        `${mapped.message}${actionableDetail}`,
+        mapped.status,
+        mapped.code,
+        diagnostics,
+      );
+    }
+    if (signature !== 'wav') {
+      const isProviderError = signature === 'json' || signature === 'html';
+      log.warn('Bodhan synthesis returned non-WAV bytes', diagnostics);
+      throw new ExternalVoiceProviderError(
+        fields.detail
+          ? `Bodhan returned an error instead of audio: ${fields.detail}`
+          : isProviderError
+            ? 'Bodhan returned an error response instead of audio.'
+            : 'Bodhan returned an invalid audio response.',
+        502,
+        isProviderError ? 'BODHAN_UPSTREAM_ERROR' : 'BODHAN_INVALID_AUDIO',
+        diagnostics,
+      );
+    }
+    if (audio.byteLength > MAX_COMPARISON_AUDIO_BYTES) {
+      throw new ExternalVoiceProviderError(
+        'Bodhan returned an audio response that is too large.',
+        502,
+        'BODHAN_INVALID_AUDIO',
+        diagnostics,
+      );
+    }
+    try {
+      const metadata = readWavMetadata(audio);
+      if (
+        metadata.audioFormat !== 1 ||
+        metadata.channels !== 1 ||
+        metadata.sampleRate !== 24000 ||
+        metadata.bitsPerSample !== 16
+      ) {
+        log.warn('Bodhan WAV differs from documented PCM16 24 kHz mono output', {
+          ...diagnostics,
+          audioFormat: metadata.audioFormat,
+          channels: metadata.channels,
+          sampleRate: metadata.sampleRate,
+          bitsPerSample: metadata.bitsPerSample,
+        });
+      }
+      return {
+        audio,
+        durationSeconds: metadata.durationSeconds,
+        ...(requestId ? { requestId } : {}),
+      };
+    } catch {
+      log.warn('Bodhan synthesis returned malformed WAV bytes', diagnostics);
+      throw new ExternalVoiceProviderError(
+        'Bodhan returned an invalid audio response.',
+        502,
+        'BODHAN_INVALID_AUDIO',
+        diagnostics,
+      );
+    }
   }
 }
 

@@ -53,6 +53,21 @@ and mastering filters are intentionally restrained: they improve reference
 cleanliness and playback consistency, but they do not guarantee accent identity
 or speaker similarity and must not be treated as voice conversion.
 
+The processed `reference.wav` is therefore not an original recording. New
+enrollments also retain the exact uploaded browser recording in the same private,
+owner-scoped profile directory. Sarvam raw comparison enrollment uses that exact
+file only when its format is supported by Sarvam; it never falls back to the
+processed WAV or transcodes the source. Profiles enrolled before exact-source
+retention must be re-recorded before a new raw-reference Sarvam clone can be
+created. Existing remote Sarvam voice IDs remain preserved and reusable.
+
+Sarvam comparison generation requests WAV with VAD, text normalization, and QC
+disabled. Sahaya performs only base64 transport decoding, read-only WAV
+validation, private caching, and browser delivery on the returned bytes. It does
+not enhance, normalize, trim, resample, re-encode, or stitch Sarvam raw previews.
+Sarvam may still validate, transcribe, resample, enhance, or otherwise process
+audio inside its own service.
+
 Generated Chatterbox preview and classroom/editor narration audio pass through
 the same clarity mastering preset before the application stores or returns it:
 a 70 Hz high-pass, gentle low-mid reduction, subtle presence lift, light

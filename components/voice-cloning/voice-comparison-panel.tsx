@@ -101,6 +101,7 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
   const [bodhanVoice, setBodhanVoice] = useState('');
   const [bodhanStyle, setBodhanStyle] = useState('educational lecture');
   const [sarvamConsent, setSarvamConsent] = useState(false);
+  const [sarvamCreateRawVoice, setSarvamCreateRawVoice] = useState(false);
   const [loading, setLoading] = useState<Partial<Record<VoiceComparisonProviderId, boolean>>>({});
   const [errors, setErrors] = useState<Partial<Record<VoiceComparisonProviderId, string>>>({});
   const [results, setResults] = useState<Partial<Record<VoiceComparisonProviderId, ResultState>>>(
@@ -170,7 +171,7 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
   const signatureFor = (providerId: VoiceComparisonProviderId) =>
     providerSignature({
       providerId,
-      text: text.trim(),
+      text: providerId === 'sarvam' ? text : text.trim(),
       language,
       voice: bodhanVoice,
       style: bodhanStyle,
@@ -191,11 +192,14 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
         body: JSON.stringify({
           profileId: profile.id,
           providerId: provider.id,
-          text: text.trim(),
+          text: provider.id === 'sarvam' ? text : text.trim(),
           language,
           ...(provider.id === 'bodhan' ? { voice: bodhanVoice, style: bodhanStyle } : {}),
           ...(provider.id === 'sarvam' && provider.requiresExternalConsent
             ? { sarvamExternalConsent: sarvamConsent }
+            : {}),
+          ...(provider.id === 'sarvam' && sarvamCreateRawVoice
+            ? { sarvamExternalConsent: sarvamConsent, sarvamCreateRawVoice: true }
             : {}),
         }),
       });
@@ -209,19 +213,27 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
         ...current,
         [provider.id]: { result: body.preview!, signature: signatureFor(provider.id) },
       }));
-      if (provider.id === 'sarvam' && provider.requiresExternalConsent) {
+      if (provider.id === 'sarvam' && (provider.requiresExternalConsent || sarvamCreateRawVoice)) {
         setBootstrap((current) =>
           current
             ? {
                 ...current,
                 providers: current.providers.map((item) =>
                   item.id === 'sarvam'
-                    ? { ...item, requiresExternalConsent: false, externalVoiceReady: true }
+                    ? {
+                        ...item,
+                        requiresExternalConsent: false,
+                        externalVoiceReady: true,
+                        sarvamReferenceProvenance: 'original-upload',
+                        sarvamCanCreateRawClone: false,
+                      }
                     : item,
                 ),
               }
             : current,
         );
+        setSarvamCreateRawVoice(false);
+        setSarvamConsent(false);
       }
     } catch (error) {
       if ((error as { name?: string }).name !== 'AbortError') {
@@ -335,7 +347,7 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
                                 loading[provider.id] ||
                                 (provider.id === 'bodhan' && !bodhanVoice) ||
                                 (provider.id === 'sarvam' &&
-                                  provider.requiresExternalConsent &&
+                                  (provider.requiresExternalConsent || sarvamCreateRawVoice) &&
                                   !sarvamConsent)
                               }
                               onClick={() => generate(provider)}
@@ -401,7 +413,7 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
 
                           {provider.id === 'sarvam' &&
                             provider.available &&
-                            provider.requiresExternalConsent && (
+                            (provider.requiresExternalConsent || sarvamCreateRawVoice) && (
                               <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
                                 <Checkbox
                                   checked={sarvamConsent}
@@ -411,10 +423,38 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
                                 />
                                 <span>
                                   I agree to send this recording to Sarvam AI, where a reusable
-                                  cloned voice may be stored for synthesis and comparison.
+                                  cloned voice may be stored. This can consume a voice quota and may
+                                  incur provider charges.
                                 </span>
                               </label>
                             )}
+
+                          {provider.id === 'sarvam' &&
+                            provider.externalVoiceReady &&
+                            provider.sarvamReferenceProvenance !== 'original-upload' && (
+                              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                                The existing Sarvam clone is preserved and reused, but its reference
+                                came from Sahaya&apos;s processed WAV.
+                              </p>
+                            )}
+
+                          {provider.id === 'sarvam' && provider.sarvamCanCreateRawClone && (
+                            <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+                              <Checkbox
+                                checked={sarvamCreateRawVoice}
+                                onCheckedChange={(checked) => {
+                                  setSarvamCreateRawVoice(checked === true);
+                                  if (checked !== true) setSarvamConsent(false);
+                                }}
+                                aria-label="Create a new raw-reference Sarvam clone"
+                                className="mt-0.5"
+                              />
+                              <span>
+                                Create a separate raw-reference clone. The existing clone will not
+                                be overwritten or deleted; this may use quota and incur cost.
+                              </span>
+                            </label>
+                          )}
 
                           {errors[provider.id] && (
                             <p role="alert" className="mt-3 text-xs text-destructive">
@@ -445,6 +485,9 @@ export function VoiceComparisonPanel({ profile }: VoiceComparisonPanelProps) {
                                   {(result.generationLatencyMs / 1000).toFixed(1)}s generation
                                 </span>
                                 {result.cached && <span>Cached</span>}
+                                {result.processingMode === 'raw-provider-output' && (
+                                  <span>No Sahaya audio processing</span>
+                                )}
                               </div>
                               <ResultRatings cloned={result.voiceType === 'cloned'} />
                             </div>

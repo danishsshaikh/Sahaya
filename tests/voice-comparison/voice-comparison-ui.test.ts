@@ -122,4 +122,52 @@ describe('voice comparison UI', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[1]).not.toMatchObject({ method: 'POST' });
   });
+
+  it('shows an actionable Bodhan provider error without falling back to another engine', async () => {
+    const available = {
+      ...bootstrap,
+      providers: bootstrap.providers.map((provider) =>
+        provider.id === 'bodhan'
+          ? { ...provider, configured: true, available: true, unavailableReason: undefined }
+          : provider,
+      ),
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, comparison: available }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            success: false,
+            errorCode: 'BODHAN_PERMISSION_ERROR',
+            error: 'Your Bodhan API key does not have access to this model.',
+          }),
+          { status: 403, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push(root);
+    act(() => root.render(createElement(VoiceComparisonPanel, { profile })));
+    await flush();
+
+    const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.parentElement?.textContent?.includes('Bodhan Indic-Speak'),
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flush();
+
+    expect(host.textContent).toContain('does not have access to this model');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      providerId: 'bodhan',
+    });
+  });
 });

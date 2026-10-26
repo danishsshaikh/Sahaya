@@ -27,18 +27,30 @@ required for either provider.
 
 ## Privacy and storage
 
-Sarvam voice creation requires a separate explicit disclosure and consent. Sahaya sends the current
-faculty reference WAV to Sarvam once, stores the returned voice identifier in that owner's private
-voice profile, and reuses it for later previews. The identifier is never returned to the browser and
-does not replace the local Chatterbox or Qwen registration. Sahaya does not automatically delete the
-remote Sarvam voice.
+Sarvam voice creation requires a separate explicit disclosure and consent. New Teaching Voice
+enrollments retain the exact uploaded recording beside the processed Chatterbox/IndicF5
+`reference.wav`. Sahaya uploads that exact source only when it is in a Sarvam-supported format; it
+does not trim, enhance, resample, or transcode the file. Legacy profiles do not have this original
+source and must be re-recorded before a new raw-reference clone can be created.
+
+The returned voice identifier is stored in that owner's private voice profile and reused. Existing
+legacy Sarvam identifiers remain preserved; a separate raw-reference clone is created only through
+the explicit opt-in control, which warns about quota and cost. The identifier is never returned to
+the browser, does not replace a local registration, and is not automatically deleted.
+
+Raw Sarvam preview requests send the exact comparison text in one request (maximum 1000
+characters), request WAV, and explicitly disable provider VAD, text normalization, and QC. Sahaya
+base64-decodes, validates, caches, and serves the returned WAV bytes without signal processing or
+re-encoding. Sarvam's own documented voice-creation flow still validates, transcribes, clones, and
+may improve the reference internally; Sahaya cannot disable or audit those provider-side steps.
 
 Bodhan is preset-voice synthesis. Sahaya sends only the comparison text, selected language, voice,
 and style; it never sends faculty reference audio to Bodhan.
 
 Preview cache files remain owner-scoped under `VOICE_CLONING_STORAGE_DIR`, with private directory and
-file permissions. Cache keys include profile version, provider, language, exact text, and relevant
-generation settings. Cached audio is never shared across owners.
+file permissions. Cache keys include profile version, provider, language, exact text, output codec,
+processing mode, and relevant generation settings. Legacy processed Sarvam cache entries cannot
+match raw-preview keys. Cached audio is never shared across owners.
 
 ## Provider contracts
 

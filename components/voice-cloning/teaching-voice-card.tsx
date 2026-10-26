@@ -188,7 +188,9 @@ function voiceSynthesisConfigurationsEqual(
 }
 
 function chooseMimeType(): string {
-  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+  // Ogg/Opus can be sent to Sarvam unchanged. Chromium falls back to WebM,
+  // which is retained exactly but is never silently transcoded for Sarvam.
+  const candidates = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm'];
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
 }
 

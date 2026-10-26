@@ -2,11 +2,13 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { nanoid } from 'nanoid';
 import { getVoiceCloningStorageDir } from '@/lib/voice-cloning/config';
-import type { VoiceProfile } from '@/lib/voice-cloning/types';
+import type { IncomingVoiceClip } from '@/lib/voice-cloning/audio-validation';
+import type { OriginalVoiceRecording, VoiceProfile } from '@/lib/voice-cloning/types';
 import { resolveVoiceProfileReferenceLanguage } from '@/lib/voice-cloning/language';
 
 const PROFILE_FILE = 'profile.json';
 const REFERENCE_FILE = 'reference.wav';
+const ORIGINAL_RECORDING_BASENAME = 'original-recording';
 
 async function ensureDir(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -165,8 +167,40 @@ export async function writeReferenceAudio(
   return key;
 }
 
+function originalRecordingExtension(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('ogg')) return 'ogg';
+  if (normalized.includes('mp4')) return 'm4a';
+  if (normalized.includes('mpeg')) return 'mp3';
+  return 'wav';
+}
+
+export async function writeOriginalRecording(
+  profileId: string,
+  ownerId: string,
+  recording: IncomingVoiceClip,
+): Promise<OriginalVoiceRecording> {
+  const dir = getVoiceProfileDir(profileId, ownerId);
+  await ensureDir(dir);
+  const key = path.join(
+    dir,
+    `${ORIGINAL_RECORDING_BASENAME}.${originalRecordingExtension(recording.mimeType)}`,
+  );
+  await fs.writeFile(key, recording.bytes, { mode: 0o600 });
+  return {
+    key,
+    mimeType: recording.mimeType,
+    byteLength: recording.bytes.byteLength,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function deleteVoiceProfileAssets(profile: VoiceProfile): Promise<void> {
   if (profile.referenceAudioKey) {
     await fs.rm(profile.referenceAudioKey, { force: true }).catch(() => undefined);
+  }
+  if (profile.originalRecording?.key) {
+    await fs.rm(profile.originalRecording.key, { force: true }).catch(() => undefined);
   }
 }

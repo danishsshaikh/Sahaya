@@ -24,10 +24,15 @@ function disabled() {
 function comparisonError(error: unknown) {
   if (error instanceof ExternalVoiceProviderError) {
     return apiError(
-      error.status === 429 ? 'RATE_LIMITED' : 'UPSTREAM_ERROR',
+      error.code,
       error.status,
       error.message,
-      error.metadata.requestId ? `Provider request ID: ${error.metadata.requestId}` : undefined,
+      [
+        error.metadata.safeDetail,
+        error.metadata.requestId ? `Provider request ID: ${error.metadata.requestId}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(' · ') || undefined,
     );
   }
   if (error instanceof TeachingVoiceError) {
@@ -74,6 +79,7 @@ export async function POST(req: NextRequest) {
         ...(typeof body.voice === 'string' ? { voice: body.voice } : {}),
         ...(typeof body.style === 'string' ? { style: body.style } : {}),
         ...(body.sarvamExternalConsent === true ? { sarvamExternalConsent: true } : {}),
+        ...(body.sarvamCreateRawVoice === true ? { sarvamCreateRawVoice: true } : {}),
       },
       signal: req.signal,
     });
