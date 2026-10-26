@@ -105,6 +105,13 @@ export async function register(): Promise<void> {
     return shutdownPromise;
   };
 
-  process.once('SIGTERM', () => void shutdown());
-  process.once('SIGINT', () => void shutdown());
+  const processOnce = (
+    process as unknown as {
+      once?: (signal: 'SIGTERM' | 'SIGINT', listener: () => void) => void;
+    }
+  )['once'];
+  if (typeof processOnce === 'function') {
+    processOnce.call(process, 'SIGTERM', () => void shutdown());
+    processOnce.call(process, 'SIGINT', () => void shutdown());
+  }
 }

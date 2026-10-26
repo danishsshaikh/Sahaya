@@ -1,26 +1,35 @@
-import { NextRequest } from 'next/server';
-import { randomUUID } from 'crypto';
+import { after, NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import {
   getVoiceCloningDefaultLanguage,
   getChatterboxDefaultModelVariant,
+  isQwen3TtsClassroomEnabled,
+  isQwen3TtsPreviewEnabled,
+  isVoiceEnhancementAllowed,
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
-import { markVoiceConfigured, requireSessionUser } from '@/lib/auth/server';
-import { VOICE_CLONING_CONSENT_VERSION, VOICE_PREVIEW_TEXT } from '@/lib/voice-cloning/phrases';
+import { requireSessionUser } from '@/lib/auth/server';
 import {
-  createVoiceProfileId,
+  isChatterboxFacultySynthesisLanguage,
+  normalizeTeachingVoiceLanguageId,
+  resolveTeachingVoiceLanguage,
+  validateTeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
+import {
   deleteVoiceProfileAssets,
   findCurrentVoiceProfile,
   readVoiceProfile,
-  referenceAudioExists,
-  writeReferenceAudio,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
 import {
   isChatterboxModelVariant,
-  resolveNewVoiceProfileModelVariant,
+  isVoiceEnhancementMode,
+  isVoicePreviewModel,
+  resolveVoiceProfileProvider,
+  resolveVoiceProfileQwenEnhancementMode,
+  TeachingVoiceError,
   resolveVoiceProfileGenerationSettings,
+  resolveVoiceProfileEnhancementMode,
   resolveVoiceProfileLanguageId,
   resolveVoiceProfileModelVariant,
   toPublicVoiceProfile,
@@ -28,45 +37,58 @@ import {
   type ChatterboxModelVariant,
   type VoiceConfiguration,
   type VoiceGenerationSettings,
-  type VoicePreview,
+  type VoicePreviewTextLanguage,
+  type VoicePreviewModel,
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
-import {
-  isVoiceRecordingQualityError,
-  masterGeneratedVoiceAudio,
-  normalizeVoiceEnrollmentRecording,
-  type IncomingVoiceClip,
-} from '@/lib/voice-cloning/audio-validation';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import { createLogger } from '@/lib/logger';
 import { resolveTTSLanguageCode, tryResolveTTSLanguageCode } from '@/lib/audio/tts-language';
+import {
+  acceptVoiceProfilePreview,
+  generateVariantPreview,
+  parseVoiceEnrollmentForm,
+  runVoiceEnrollmentJob,
+  startVoiceEnrollment,
+  voiceEnrollmentErrorResponse,
+  voiceEnrollmentResponse,
+} from '@/lib/server/voice-enrollment-jobs';
+import {
+  createQwen3TtsPreviewCacheKey,
+  currentQwen3TtsPreview,
+  generateQwen3TtsModelPreview,
+} from '@/lib/server/qwen3-tts-preview';
 
 const log = createLogger('VoiceCloningProfileAPI');
 
-export const maxDuration = 120;
+export const maxDuration = 960;
 
 function disabled() {
   return apiError('PROVIDER_DISABLED', 404, 'Voice cloning is disabled');
 }
 
-function requestedModelVariant(
-  value: FormDataEntryValue | null,
-): ChatterboxModelVariant | null | undefined {
-  if (value === null) return undefined;
-  return resolveNewVoiceProfileModelVariant(typeof value === 'string' ? value : String(value));
+function availablePreviewModels(): VoicePreviewModel[] {
+  return [
+    'chatterbox-v3',
+    ...(isQwen3TtsPreviewEnabled() ? (['qwen3-tts-1.7b-base'] as const) : []),
+  ];
+}
+
+function qwenClassroomEnhancementAvailable(): boolean {
+  return isVoiceEnhancementAllowed('qwen3-tts', 'en', 'classroom');
+}
+
+function publicVoiceProfile(profile: VoiceProfile | null) {
+  const result = toPublicVoiceProfile(profile);
+  if (result && profile && !currentQwen3TtsPreview(profile)) {
+    result.qwenPreview = undefined;
+  }
+  return result;
 }
 
 function serverDefaultModelVariant(): ChatterboxModelVariant {
   const configured = getChatterboxDefaultModelVariant();
   return isChatterboxModelVariant(configured) ? configured : 'v3';
-}
-
-function voicePreviewFromAudio(audio: Uint8Array, format: string): VoicePreview {
-  return {
-    format,
-    base64: Buffer.from(audio).toString('base64'),
-    createdAt: new Date().toISOString(),
-  };
 }
 
 function parseGenerationSettings(value: unknown): VoiceGenerationSettings {
@@ -97,9 +119,29 @@ function resolveVoiceConfiguration(input: {
   modelVariant?: unknown;
   languageId?: unknown;
   generationSettings?: unknown;
+  enhancementMode?: unknown;
   fallbackProfile?: VoiceProfile;
 }): VoiceConfiguration {
   const profile = input.fallbackProfile;
+  if (profile) {
+    const languageId = validateTeachingVoiceLanguage(
+      profile,
+      typeof input.languageId === 'string'
+        ? input.languageId
+        : resolveVoiceProfileLanguageId(profile),
+    );
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
+      if (
+        input.modelVariant !== undefined ||
+        input.generationSettings !== undefined ||
+        input.enhancementMode !== undefined
+      ) {
+        throw new TeachingVoiceError('Chatterbox settings do not apply to this Teaching Voice.');
+      }
+      return { languageId };
+    }
+  }
   const modelVariant =
     input.modelVariant === undefined
       ? profile
@@ -120,248 +162,106 @@ function resolveVoiceConfiguration(input: {
       ? resolveVoiceProfileGenerationSettings(profile)
       : parseGenerationSettings(input.generationSettings);
 
-  return { modelVariant, languageId, generationSettings };
+  const enhancementMode =
+    input.enhancementMode === undefined
+      ? profile
+        ? resolveVoiceProfileEnhancementMode(profile)
+        : 'standard'
+      : isVoiceEnhancementMode(input.enhancementMode)
+        ? input.enhancementMode
+        : null;
+  if (!enhancementMode) throw new Error('Unsupported voice enhancement mode');
+
+  return { modelVariant, languageId, generationSettings, enhancementMode };
 }
 
 function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
   return (
     left.modelVariant === right.modelVariant &&
     left.languageId === right.languageId &&
+    (left.enhancementMode ?? 'standard') === (right.enhancementMode ?? 'standard') &&
     JSON.stringify(left.generationSettings) === JSON.stringify(right.generationSettings)
   );
 }
 
-async function generateVariantPreview(
-  profile: VoiceProfile,
-  config: VoiceConfiguration,
-): Promise<{ providerReferenceId: string; preview: VoicePreview }> {
-  if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
-    throw new Error('Voice profile reference audio not found');
-  }
-  const provider = getVoiceCloningProvider();
-  const { providerReferenceId } = await provider.createProfile({
-    profileId: profile.id,
-    referenceAudioKey: profile.referenceAudioKey,
-    language: config.languageId,
-    modelVariant: config.modelVariant,
-    generationSettings: config.generationSettings,
-  });
-  const preview = await provider.generatePreview({
-    providerReferenceId,
-    text: VOICE_PREVIEW_TEXT,
-    language: config.languageId,
-    modelVariant: config.modelVariant,
-    generationSettings: config.generationSettings,
-  });
-  const mastered = await masterGeneratedVoiceAudio(preview.audio, preview.format);
-  log.info('voice output mastering completed', {
-    profileId: profile.id,
-    operation: 'preview',
-    format: mastered.format,
-  });
-  return {
-    providerReferenceId,
-    preview: voicePreviewFromAudio(mastered.audio, mastered.format),
-  };
+function voiceSynthesisConfigurationsEqual(
+  left: VoiceConfiguration,
+  right: VoiceConfiguration,
+): boolean {
+  return voiceConfigurationsEqual(
+    { ...left, enhancementMode: 'standard' },
+    { ...right, enhancementMode: 'standard' },
+  );
 }
 
-async function readEnrollmentRecording(formData: FormData): Promise<IncomingVoiceClip> {
-  const value = formData.get('recording');
-  if (!(value instanceof File)) {
-    throw new Error('Missing recording');
+function parsePreviewTextLanguageId(
+  value: unknown,
+  synthesisLanguageId: string,
+): VoicePreviewTextLanguage {
+  const languageId = value === undefined ? 'en' : resolveTeachingVoiceLanguage(String(value));
+  if (!isChatterboxFacultySynthesisLanguage(languageId)) {
+    throw new TeachingVoiceError('Preview text must be English or Hindi.');
   }
-  return {
-    bytes: new Uint8Array(await value.arrayBuffer()),
-    mimeType: value.type,
-    fileName: value.name,
-  };
+  if (languageId === 'hi' && synthesisLanguageId !== 'hi') {
+    throw new TeachingVoiceError('Hindi preview text requires Hindi Chatterbox synthesis.');
+  }
+  return languageId;
 }
 
 export async function GET(req: NextRequest) {
   if (!isVoiceCloningServerEnabled()) return disabled();
   const user = await requireSessionUser(req);
   if (user instanceof Response) return user;
-  const profile = await findCurrentVoiceProfile(user.id);
-  return apiSuccess({ profile: toPublicVoiceProfile(profile) });
+  try {
+    const params = req.nextUrl.searchParams;
+    const requested = params.get('language');
+    const language = requested === null ? undefined : normalizeTeachingVoiceLanguageId(requested);
+    if (language === null)
+      return apiError('INVALID_REQUEST', 400, 'Unsupported or ambiguous voice language');
+    const profileId = params.get('profileId');
+    const profile = profileId
+      ? await readVoiceProfile(profileId, user.id)
+      : await findCurrentVoiceProfile(user.id, language);
+    if (profileId && (!profile || profile.ownerId !== user.id || profile.status !== 'ready')) {
+      return apiError(
+        'INVALID_REQUEST',
+        404,
+        'Selected Teaching Voice is not ready or no longer exists',
+      );
+    }
+    if (profileId && profile) {
+      getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
+      validateTeachingVoiceLanguage(profile, requested ?? undefined);
+    }
+    return apiSuccess({
+      profile: publicVoiceProfile(profile),
+      previewModels: availablePreviewModels(),
+      qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+      qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+    });
+  } catch (error) {
+    return apiError(
+      'INVALID_REQUEST',
+      400,
+      error instanceof TeachingVoiceError ? error.message : 'Could not load Teaching Voice',
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {
   if (!isVoiceCloningServerEnabled()) return disabled();
   const user = await requireSessionUser(req);
   if (user instanceof Response) return user;
-  let profile: VoiceProfile | null = null;
-  let previousProfile: VoiceProfile | null = null;
   try {
     const formData = await req.formData();
-    const consent = formData.get('consent') === 'true';
-    if (!consent) {
-      return apiError('INVALID_REQUEST', 400, 'Explicit consent is required');
+    const input = await parseVoiceEnrollmentForm(formData, user.id);
+    const { job, reused, completedProfile } = await startVoiceEnrollment(input);
+    if (!reused) {
+      after(() => runVoiceEnrollmentJob(input));
     }
-
-    const displayName =
-      typeof formData.get('displayName') === 'string'
-        ? String(formData.get('displayName')).trim().slice(0, 80)
-        : '';
-    const parsedModelVariant = requestedModelVariant(formData.get('modelVariant'));
-    if (parsedModelVariant === null) {
-      return apiError('INVALID_REQUEST', 400, 'Unsupported voice model');
-    }
-    let languageId: string;
-    let generationSettings: VoiceGenerationSettings;
-    try {
-      languageId = parseProfileLanguageId(
-        formData.get('languageId') ?? formData.get('language'),
-        getVoiceCloningDefaultLanguage(),
-      );
-      generationSettings = parseGenerationSettings(formData.get('generationSettings'));
-    } catch (error) {
-      return apiError(
-        'INVALID_REQUEST',
-        400,
-        error instanceof Error ? error.message : 'Invalid voice settings',
-      );
-    }
-    const config: VoiceConfiguration = {
-      modelVariant: parsedModelVariant ?? serverDefaultModelVariant(),
-      languageId,
-      generationSettings,
-    };
-    const attemptId = randomUUID();
-    let normalizedReference: Awaited<ReturnType<typeof normalizeVoiceEnrollmentRecording>>;
-    try {
-      const recording = await readEnrollmentRecording(formData);
-      log.info('voice enrollment quality check started', {
-        attemptId,
-        operation: 'enroll',
-        recordingBytes: recording.bytes.byteLength,
-      });
-      normalizedReference = await normalizeVoiceEnrollmentRecording(recording);
-      log.info('voice enrollment quality check passed', {
-        attemptId,
-        operation: 'enroll',
-        durationMs: Math.round(normalizedReference.quality.durationSeconds * 1000),
-        peakLevel: normalizedReference.quality.maxVolumeDb,
-        meanLevel: normalizedReference.quality.meanVolumeDb,
-        silenceRatio: normalizedReference.quality.silenceRatio,
-        clippedSampleRatio: normalizedReference.quality.clippedSampleRatio,
-        maxConsecutiveClippingMs: normalizedReference.quality.maxConsecutiveClippingMs,
-        qualityDecision: normalizedReference.qualityDecision.severity,
-        qualityWarnings: normalizedReference.qualityDecision.warnings,
-      });
-    } catch (error) {
-      if (isVoiceRecordingQualityError(error)) {
-        log.warn('voice enrollment rejected', {
-          attemptId,
-          operation: 'enroll',
-          reason: error.code,
-          qualityDecision: error.decision?.severity ?? 'reject',
-          ...(error.metrics
-            ? {
-                durationMs: Math.round(error.metrics.durationSeconds * 1000),
-                peakLevel: error.metrics.maxVolumeDb,
-                meanLevel: error.metrics.meanVolumeDb,
-                silenceRatio: error.metrics.silenceRatio,
-                clippedSampleRatio: error.metrics.clippedSampleRatio,
-                maxConsecutiveClippingMs: error.metrics.maxConsecutiveClippingMs,
-              }
-            : {}),
-        });
-        return apiError('INVALID_REQUEST', 400, error.userMessage);
-      }
-      return apiError(
-        'INVALID_REQUEST',
-        400,
-        error instanceof Error ? error.message : 'Invalid voice recording',
-      );
-    }
-
-    previousProfile = await findCurrentVoiceProfile(user.id);
-
-    const profileId = createVoiceProfileId();
-    const now = new Date().toISOString();
-    profile = {
-      id: profileId,
-      ownerId: user.id,
-      displayName: displayName || 'My Teaching Voice',
-      provider: 'chatterbox',
-      language: languageId,
-      languageId,
-      modelVariant: config.modelVariant,
-      generationSettings,
-      status: 'processing',
-      createdAt: now,
-      updatedAt: now,
-      consentTimestamp: now,
-      consentVersion: VOICE_CLONING_CONSENT_VERSION,
-      profileVersion: 1,
-      replacesProfileId: previousProfile?.id,
-      enrollmentQuality: {
-        severity: normalizedReference.qualityDecision.severity === 'warning' ? 'warning' : 'pass',
-        warnings: normalizedReference.qualityDecision.warnings,
-      },
-    };
-    await writeVoiceProfile(profile);
-
-    const referenceAudioKey = await writeReferenceAudio(
-      profileId,
-      user.id,
-      normalizedReference.referenceAudio,
-    );
-    profile = { ...profile, referenceAudioKey, updatedAt: new Date().toISOString() };
-    await writeVoiceProfile(profile);
-    log.info('voice reference preprocessing completed', {
-      profileId,
-      operation: 'enroll',
-      durationMs: Math.round(normalizedReference.durationSeconds * 1000),
-      peakLevel: normalizedReference.quality.maxVolumeDb,
-      meanLevel: normalizedReference.quality.meanVolumeDb,
-      silenceRatio: normalizedReference.quality.silenceRatio,
-      clippedSampleRatio: normalizedReference.quality.clippedSampleRatio,
-      maxConsecutiveClippingMs: normalizedReference.quality.maxConsecutiveClippingMs,
-      qualityDecision: normalizedReference.qualityDecision.severity,
-    });
-
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config);
-    profile = {
-      ...profile,
-      providerReferenceId,
-      status: 'preview-ready',
-      updatedAt: new Date().toISOString(),
-      draftPreview: { config, preview },
-    };
-    await writeVoiceProfile(profile);
-
-    log.info('voice profile enrolled', {
-      profileId,
-      operation: 'enroll',
-      status: profile.status,
-      durationMs: Math.round(normalizedReference.durationSeconds * 1000),
-      qualityDecision: normalizedReference.qualityDecision.severity,
-    });
-
-    return apiSuccess({ profile: toPublicVoiceProfile(profile) }, 201);
+    return voiceEnrollmentResponse(job, completedProfile ?? job.result);
   } catch (error) {
-    if (profile) {
-      const failed = {
-        ...profile,
-        status: 'failed' as const,
-        updatedAt: new Date().toISOString(),
-        failureReason: error instanceof Error ? error.message : 'Voice enrollment failed',
-      };
-      await writeVoiceProfile(failed).catch(() => undefined);
-    }
-    log.warn('voice profile enrollment failed', {
-      operation: 'enroll',
-      status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
-      profileId: profile?.id,
-    });
-    return apiError(
-      'GENERATION_FAILED',
-      500,
-      'Voice enrollment failed',
-      error instanceof Error ? error.message : String(error),
-    );
+    return voiceEnrollmentErrorResponse(error);
   }
 }
 
@@ -375,6 +275,9 @@ export async function PATCH(req: NextRequest) {
     modelVariant?: string;
     languageId?: string;
     generationSettings?: unknown;
+    enhancementMode?: string;
+    previewTextLanguageId?: string;
+    previewModel?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -383,12 +286,131 @@ export async function PATCH(req: NextRequest) {
   if (!profile || profile.ownerId !== user.id || profile.status === 'deleted') {
     return apiError('INVALID_REQUEST', 404, 'Voice profile not found');
   }
+
+  const previewModel = body.previewModel ?? 'chatterbox-v3';
+  if (!isVoicePreviewModel(previewModel)) {
+    return apiError('INVALID_REQUEST', 400, 'Unsupported preview model');
+  }
+  if (body.action === 'activate-engine') {
+    if (profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready');
+    }
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'Engine selection requires an English Teaching Voice recording',
+      );
+    }
+    const activeEngine = previewModel === 'qwen3-tts-1.7b-base' ? 'qwen3-tts' : 'chatterbox';
+    let qwenEnhancementMode = resolveVoiceProfileQwenEnhancementMode(profile);
+    if (activeEngine === 'qwen3-tts') {
+      if (!isQwen3TtsPreviewEnabled() || !isQwen3TtsClassroomEnabled()) {
+        return apiError('PROVIDER_DISABLED', 404, 'Qwen3-TTS classroom narration is disabled');
+      }
+      const qwenPreview = currentQwen3TtsPreview(profile);
+      if (!qwenPreview) {
+        return apiError('INVALID_REQUEST', 400, 'Preview Qwen3-TTS before using it in class');
+      }
+      const requestedEnhancementMode =
+        body.enhancementMode === undefined
+          ? qwenEnhancementMode
+          : isVoiceEnhancementMode(body.enhancementMode)
+            ? body.enhancementMode
+            : null;
+      if (!requestedEnhancementMode) {
+        return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
+      }
+      qwenEnhancementMode = requestedEnhancementMode;
+      if (qwenEnhancementMode === 'resemble-enhance' && !qwenClassroomEnhancementAvailable()) {
+        return apiError(
+          'PROVIDER_DISABLED',
+          400,
+          'Enhanced Qwen3-TTS classroom narration is disabled for this deployment',
+        );
+      }
+      if (qwenEnhancementMode === 'resemble-enhance' && !qwenPreview.comparison.enhanced) {
+        return apiError(
+          'INVALID_REQUEST',
+          400,
+          'Generate a successful Enhanced Qwen3-TTS preview before selecting it',
+        );
+      }
+    }
+    const next: VoiceProfile = {
+      ...profile,
+      activeEngine,
+      ...(activeEngine === 'qwen3-tts' ? { qwenEnhancementMode } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    await writeVoiceProfile(next);
+    return apiSuccess({
+      profile: publicVoiceProfile(next),
+      previewModels: availablePreviewModels(),
+      qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+      qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+    });
+  }
+  if (previewModel === 'qwen3-tts-1.7b-base') {
+    if (body.action !== 'preview-model') {
+      return apiError('INVALID_REQUEST', 400, 'Invalid Qwen3-TTS profile action');
+    }
+    if (!isQwen3TtsPreviewEnabled()) {
+      return apiError('PROVIDER_DISABLED', 404, 'Qwen3-TTS preview is disabled');
+    }
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready for preview');
+    }
+    if (resolveVoiceProfileProvider(profile) !== 'chatterbox') {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'Qwen3-TTS preview requires an English Chatterbox Teaching Voice',
+      );
+    }
+    const enhancementMode =
+      body.enhancementMode === undefined
+        ? 'standard'
+        : isVoiceEnhancementMode(body.enhancementMode)
+          ? body.enhancementMode
+          : null;
+    if (!enhancementMode) {
+      return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
+    }
+    try {
+      const modelPreview = await generateQwen3TtsModelPreview(profile, enhancementMode);
+      const next: VoiceProfile = {
+        ...profile,
+        qwenPreviewCache: {
+          cacheKey: createQwen3TtsPreviewCacheKey(profile),
+          result: modelPreview,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      await writeVoiceProfile(next);
+      return apiSuccess({
+        profile: publicVoiceProfile(next),
+        modelPreview,
+        previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Qwen3-TTS preview failed',
+      );
+    }
+  }
+
   let config: VoiceConfiguration;
   try {
     config = resolveVoiceConfiguration({
       modelVariant: body.modelVariant,
       languageId: body.languageId,
       generationSettings: body.generationSettings,
+      enhancementMode: body.enhancementMode,
       fallbackProfile: profile,
     });
   } catch (error) {
@@ -403,64 +425,85 @@ export async function PATCH(req: NextRequest) {
     if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
       return apiError('INVALID_REQUEST', 400, 'Voice profile is not ready for preview');
     }
-    const { providerReferenceId, preview } = await generateVariantPreview(profile, config);
+    let generated: Awaited<ReturnType<typeof generateVariantPreview>>;
+    let previewTextLanguageId: VoicePreviewTextLanguage | undefined;
+    try {
+      previewTextLanguageId =
+        resolveVoiceProfileProvider(profile) === 'chatterbox'
+          ? parsePreviewTextLanguageId(body.previewTextLanguageId, config.languageId)
+          : undefined;
+      generated = await generateVariantPreview(profile, config, { previewTextLanguageId });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Teaching Voice preview failed',
+      );
+    }
+    const { providerReferenceId, preview, comparison } = generated;
     const next = {
       ...profile,
+      provider: resolveVoiceProfileProvider(profile),
       providerReferenceId,
-      draftPreview: { config, preview },
+      preview: profile.provider === 'qwen3' ? undefined : profile.preview,
+      previewVariants: profile.provider === 'qwen3' ? undefined : profile.previewVariants,
+      draftPreview: {
+        config: { ...config, ...(previewTextLanguageId ? { previewTextLanguageId } : {}) },
+        preview,
+        ...(comparison ? { comparison } : {}),
+      },
       updatedAt: new Date().toISOString(),
     };
     await writeVoiceProfile(next);
-    return apiSuccess({ profile: toPublicVoiceProfile(next) });
+    return apiSuccess({ profile: publicVoiceProfile(next) });
   }
 
   if (body.action !== 'accept-preview') {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
   }
 
-  const acceptedDraft = profile.draftPreview;
-  if (!acceptedDraft || !voiceConfigurationsEqual(acceptedDraft.config, config)) {
-    return apiError('INVALID_REQUEST', 400, 'Preview must be generated before accepting');
-  }
-  const next = {
-    ...profile,
-    status: 'ready' as const,
-    language: config.languageId,
-    languageId: config.languageId,
-    modelVariant: config.modelVariant,
-    generationSettings: config.generationSettings,
-    preview: acceptedDraft.preview,
-    draftPreview: undefined,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeVoiceProfile(next);
-  await markVoiceConfigured(user.id);
-  if (profile.replacesProfileId) {
-    const previousProfile = await readVoiceProfile(profile.replacesProfileId, user.id);
-    if (
-      previousProfile &&
-      previousProfile.ownerId === user.id &&
-      previousProfile.status !== 'deleted'
-    ) {
-      if (previousProfile.providerReferenceId) {
-        await getVoiceCloningProvider()
-          .deleteProfile({ providerReferenceId: previousProfile.providerReferenceId })
-          .catch(() => undefined);
+  let profileForAcceptance = profile;
+  const draft = profile.draftPreview;
+  if (draft && voiceSynthesisConfigurationsEqual(draft.config, config) && draft.comparison) {
+    const selected =
+      config.enhancementMode === 'resemble-enhance'
+        ? draft.comparison.enhanced
+        : draft.comparison.original;
+    if (!selected) {
+      return apiError('INVALID_REQUEST', 400, 'Enhanced preview is unavailable');
+    }
+    profileForAcceptance = {
+      ...profile,
+      draftPreview: { ...draft, config: { ...draft.config, ...config }, preview: selected },
+    };
+  } else if (!draft && profile.previewComparison) {
+    const current = resolveVoiceConfiguration({ fallbackProfile: profile });
+    if (voiceSynthesisConfigurationsEqual(current, config)) {
+      const selected =
+        config.enhancementMode === 'resemble-enhance'
+          ? profile.previewComparison.enhanced
+          : profile.previewComparison.original;
+      if (!selected) {
+        return apiError('INVALID_REQUEST', 400, 'Enhanced preview is unavailable');
       }
-      await deleteVoiceProfileAssets(previousProfile);
-      await writeVoiceProfile({
-        ...previousProfile,
-        status: 'deleted',
-        referenceAudioKey: undefined,
-        providerReferenceId: undefined,
-        preview: undefined,
-        previewVariants: undefined,
-        draftPreview: undefined,
-        updatedAt: new Date().toISOString(),
-      });
+      profileForAcceptance = {
+        ...profile,
+        draftPreview: {
+          config: { ...config, previewTextLanguageId: profile.previewTextLanguageId },
+          preview: selected,
+          comparison: profile.previewComparison,
+        },
+      };
     }
   }
-  return apiSuccess({ profile: toPublicVoiceProfile(next) });
+  if (
+    !profileForAcceptance.draftPreview ||
+    !voiceConfigurationsEqual(profileForAcceptance.draftPreview.config, config)
+  ) {
+    return apiError('INVALID_REQUEST', 400, 'Preview must be generated before accepting');
+  }
+  const next = await acceptVoiceProfilePreview(profileForAcceptance, config, user.id);
+  return apiSuccess({ profile: publicVoiceProfile(next) });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -476,19 +519,22 @@ export async function DELETE(req: NextRequest) {
   }
   try {
     if (profile.providerReferenceId) {
-      await getVoiceCloningProvider()
-        .deleteProfile({ providerReferenceId: profile.providerReferenceId })
-        .catch(() => undefined);
+      await getVoiceCloningProvider(resolveVoiceProfileProvider(profile)).deleteProfile({
+        providerReferenceId: profile.providerReferenceId,
+      });
     }
     await deleteVoiceProfileAssets(profile);
     await writeVoiceProfile({
       ...profile,
       status: 'deleted',
       referenceAudioKey: undefined,
+      referenceText: undefined,
       providerReferenceId: undefined,
       preview: undefined,
+      previewComparison: undefined,
       previewVariants: undefined,
       draftPreview: undefined,
+      qwenPreviewCache: undefined,
       updatedAt: new Date().toISOString(),
     });
     log.info('voice profile deleted', {
@@ -501,8 +547,7 @@ export async function DELETE(req: NextRequest) {
     return apiError(
       'INTERNAL_ERROR',
       500,
-      'Voice profile deletion failed',
-      error instanceof Error ? error.message : String(error),
+      error instanceof TeachingVoiceError ? error.message : 'Voice profile deletion failed',
     );
   }
 }

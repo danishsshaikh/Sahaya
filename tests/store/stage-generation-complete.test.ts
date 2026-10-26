@@ -440,9 +440,9 @@ describe('generationComplete', () => {
     expect(healed.generationComplete).toBe(true);
   });
 
-  // Resume-on-refresh for a genuinely interrupted generation is preserved:
-  // when not complete, the missing outline still drives a placeholder.
-  it('keeps generating placeholders on load when generation is not complete', async () => {
+  // Resume-on-refresh remains derived from the missing outline, but hydration
+  // must not claim transient in-flight ownership for work no browser dispatched.
+  it('does not mark pending outlines active on load when generation is not complete', async () => {
     loadStageDataMock.mockResolvedValue({
       stage: makeStage(),
       scenes: [makeSlideScene('a', 1), makeSlideScene('b', 2)],
@@ -458,7 +458,7 @@ describe('generationComplete', () => {
     await useStageStore.getState().loadFromStorage('stage-1');
 
     expect(useStageStore.getState().generationComplete).toBe(false);
-    expect(useStageStore.getState().generatingOutlines.map((o) => o.order)).toEqual([3]);
+    expect(useStageStore.getState().generatingOutlines).toEqual([]);
   });
 
   it('does not overwrite in-memory scenes that appear while runtime hydration is pending', async () => {

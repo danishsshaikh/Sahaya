@@ -30,6 +30,8 @@ export async function GET(req: NextRequest) {
       stageId: job.stageId,
       outlineId: job.outlineId,
       outlineTitle: job.outlineTitle,
+      attemptId: job.attemptId,
+      generationVersion: job.generationVersion,
       widgetType: job.widgetType,
       done: job.status === 'completed' || job.status === 'failed',
       ...(job.status === 'completed' && job.result

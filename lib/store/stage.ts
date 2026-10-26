@@ -25,6 +25,7 @@ import type { DocumentProducer } from '@/lib/document-store/persistence-types';
 import type { PendingChange, StaleDroppedSave } from '@/lib/utils/stage-storage';
 import { collectStageAssetRefs } from '@/lib/media/collect-stage-asset-refs';
 import { reconcileSceneMediaAllocations } from '@/lib/media/reconcile-scene-media';
+import { restorePersistedSceneRecovery } from '@/lib/generation/scene-recovery';
 import {
   isStageDeleted,
   isStageDeletionInFlight,
@@ -296,7 +297,8 @@ interface StageState {
   // UI state
   toolbarState: ToolbarState;
 
-  // Transient generation state (not persisted)
+  // Transient outlines whose visual requests have actually been dispatched.
+  // Queued outlines are derived from outlines minus committed/failed scenes.
   generatingOutlines: SceneOutline[];
 
   // Persisted outlines for resume-on-refresh
@@ -402,13 +404,31 @@ type StagePersistenceSnapshot = Pick<
   | 'chats'
   | 'chatSnapshot'
   | 'outlines'
+  | 'failedOutlines'
   | 'generationComplete'
 >;
 
 function persistenceSnapshot(state: StageState): StagePersistenceSnapshot {
-  const { stage, scenes, currentSceneId, chats, chatSnapshot, outlines, generationComplete } =
-    state;
-  return { stage, scenes, currentSceneId, chats, chatSnapshot, outlines, generationComplete };
+  const {
+    stage,
+    scenes,
+    currentSceneId,
+    chats,
+    chatSnapshot,
+    outlines,
+    failedOutlines,
+    generationComplete,
+  } = state;
+  return {
+    stage,
+    scenes,
+    currentSceneId,
+    chats,
+    chatSnapshot,
+    outlines,
+    failedOutlines,
+    generationComplete,
+  };
 }
 
 function delay(ms: number): Promise<void> {
@@ -442,6 +462,7 @@ async function persistDirtySnapshot(
       chatSnapshot: snapshot.chatSnapshot,
       outline: {
         outlines: snapshot.outlines,
+        failedOutlineIds: snapshot.failedOutlines.map((outline) => outline.id),
         generationComplete: snapshot.generationComplete,
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -586,16 +607,32 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       );
       return;
     }
+    const existingLogicalScene = get().scenes.find(
+      (candidate) =>
+        (!!scene.outlineId && candidate.outlineId === scene.outlineId) ||
+        candidate.order === scene.order,
+    );
+    if (existingLogicalScene) {
+      log.info(
+        `Ignoring duplicate logical scene "${scene.title}" (incoming: ${scene.id}, existing: ${existingLogicalScene.id})`,
+      );
+      return;
+    }
     // Before anything else: a scene whose media was stored while it was still
     // being built carries placeholders that already have allocated ids waiting
     // for them. Applying them here, ahead of the structure mark below, is what
     // keeps the placeholder out of the scene's very first save.
     reconcileSceneMediaAllocations(scene);
-    const scenes = [...get().scenes, migrateScene(scene)];
+    const previousScenes = get().scenes;
+    const scenes = [...previousScenes, migrateScene(scene)];
     // Remove the matching outline from generatingOutlines (match by order)
     const generatingOutlines = get().generatingOutlines.filter((o) => o.order !== scene.order);
-    // Auto-switch from pending page to the newly generated scene
-    const shouldSwitch = get().currentSceneId === PENDING_SCENE_ID;
+    // Show the first materialized scene immediately. After that first automatic
+    // selection, a real user-selected scene always wins as later scenes arrive.
+    const previousCurrentSceneId = get().currentSceneId;
+    const shouldSwitch =
+      previousCurrentSceneId === PENDING_SCENE_ID ||
+      (previousCurrentSceneId === null && previousScenes.length === 0);
     set({
       scenes,
       generatingOutlines,
@@ -801,14 +838,19 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     const existed = get().failedOutlines.some((o) => o.id === outline.id);
     if (existed) return;
     set({ failedOutlines: [...get().failedOutlines, outline] });
+    markPendingChanges(get().stage?.id, { kind: 'outline' });
   },
 
-  clearFailedOutlines: () => set({ failedOutlines: [] }),
+  clearFailedOutlines: () => {
+    set({ failedOutlines: [] });
+    markPendingChanges(get().stage?.id, { kind: 'outline' });
+  },
 
   retryFailedOutline: (outlineId) => {
     set({
       failedOutlines: get().failedOutlines.filter((o) => o.id !== outlineId),
     });
+    markPendingChanges(get().stage?.id, { kind: 'outline' });
   },
 
   // Getters
@@ -830,8 +872,16 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   // durability (e.g. setGenerationComplete) can avoid recording state that
   // outruns the scene data.
   saveToStorage: async () => {
-    const { stage, scenes, currentSceneId, chats, chatSnapshot, outlines, generationComplete } =
-      get();
+    const {
+      stage,
+      scenes,
+      currentSceneId,
+      chats,
+      chatSnapshot,
+      outlines,
+      failedOutlines,
+      generationComplete,
+    } = get();
     if (!stage?.id) {
       log.warn('Cannot save: stage.id is required');
       return false;
@@ -854,6 +904,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
           chatSnapshot,
           outline: {
             outlines,
+            failedOutlineIds: failedOutlines.map((outline) => outline.id),
             generationComplete,
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1015,6 +1066,11 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
         // boundary, same as setScenes/addScene — IndexedDB snapshots predate
         // the schema field, so they must be migrated on the way in.
         const migrated = await hydratePBLScenesFromRuntime(stageId, data.scenes.map(migrateScene));
+        const persistedRecovery = restorePersistedSceneRecovery(
+          outlines,
+          migrated,
+          outlinesRecord?.failedOutlineIds ?? [],
+        );
         if (!isCurrentStageSceneLoadToken(token)) {
           log.info('Newer stage load started during IndexedDB hydration, skipping load:', stageId);
           return;
@@ -1048,7 +1104,9 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
         // interrupted deck cannot be edited into a false "all materialized".
         const inMemoryState = get();
         const failedOutlines =
-          inMemoryState.stage?.id === stageId ? inMemoryState.failedOutlines : [];
+          inMemoryState.stage?.id === stageId
+            ? inMemoryState.failedOutlines
+            : persistedRecovery.failedOutlines;
         const generationComplete =
           persistedComplete ||
           isDeckComplete({
@@ -1064,13 +1122,10 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
           chatSnapshot: data.chatSnapshot ?? { sessions: [], restoreMarker: undefined },
           outlines,
           generationComplete,
-          // Compute generatingOutlines from persisted outlines minus completed
-          // scenes. Once generation is complete the deck is frozen for editing,
-          // so an orphaned outline (e.g. from a deleted slide) must NOT surface
-          // as a pending placeholder or drive resume regeneration.
-          generatingOutlines: generationComplete
-            ? []
-            : outlines.filter((o) => !migrated.some((s) => s.order === o.order)),
+          failedOutlines,
+          // Active dispatch ownership lives on the server and is deliberately
+          // not reconstructed from every unresolved outline during hydration.
+          generatingOutlines: [],
           // `mode` is transient UI state, not persisted with the stage.
           // Reset to 'playback' on every load so SPA navigation between
           // classrooms doesn't carry Pro-mode state across — e.g. user

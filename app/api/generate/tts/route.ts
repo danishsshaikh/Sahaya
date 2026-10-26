@@ -1,8 +1,8 @@
 /**
  * Single TTS Generation API
  *
- * Generates TTS audio for a single text string and returns base64-encoded audio.
- * Called by the client in parallel for each speech action after a scene is generated.
+ * Generates TTS audio for a single text string. Local Teaching Voice providers
+ * return recoverable asynchronous jobs; standard providers return audio directly.
  *
  * POST /api/generate/tts
  */
@@ -29,14 +29,18 @@ import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
-import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
+import { resolveFacultyVoiceSelection } from '@/lib/voice-cloning/synthesis';
+import { TeachingVoiceError } from '@/lib/voice-cloning/types';
+import { enqueueTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import { normalizeTeachingVoiceLanguageId } from '@/lib/voice-cloning/language';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
 import { isQwenCloneVoice } from '@/lib/audio/constants';
 
 const log = createLogger('TTS API');
 
-export const maxDuration = 30;
+// Local GPU Teaching Voice can take several minutes, including a cold load.
+export const maxDuration = 960;
 
 export async function POST(req: NextRequest) {
   const user = await requireSessionUser(req);
@@ -59,6 +63,9 @@ export async function POST(req: NextRequest) {
       teacherVoiceProfileId?: string;
       ttsLanguageCode?: string;
       language?: string;
+      stageId?: string;
+      outlineId?: string;
+      sceneId?: string;
     };
     ttsProviderId = body.ttsProviderId;
     ttsVoice = typeof body.ttsVoice === 'string' ? body.ttsVoice.trim() : undefined;
@@ -73,7 +80,7 @@ export async function POST(req: NextRequest) {
           : undefined;
 
     // Validate required fields
-    if (!text || !audioId || !ttsProviderId || !ttsVoice) {
+    if (!text || !audioId) {
       return apiError(
         'MISSING_REQUIRED_FIELD',
         400,
@@ -82,14 +89,73 @@ export async function POST(req: NextRequest) {
     }
 
     if (teacherVoiceProfileId) {
-      const { audio, format } = await synthesizeFacultyVoice({
-        profileId: teacherVoiceProfileId,
-        ownerId: user.id,
-        text,
-        language: ttsLanguageCode,
-      });
-      const base64 = Buffer.from(audio).toString('base64');
-      return apiSuccess({ audioId, base64, format });
+      try {
+        const requestedLanguage = ttsLanguageCode
+          ? normalizeTeachingVoiceLanguageId(ttsLanguageCode)
+          : undefined;
+        if (ttsLanguageCode && !requestedLanguage) {
+          throw new TeachingVoiceError(
+            'Teaching Voice narration requires a normalized language identifier.',
+            400,
+          );
+        }
+        const { providerId, synthesisLanguage } = await resolveFacultyVoiceSelection(
+          teacherVoiceProfileId,
+          user.id,
+          requestedLanguage ?? undefined,
+        );
+        if (providerId === 'chatterbox' || providerId === 'indicf5' || providerId === 'qwen3-tts') {
+          const { job } = enqueueTeachingVoiceJob({
+            providerId,
+            ownerId: user.id,
+            profileId: teacherVoiceProfileId,
+            text,
+            language: synthesisLanguage,
+            audioId,
+            stageId: typeof body.stageId === 'string' ? body.stageId : undefined,
+            outlineId: typeof body.outlineId === 'string' ? body.outlineId : undefined,
+            sceneId: typeof body.sceneId === 'string' ? body.sceneId : undefined,
+          });
+          return apiSuccess(
+            {
+              async: true,
+              teachingVoiceProvider: providerId,
+              audioId,
+              jobId: job.id,
+              status: job.status,
+              queuePosition: job.queuePosition,
+              jobsAhead: job.jobsAhead,
+              queueDepth: job.queueDepth,
+              estimatedWaitMs: job.estimatedWaitMs,
+              statusUrl: `/api/generate/tts/jobs/${encodeURIComponent(job.id)}`,
+              ...(job.status === 'completed'
+                ? { audioUrl: `/api/generate/tts/jobs/${encodeURIComponent(job.id)}/audio` }
+                : {}),
+            },
+            job.status === 'completed' ? 200 : 202,
+          );
+        }
+        throw new TeachingVoiceError('Unsupported Teaching Voice provider.');
+      } catch (error) {
+        const message =
+          error instanceof TeachingVoiceError
+            ? error.message
+            : 'Teaching Voice generation failed. No alternate voice was used.';
+        log.warn('Teaching Voice generation failed', { message });
+        return apiError(
+          'GENERATION_FAILED',
+          error instanceof TeachingVoiceError ? error.status : 500,
+          message,
+        );
+      }
+    }
+
+    if (!ttsProviderId || !ttsVoice) {
+      return apiError(
+        'MISSING_REQUIRED_FIELD',
+        400,
+        'Missing required fields: text, audioId, ttsProviderId, ttsVoice',
+      );
     }
 
     // Reject browser-native TTS — must be handled client-side

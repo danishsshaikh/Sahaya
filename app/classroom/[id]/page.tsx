@@ -1,6 +1,7 @@
 'use client';
 
 import { Stage } from '@/components/stage';
+import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -36,17 +37,35 @@ import {
   runClassroomLoad,
 } from '@/lib/classroom/load-classroom';
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
+import type { LessonGenerationPhase, TeachingVoiceQueueProgress } from '@/lib/generation/progress';
+import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
+import type { SceneOutline } from '@/lib/types/generation';
 
 const log = createLogger('Classroom');
+
+type ClassroomGenerationProgress = {
+  sceneIndex: number;
+  totalScenes: number;
+  phase: LessonGenerationPhase;
+  sceneType?: SceneOutline['type'];
+  sceneStartedAt: number;
+  completedSceneDurationsMs: number[];
+  etaLabel: string;
+  teachingVoiceQueue: TeachingVoiceQueueProgress | null;
+};
 
 export default function ClassroomDetailPage() {
   const params = useParams();
   const classroomId = params?.id as string;
 
   const { loadFromStorage } = useStageStore();
+  const sceneCount = useStageStore((s) => s.scenes.length);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<ClassroomGenerationProgress | null>(
+    null,
+  );
   // Not a boolean on purpose: `false` would say "this is a stranger's course",
   // which is neither what an unanswered sidecar nor a 404 means. Held in the
   // shared permission store rather than in local state, so the retry
@@ -58,9 +77,109 @@ export default function ClassroomDetailPage() {
   const mayGenerate = mayStartOwnerGeneration(isServerBackedMediaPersistence(), ownership);
 
   const generationStartedRef = useRef(false);
+  const sceneStartedAtRef = useRef<Record<number, number>>({});
+  const completedSceneDurationsRef = useRef<number[]>([]);
+  const renderEnabledLoggedRef = useRef(false);
+
+  const updateGenerationProgress = useCallback(
+    (phase: LessonGenerationPhase, outline: SceneOutline) => {
+      const startedAt = sceneStartedAtRef.current[outline.order] ?? Date.now();
+      sceneStartedAtRef.current[outline.order] = startedAt;
+      const totalScenes = Math.max(useStageStore.getState().outlines.length, outline.order);
+      const completedSceneDurationsMs = [...completedSceneDurationsRef.current];
+      setGenerationProgress({
+        sceneIndex: outline.order,
+        totalScenes,
+        phase,
+        sceneType: outline.type,
+        sceneStartedAt: startedAt,
+        completedSceneDurationsMs,
+        etaLabel: lessonGenerationEtaLabel({
+          completedSceneDurationsMs,
+          currentSceneElapsedMs: Date.now() - startedAt,
+          sceneIndex: outline.order,
+          totalScenes,
+        }),
+        teachingVoiceQueue: null,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'phase-changed',
+        stageId: classroomId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        totalScenes,
+        phase,
+        elapsedMs: Date.now() - startedAt,
+      });
+    },
+    [classroomId],
+  );
+
+  const updateTeachingVoiceQueue = useCallback(
+    (progress: TeachingVoiceQueueProgress | null, outline: SceneOutline) => {
+      setGenerationProgress((current) =>
+        current?.sceneIndex === outline.order
+          ? { ...current, teachingVoiceQueue: progress }
+          : current,
+      );
+      console.info('[SceneProgressTrace]', {
+        event: progress ? 'teaching-voice-queue-changed' : 'teaching-voice-queue-cleared',
+        stageId: classroomId,
+        outlineId: outline.id,
+        sceneIndex: outline.order,
+        status: progress?.status,
+        queuePosition: progress?.queuePosition,
+        jobsAhead: progress?.jobsAhead,
+        estimatedWaitMs: progress?.estimatedWaitMs,
+      });
+    },
+    [classroomId],
+  );
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
+    onPhaseChange: updateGenerationProgress,
+    onNarrationQueueChange: updateTeachingVoiceQueue,
+    onSceneGenerated: (_scene, index) => {
+      const startedAt = sceneStartedAtRef.current[index] ?? Date.now();
+      completedSceneDurationsRef.current = [
+        ...completedSceneDurationsRef.current,
+        Date.now() - startedAt,
+      ];
+      delete sceneStartedAtRef.current[index];
+      console.info('[SceneProgressTrace]', {
+        event: 'scene-complete',
+        stageId: classroomId,
+        sceneIndex: index,
+        elapsedMs: Date.now() - startedAt,
+      });
+      if (index === 1) {
+        console.info('[SceneProgressTrace]', {
+          event: 'first-scene-ready',
+          stageId: classroomId,
+          sceneIndex: index,
+        });
+      }
+    },
     onComplete: () => {
+      setGenerationProgress(null);
+      console.info('[SceneProgressTrace]', {
+        event: 'generation-ui-complete',
+        stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'progress-overlay-hidden',
+        stageId: classroomId,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'generation-complete',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
+      });
+      console.info('[SceneProgressTrace]', {
+        event: 'classroom-still-mounted-after-completion',
+        stageId: classroomId,
+        sceneCount: useStageStore.getState().scenes.length,
+      });
       log.info('[Classroom] All scenes generated');
     },
   });
@@ -168,11 +287,15 @@ export default function ClassroomDetailPage() {
     /* eslint-disable react-hooks/set-state-in-effect -- Course switch must hide stale Stage before async load */
     setLoading(true);
     setError(null);
+    setGenerationProgress(null);
     /* eslint-enable react-hooks/set-state-in-effect */
     // Ownership belongs to the departing course; the new one must re-earn it
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
+    renderEnabledLoggedRef.current = false;
+    sceneStartedAtRef.current = {};
+    completedSceneDurationsRef.current = [];
 
     // Clear previous classroom's media tasks to prevent cross-classroom contamination.
     // Placeholder IDs (gen_img_1, gen_vid_1) are NOT globally unique across stages,
@@ -199,6 +322,16 @@ export default function ClassroomDetailPage() {
     };
   }, [classroomId, loadClassroom, stop]);
 
+  useEffect(() => {
+    if (renderEnabledLoggedRef.current || loading || error || sceneCount === 0) return;
+    renderEnabledLoggedRef.current = true;
+    console.info('[SceneProgressTrace]', {
+      event: 'classroom-render-enabled',
+      stageId: classroomId,
+      sceneCount,
+    });
+  }, [classroomId, error, loading, sceneCount]);
+
   // Narration written before this application stored media server-side is a
   // derived key that only this browser can resolve. The owner's browser still
   // has the bytes, so it converts them once per load, with no provider call.
@@ -214,14 +347,17 @@ export default function ClassroomDetailPage() {
     if (!mayGenerate) return;
 
     const state = useStageStore.getState();
-    const { outlines, scenes, stage, generationComplete } = state;
+    const { outlines, scenes, stage, failedOutlines, generationComplete } = state;
 
     // Check if there are pending outlines. A finished deck is frozen for
     // editing: deleting a slide leaves its outline orphaned, but that must not
     // be treated as an interrupted generation and regenerated. Only resume
     // when generation has not completed.
     const completedOrders = new Set(scenes.map((s) => s.order));
-    const hasPending = !generationComplete && outlines.some((o) => !completedOrders.has(o.order));
+    const failedIds = new Set(failedOutlines.map((outline) => outline.id));
+    const hasPending =
+      !generationComplete &&
+      outlines.some((outline) => !failedIds.has(outline.id) && !completedOrders.has(outline.order));
 
     if (hasPending && stage) {
       generationStartedRef.current = true;
@@ -294,7 +430,7 @@ export default function ClassroomDetailPage() {
   return (
     <ThemeProvider>
       <MediaStageProvider value={classroomId}>
-        <div className="h-screen flex flex-col overflow-hidden">
+        <div className="relative h-screen flex flex-col overflow-hidden">
           {loading ? (
             <div className="flex-1 flex items-center justify-center bg-gray-50 dark:bg-gray-900">
               <div className="text-center text-muted-foreground">
@@ -318,7 +454,23 @@ export default function ClassroomDetailPage() {
               </div>
             </div>
           ) : (
-            <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
+            <>
+              <Stage
+                onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
+                generationStatus={
+                  generationProgress ? (
+                    <LessonGenerationProgress
+                      sceneIndex={generationProgress.sceneIndex}
+                      totalScenes={generationProgress.totalScenes}
+                      phase={generationProgress.phase}
+                      sceneType={generationProgress.sceneType}
+                      etaLabel={generationProgress.etaLabel}
+                      teachingVoiceQueue={generationProgress.teachingVoiceQueue}
+                    />
+                  ) : undefined
+                }
+              />
+            </>
           )}
         </div>
       </MediaStageProvider>

@@ -25,6 +25,7 @@ import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { llmApiError } from '@/lib/server/llm-error-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import type { LLMRoutingPolicy } from '@/lib/server/llm-router';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
 import { MAX_VISION_IMAGES } from '@/lib/constants/generation';
 import { sortDocumentImagesForVision } from '@/lib/document/bundle';
@@ -40,9 +41,25 @@ import {
   type VisionPromptImage,
 } from '@/lib/persistence/resolve-vision-images';
 import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
+import {
+  createGenerationTimingCollector,
+  logSceneGenerationTiming,
+  shouldCollectLLMRouteTiming,
+  withRouteTiming,
+} from '@/lib/server/generation-timing';
+import {
+  admitSceneGenerationAttempt,
+  createSceneGenerationVersion,
+  runSceneAttemptContent,
+  SceneGenerationAttemptError,
+} from '@/lib/server/scene-generation-attempts';
 
 const log = createLogger('Scene Content API');
 const SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS = 3000;
+const SIMULATION_HOSTING_MARGIN_MS = 10_000;
+const SIMULATION_TOTAL_BUDGET_MS = 290_000;
+const SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS = 30_000;
+const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS = 12_000;
 
 export const maxDuration = 300;
 
@@ -64,6 +81,33 @@ const VISION_RESOLUTION_BUDGET_MS = 15_000;
  */
 const MAX_CONSECUTIVE_UNRESOLVABLE_VISION_IMAGES = 3;
 
+function positiveEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+    log.warn(`Invalid ${name}; using default ${fallback}.`);
+    return fallback;
+  }
+  return value;
+}
+
+function isSimulationOutline(outline: SceneOutline): boolean {
+  return outline.type === 'interactive' && outline.widgetType === 'simulation';
+}
+
+function maxOutputTokensForScene(
+  outline: SceneOutline,
+  outputWindow: number | undefined,
+): number | undefined {
+  if (!isSimulationOutline(outline)) return outputWindow;
+  const simulationCap = positiveEnvInt(
+    'SCENE_CONTENT_SIMULATION_MAX_OUTPUT_TOKENS',
+    DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS,
+  );
+  return Math.min(outputWindow ?? simulationCap, simulationCap);
+}
+
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
   let outlineTitle: string | undefined;
@@ -80,6 +124,7 @@ export async function POST(req: NextRequest) {
       agents,
       languageDirective,
       requirements,
+      attemptId: proposedAttemptId,
     } = body as {
       outline: SceneOutline;
       allOutlines: SceneOutline[];
@@ -94,6 +139,7 @@ export async function POST(req: NextRequest) {
       agents?: AgentInfo[];
       languageDirective?: string;
       requirements?: UserRequirements;
+      attemptId?: string;
     };
 
     // Validate required fields
@@ -111,6 +157,9 @@ export async function POST(req: NextRequest) {
       return apiError('MISSING_REQUIRED_FIELD', 400, 'stageId is required');
     }
 
+    const user = await requireSessionUser(req);
+    if (user instanceof Response) return user;
+
     const outline: SceneOutline = { ...rawOutline };
 
     // ── Model resolution from request headers/body ──
@@ -123,6 +172,34 @@ export async function POST(req: NextRequest) {
       modelString,
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, stage);
+    const timingCollector = createGenerationTimingCollector();
+    let simulationBudget: LLMRoutingPolicy['simulationBudget'];
+    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
+      if (isSimulationOutline(effectiveOutline)) {
+        const simulationTotalBudgetMs = positiveEnvInt(
+          'SCENE_CONTENT_SIMULATION_TOTAL_BUDGET_MS',
+          SIMULATION_TOTAL_BUDGET_MS,
+        );
+        const simulationUpstreamAttemptBudgetMs = positiveEnvInt(
+          'SCENE_CONTENT_SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS',
+          SIMULATION_UPSTREAM_ATTEMPT_BUDGET_MS,
+        );
+        // Simulation HTML is expensive, but the useful local fallback should
+        // receive most of the bounded scene budget. Upstream tiers get short
+        // probes; generation and any repair share the same absolute deadline.
+        simulationBudget ??= {
+          startedAtMs: Date.now(),
+          deadlineMs: startedAt + maxDuration * 1000 - SIMULATION_HOSTING_MARGIN_MS,
+          totalBudgetMs: simulationTotalBudgetMs,
+          upstreamAttemptBudgetMs: simulationUpstreamAttemptBudgetMs,
+        };
+      }
+      const routingPolicy = {
+        ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
+        ...(simulationBudget ? { simulationBudget } : {}),
+      };
+      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
+    };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
 
@@ -149,37 +226,27 @@ export async function POST(req: NextRequest) {
         // bytes the base64 path would send BEFORE prompt assembly, keeping the
         // vision prompt byte-identical in both modes (RFC #1153 part 2 B).
         const resolvedImages = await resolveVisionImagesForPrompt(images, req.headers);
-        const result = await callLLM(
-          {
-            model: languageModel,
-            system: systemPrompt,
-            messages: [
-              {
-                role: 'user' as const,
-                content: buildVisionUserContent(userPrompt, resolvedImages),
-              },
-            ],
-            maxOutputTokens: modelInfo?.outputWindow,
-            maxRetries: 0,
-          },
-          'scene-content',
-          undefined,
-          thinkingConfig,
-        );
-        return result.text;
-      }
-      const result = await callLLM(
-        {
+        const result = await invokeSceneContentLLM({
           model: languageModel,
           system: systemPrompt,
-          prompt: userPrompt,
-          maxOutputTokens: modelInfo?.outputWindow,
+          messages: [
+            {
+              role: 'user' as const,
+              content: buildVisionUserContent(userPrompt, resolvedImages),
+            },
+          ],
+          maxOutputTokens: maxOutputTokensForScene(effectiveOutline, modelInfo?.outputWindow),
           maxRetries: 0,
-        },
-        'scene-content',
-        undefined,
-        thinkingConfig,
-      );
+        });
+        return result.text;
+      }
+      const result = await invokeSceneContentLLM({
+        model: languageModel,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxOutputTokens: maxOutputTokensForScene(effectiveOutline, modelInfo?.outputWindow),
+        maxRetries: 0,
+      });
       return result.text;
     };
 
@@ -187,6 +254,20 @@ export async function POST(req: NextRequest) {
     const vocationalActive = resolveVocationalActive(requirements);
     const effectiveOutline = applyOutlineFallbacks(outline, !!languageModel, {
       allowProceduralSkill: vocationalActive,
+    });
+    const generationVersion = createSceneGenerationVersion({ outline, allOutlines });
+    const admission = admitSceneGenerationAttempt({
+      ownerUserId: user.id,
+      stageId,
+      outlineId: effectiveOutline.id,
+      generationVersion,
+      proposedAttemptId,
+    });
+    const attemptIdentity = admission.identity;
+    log.info('[SceneGenerationTrace]', {
+      event: admission.reused ? 'scene-attempt-reused' : 'scene-attempt-admitted',
+      ...attemptIdentity,
+      sceneIndex: effectiveOutline.order,
     });
 
     // ── Filter images assigned to this outline ──
@@ -326,9 +407,27 @@ export async function POST(req: NextRequest) {
     const userLocale = req.headers?.get('x-user-locale') ?? '';
 
     const generateResolvedContent = async () => {
+      const phaseStartedAt = Date.now();
+      const routeEventStart = timingCollector.events.length;
       log.info(
         `Generating content: "${effectiveOutline.title}" (${effectiveOutline.type}) [model=${modelString}]`,
       );
+      log.info('[SceneGenerationTrace]', {
+        event: isSimulationOutline(effectiveOutline)
+          ? 'simulation-generation-start'
+          : 'scene-content-start',
+        stageId,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
+        requestId: timingCollector.requestId,
+        outlineId: effectiveOutline.id,
+        sceneIndex: effectiveOutline.order,
+        sceneType: effectiveOutline.type,
+        title: effectiveOutline.title,
+        model: modelString,
+        phase: 'content',
+        status: 'started',
+      });
 
       const content = await generateSceneContent(effectiveOutline, aiCall, {
         assignedImages,
@@ -356,23 +455,89 @@ export async function POST(req: NextRequest) {
       });
 
       if (!content) {
+        logSceneGenerationTiming(
+          withRouteTiming(
+            {
+              requestId: timingCollector.requestId,
+              phase: 'content',
+              stageId,
+              outlineId: effectiveOutline.id,
+              sceneType: effectiveOutline.type,
+              status: 'failed',
+              durationMs: Date.now() - phaseStartedAt,
+            },
+            timingCollector.events.slice(routeEventStart),
+          ),
+        );
         log.error(
           `Failed to generate content for: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,
         );
+        log.info('[SceneGenerationTrace]', {
+          event: isSimulationOutline(effectiveOutline)
+            ? 'simulation-generation-failed'
+            : 'scene-content-failed',
+          stageId,
+          requestId: timingCollector.requestId,
+          outlineId: effectiveOutline.id,
+          sceneIndex: effectiveOutline.order,
+          sceneType: effectiveOutline.type,
+          title: effectiveOutline.title,
+          model: modelString,
+          phase: 'content',
+          durationMs: Date.now() - phaseStartedAt,
+          status: 'failed',
+        });
         return { content: null, effectiveOutline };
       }
+
+      logSceneGenerationTiming(
+        withRouteTiming(
+          {
+            requestId: timingCollector.requestId,
+            phase: 'content',
+            stageId,
+            outlineId: effectiveOutline.id,
+            sceneType: effectiveOutline.type,
+            status: 'success',
+            durationMs: Date.now() - phaseStartedAt,
+            elementCount: 'elements' in content ? content.elements.length : undefined,
+          },
+          timingCollector.events.slice(routeEventStart),
+        ),
+      );
 
       log.info(
         `Content generated successfully: "${effectiveOutline.title}" [durationMs=${Date.now() - startedAt}]`,
       );
+      log.info('[SceneGenerationTrace]', {
+        event: isSimulationOutline(effectiveOutline)
+          ? 'simulation-generation-complete'
+          : 'scene-content-complete',
+        stageId,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
+        requestId: timingCollector.requestId,
+        outlineId: effectiveOutline.id,
+        sceneIndex: effectiveOutline.order,
+        sceneType: effectiveOutline.type,
+        title: effectiveOutline.title,
+        model: modelString,
+        phase: 'content',
+        durationMs: Date.now() - phaseStartedAt,
+        status: 'completed',
+      });
 
       return { content, effectiveOutline };
     };
+    const generateAuthoritativeContent = async () => {
+      const result = await generateResolvedContent();
+      if (!result.content) {
+        throw new Error(`Failed to generate content: ${effectiveOutline.title}`);
+      }
+      return { content: result.content, effectiveOutline: result.effectiveOutline };
+    };
 
-    if (effectiveOutline.type === 'interactive' && effectiveOutline.widgetType === 'simulation') {
-      const user = await requireSessionUser(req);
-      if (user instanceof Response) return user;
-
+    if (isSimulationOutline(effectiveOutline)) {
       const dedupeKey = createSceneContentDedupeKey({
         ownerUserId: user.id,
         stageId,
@@ -387,6 +552,7 @@ export async function POST(req: NextRequest) {
         thinkingConfig,
         userLocale,
         hasVision,
+        generationVersion,
       });
       const { job, reused } = createOrReuseSceneContentJob({
         ownerUserId: user.id,
@@ -394,6 +560,8 @@ export async function POST(req: NextRequest) {
         stageId,
         outlineId: effectiveOutline.id,
         outlineTitle: effectiveOutline.title,
+        attemptId: attemptIdentity.attemptId,
+        generationVersion: attemptIdentity.generationVersion,
         widgetType: effectiveOutline.widgetType,
         modelString,
       });
@@ -401,10 +569,11 @@ export async function POST(req: NextRequest) {
       if (!reused) {
         after(() =>
           runSceneContentJob(job.id, async () => {
-            const result = await generateResolvedContent();
-            if (!result.content) {
-              throw new Error(`Failed to generate content: ${effectiveOutline.title}`);
-            }
+            const result = await runSceneAttemptContent(
+              user.id,
+              attemptIdentity,
+              generateAuthoritativeContent,
+            );
             return {
               content: result.content,
               effectiveOutline: result.effectiveOutline,
@@ -426,6 +595,10 @@ export async function POST(req: NextRequest) {
           async: true,
           jobId: job.id,
           status: job.status,
+          stageId: job.stageId,
+          outlineId: job.outlineId,
+          attemptId: job.attemptId,
+          generationVersion: job.generationVersion,
           pollUrl: `${buildRequestOrigin(req)}/api/generate/scene-content/status?jobId=${job.id}`,
           pollIntervalMs: SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS,
           done: job.status === 'completed' || job.status === 'failed',
@@ -441,17 +614,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { content } = await generateResolvedContent();
-    if (!content) {
-      return apiError(
-        'GENERATION_FAILED',
-        500,
-        `Failed to generate content: ${effectiveOutline.title}`,
-      );
-    }
+    const { content } = await runSceneAttemptContent(
+      user.id,
+      attemptIdentity,
+      generateAuthoritativeContent,
+    );
 
-    return apiSuccess({ content, effectiveOutline });
+    return apiSuccess({ content, effectiveOutline, ...attemptIdentity });
   } catch (error) {
+    if (error instanceof SceneGenerationAttemptError) {
+      log.info('[SceneGenerationTrace]', {
+        event: 'scene-attempt-stale-rejected',
+        errorCode: error.code,
+      });
+      return apiError(error.code, 409, error.message);
+    }
     log.error(
       `Scene content generation failed [scene="${outlineTitle ?? 'unknown'}", model=${resolvedModelString ?? 'unknown'}, durationMs=${Date.now() - startedAt}]:`,
       error,

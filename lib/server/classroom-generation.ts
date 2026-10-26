@@ -37,6 +37,13 @@ import type { UserRequirements } from '@/lib/types/generation';
 import type { Scene, Stage } from '@/lib/types/stage';
 import { AGENT_COLOR_PALETTE, AGENT_DEFAULT_AVATARS } from '@/lib/constants/agent-defaults';
 import { incrementClassroomsCreated } from '@/lib/auth/server';
+import {
+  createGenerationTimingCollector,
+  logCourseGenerationTiming,
+  logSceneGenerationTiming,
+  shouldCollectLLMRouteTiming,
+  withRouteTiming,
+} from '@/lib/server/generation-timing';
 
 const log = createLogger('Classroom');
 
@@ -183,6 +190,22 @@ export async function generateClassroom(
   },
 ): Promise<GenerateClassroomResult> {
   const { requirement, pdfContent } = input;
+  const courseStartedAt = Date.now();
+  let contentDurationMs = 0;
+  let actionsDurationMs = 0;
+  let mediaDurationMs: number | undefined;
+  let ttsDurationMs: number | undefined;
+  let failedSceneCount = 0;
+  const courseTiming = createGenerationTimingCollector();
+  const callGenerationLLM = (
+    params: Parameters<typeof callLLM>[0],
+    source: string,
+    thinking: ThinkingConfig | undefined,
+    timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
+  ) =>
+    shouldCollectLLMRouteTiming() && timingCollector
+      ? callLLM(params, source, undefined, thinking, timingCollector.routingPolicy)
+      : callLLM(params, source, undefined, thinking);
 
   await options.onProgress?.({
     step: 'initializing',
@@ -218,7 +241,7 @@ export async function generateClassroom(
   let searchQueryThinking = classroomThinking;
 
   const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
-    const result = await callLLM(
+    const result = await callGenerationLLM(
       {
         model: languageModel,
         messages: [
@@ -228,8 +251,8 @@ export async function generateClassroom(
         maxOutputTokens: modelInfo?.outputWindow,
       },
       'generate-classroom',
-      undefined,
       classroomThinking,
+      courseTiming,
     );
     return result.text;
   };
@@ -310,11 +333,14 @@ export async function generateClassroom(
   // and thinking config, because PBL scene generation drives its own LLM
   // calls through the model object (generatePBLSceneContent) rather than the
   // aiCall closure, and consumes the route's thinking config separately.
-  const resolveSceneContentCall = async (outlineType?: string) => {
+  const resolveSceneContentCall = async (
+    outlineType?: string,
+    timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
+  ) => {
     const stage = (outlineType ? `scene-content:${outlineType}` : 'scene-content') as LlmStage;
     const { model, outputWindow, thinking } = await resolveStageModel(stage);
     const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
-      const result = await callLLM(
+      const result = await callGenerationLLM(
         {
           model,
           messages: [
@@ -325,8 +351,8 @@ export async function generateClassroom(
           maxRetries: 0,
         },
         'generate-classroom-scene',
-        undefined,
         thinking,
+        timingCollector,
       );
       return result.text;
     };
@@ -340,7 +366,7 @@ export async function generateClassroom(
     if (agentProfilesAiCall) return agentProfilesAiCall;
     const { model, outputWindow, thinking } = await resolveStageModel('agent-profiles');
     agentProfilesAiCall = async (systemPrompt, userPrompt, _images) => {
-      const result = await callLLM(
+      const result = await callGenerationLLM(
         {
           model,
           messages: [
@@ -350,8 +376,8 @@ export async function generateClassroom(
           maxOutputTokens: outputWindow,
         },
         'generate-classroom',
-        undefined,
         thinking,
+        courseTiming,
       );
       return result.text;
     };
@@ -359,12 +385,12 @@ export async function generateClassroom(
   };
 
   // scene-actions routes via the `scene-actions` stage.
-  let sceneActionsAiCall: AICallFn | undefined;
-  const getSceneActionsAiCall = async (): Promise<AICallFn> => {
-    if (sceneActionsAiCall) return sceneActionsAiCall;
+  const getSceneActionsAiCall = async (
+    timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
+  ): Promise<AICallFn> => {
     const { model, outputWindow, thinking } = await resolveStageModel('scene-actions');
-    sceneActionsAiCall = async (systemPrompt, userPrompt, _images) => {
-      const result = await callLLM(
+    return async (systemPrompt, userPrompt, _images) => {
+      const result = await callGenerationLLM(
         {
           model,
           messages: [
@@ -375,16 +401,15 @@ export async function generateClassroom(
           maxRetries: 0,
         },
         'generate-classroom-scene',
-        undefined,
         thinking,
+        timingCollector,
       );
       return result.text;
     };
-    return sceneActionsAiCall;
   };
 
   const searchQueryAiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
-    const result = await callLLM(
+    const result = await callGenerationLLM(
       {
         model: searchQueryModel,
         messages: [
@@ -394,8 +419,8 @@ export async function generateClassroom(
         maxOutputTokens: 256,
       },
       'web-search-query-rewrite',
-      undefined,
       searchQueryThinking,
+      courseTiming,
     );
     return result.text;
   };
@@ -593,7 +618,10 @@ export async function generateClassroom(
     // Resolve this scene's content model lazily, per outline type. The package
     // gets the provider-bound AICallFn and the app injects its agentic PBL loop
     // as the classified fallback, preserving single-call → loop routing.
-    const contentCall = await resolveSceneContentCall(safeOutline.type);
+    let contentRetryAttempts = 0;
+    const contentTiming = createGenerationTimingCollector();
+    const contentStartedAt = Date.now();
+    const contentCall = await resolveSceneContentCall(safeOutline.type, contentTiming);
     const content = await (async () => {
       try {
         return await withGenerationRetry(
@@ -618,34 +646,104 @@ export async function generateClassroom(
           {
             label: `scene ${index + 1}/${outlines.length} content`,
             shouldRetryResult: (result) => result === null,
-            onRetry: (event) => reportSceneRetry('content', event),
+            onRetry: (event) => {
+              contentRetryAttempts = event.attempt;
+              return reportSceneRetry('content', event);
+            },
           },
         );
       } catch (error) {
         return containPBLGenerationError(error, safeOutline.title);
       }
     })();
+    const contentElapsedMs = Date.now() - contentStartedAt;
+    contentDurationMs += contentElapsedMs;
+    logSceneGenerationTiming(
+      withRouteTiming(
+        {
+          requestId: contentTiming.requestId,
+          phase: 'content',
+          stageId,
+          outlineId: safeOutline.id,
+          sceneType: safeOutline.type,
+          status: content ? 'success' : 'skipped',
+          durationMs: contentElapsedMs,
+          retryAttempts: contentRetryAttempts,
+          elementCount: content && 'elements' in content ? content.elements.length : undefined,
+        },
+        contentTiming.events,
+      ),
+    );
     if (!content) {
+      failedSceneCount += 1;
       log.warn(`Skipping scene "${safeOutline.title}" — content generation failed`);
       continue;
     }
 
-    const actionsAiCall = await getSceneActionsAiCall();
-    const actions = await withGenerationRetry(
-      () =>
-        generateSceneActions(safeOutline, content, actionsAiCall, {
-          agents,
-          languageDirective,
-        }),
-      {
-        label: `scene ${index + 1}/${outlines.length} actions`,
-        onRetry: (event) => reportSceneRetry('actions', event),
-      },
+    let actionRetryAttempts = 0;
+    const actionsTiming = createGenerationTimingCollector();
+    const actionsStartedAt = Date.now();
+    const actionsAiCall = await getSceneActionsAiCall(actionsTiming);
+    let actions: Awaited<ReturnType<typeof generateSceneActions>>;
+    try {
+      actions = await withGenerationRetry(
+        () =>
+          generateSceneActions(safeOutline, content, actionsAiCall, {
+            agents,
+            languageDirective,
+          }),
+        {
+          label: `scene ${index + 1}/${outlines.length} actions`,
+          onRetry: (event) => {
+            actionRetryAttempts = event.attempt;
+            return reportSceneRetry('actions', event);
+          },
+        },
+      );
+    } catch (error) {
+      const actionsElapsedMs = Date.now() - actionsStartedAt;
+      actionsDurationMs += actionsElapsedMs;
+      failedSceneCount += 1;
+      logSceneGenerationTiming(
+        withRouteTiming(
+          {
+            requestId: actionsTiming.requestId,
+            phase: 'actions',
+            stageId,
+            outlineId: safeOutline.id,
+            sceneType: safeOutline.type,
+            status: 'failed',
+            durationMs: actionsElapsedMs,
+            retryAttempts: actionRetryAttempts,
+          },
+          actionsTiming.events,
+        ),
+      );
+      throw error;
+    }
+    const actionsElapsedMs = Date.now() - actionsStartedAt;
+    actionsDurationMs += actionsElapsedMs;
+    logSceneGenerationTiming(
+      withRouteTiming(
+        {
+          requestId: actionsTiming.requestId,
+          phase: 'actions',
+          stageId,
+          outlineId: safeOutline.id,
+          sceneType: safeOutline.type,
+          status: 'success',
+          durationMs: actionsElapsedMs,
+          retryAttempts: actionRetryAttempts,
+          actionCount: actions.length,
+        },
+        actionsTiming.events,
+      ),
     );
     log.info(`Scene "${safeOutline.title}": ${actions.length} actions`);
 
     const sceneId = createSceneWithActions(safeOutline, content, actions, api);
     if (!sceneId) {
+      failedSceneCount += 1;
       log.warn(`Skipping scene "${safeOutline.title}" — scene creation failed`);
       continue;
     }
@@ -679,7 +777,9 @@ export async function generateClassroom(
     });
 
     try {
+      const mediaStartedAt = Date.now();
       const mediaMap = await generateMediaForClassroom(outlines, stageId, options.baseUrl);
+      mediaDurationMs = Date.now() - mediaStartedAt;
       replaceMediaPlaceholders(scenes, mediaMap);
       log.info(`Media generation complete: ${Object.keys(mediaMap).length} files`);
     } catch (err) {
@@ -698,7 +798,9 @@ export async function generateClassroom(
     });
 
     try {
+      const ttsStartedAt = Date.now();
       await generateTTSForClassroom(scenes, stageId, options.baseUrl);
+      ttsDurationMs = Date.now() - ttsStartedAt;
       log.info('TTS generation complete');
     } catch (err) {
       log.warn('TTS generation phase failed, continuing:', err);
@@ -727,6 +829,19 @@ export async function generateClassroom(
   if (input.ownerUserId) {
     await incrementClassroomsCreated(input.ownerUserId);
   }
+
+  logCourseGenerationTiming({
+    requestId: courseTiming.requestId,
+    status: 'success',
+    durationMs: Date.now() - courseStartedAt,
+    sceneCount: outlines.length,
+    generatedSceneCount: scenes.length,
+    failedSceneCount,
+    contentDurationMs,
+    actionsDurationMs,
+    ...(mediaDurationMs === undefined ? {} : { mediaDurationMs }),
+    ...(ttsDurationMs === undefined ? {} : { ttsDurationMs }),
+  });
 
   await options.onProgress?.({
     step: 'completed',

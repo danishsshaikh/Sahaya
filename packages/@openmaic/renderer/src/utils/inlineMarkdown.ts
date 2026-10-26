@@ -1,10 +1,25 @@
+import katex from 'katex';
+
 const MARKDOWN_BOLD_PATTERN = /\*\*([^*\n]+(?:\*(?!\*)[^*\n]*)*)\*\*/g;
 const LATEX_ARROW_PATTERN =
   /\$?\\{1,2}(leftrightarrow|rightarrow|leftarrow|Rightarrow|to)(?![A-Za-z])\$?/g;
 const SKIP_INLINE_MARKDOWN_TAGS = new Set(['code', 'pre', 'kbd', 'samp']);
+const MATH_DELIMITERS = [
+  { open: '$$', close: '$$', displayMode: true },
+  { open: '\\[', close: '\\]', displayMode: true },
+  { open: '\\(', close: '\\)', displayMode: false },
+  { open: '$', close: '$', displayMode: false },
+] as const;
+const LATEX_COMMAND_RE = /\\[a-zA-Z]+/;
+const INLINE_OPERATOR_RE = /[A-Za-z0-9)\]}]\s*[+\-*/]\s*[A-Za-z0-9({\\]/;
+const FORMULA_CHAR_RE = /^[\s0-9A-Za-z\\{}()[\]^_+\-*/=<>≤≥≈.,:;|!%√πθαβγδελμνρσφωΑΒΓΔΘΛΜΝΠΡΣΦΩ]+$/;
+const EQUATION_OR_POWER_RE = /[=<>≤≥≈^_]/;
+const SINGLE_SYMBOL_RE = /^(?:[A-Za-z]|\\[a-zA-Z]+|\d+(?:\.\d+)?)$/;
+const WORD_RE = /[A-Za-z]{3,}/g;
+const MATH_TRIGGER_RE = /(?:^|[^\\])(?:\$\$?|\s*\\[([])/;
 
 function formatInlineMarks(segment: string): string {
-  return segment
+  const marked = segment
     .replace(LATEX_ARROW_PATTERN, (_match, command: string) => {
       switch (command) {
         case 'leftarrow':
@@ -20,6 +35,8 @@ function formatInlineMarks(segment: string): string {
       }
     })
     .replace(MARKDOWN_BOLD_PATTERN, '<strong>$1</strong>');
+
+  return renderDelimitedMath(marked);
 }
 
 function formatTextSegment(segment: string): string {
@@ -87,8 +104,121 @@ function parseOrderedListLine(line: string): { number: number; text: string } | 
   return { number: Number(match[1]), text: match[2].trim() };
 }
 
+function renderDelimitedMath(value: string): string {
+  if (!MATH_TRIGGER_RE.test(value)) return value;
+
+  const output: string[] = [];
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const opening = findNextDelimiter(value, cursor);
+    if (!opening) break;
+
+    output.push(value.slice(cursor, opening.index));
+    const mathStart = opening.index + opening.delimiter.open.length;
+    const closeIndex = findUnescaped(value, opening.delimiter.close, mathStart);
+    if (closeIndex === -1) {
+      output.push(value.slice(opening.index));
+      cursor = value.length;
+      break;
+    }
+
+    const raw = value.slice(opening.index, closeIndex + opening.delimiter.close.length);
+    const latex = value.slice(mathStart, closeIndex).trim();
+    const tooLong = latex.length > 500;
+    const shouldRender =
+      latex.length > 0 &&
+      !tooLong &&
+      (opening.delimiter.open !== '$' || isLikelyDelimitedMathText(latex));
+    const html = shouldRender ? renderLatex(latex, opening.delimiter.displayMode) : null;
+    output.push(
+      html ?? (tooLong ? '<span class="slide-math-unavailable">Formula unavailable</span>' : raw),
+    );
+    cursor = closeIndex + opening.delimiter.close.length;
+  }
+
+  output.push(value.slice(cursor));
+  return output.join('');
+}
+
+function renderLatex(value: string, displayMode: boolean): string | null {
+  try {
+    return katex.renderToString(escapeLiteralPercents(value), {
+      displayMode,
+      output: 'html',
+      strict: false,
+      throwOnError: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function escapeLiteralPercents(value: string): string {
+  let escaped = '';
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '%') {
+      escaped += value[index];
+      continue;
+    }
+    escaped += isEscaped(value, index) ? '%' : '\\%';
+  }
+  return escaped;
+}
+
+function isLikelyDelimitedMathText(value: string): boolean {
+  const text = value.trim();
+  if (!text || !FORMULA_CHAR_RE.test(text)) return false;
+  if (SINGLE_SYMBOL_RE.test(text)) return true;
+  if (LATEX_COMMAND_RE.test(text) || EQUATION_OR_POWER_RE.test(text)) return true;
+  if (INLINE_OPERATOR_RE.test(text) && (text.match(WORD_RE) ?? []).length <= 1) return true;
+  return false;
+}
+
+function findNextDelimiter(
+  value: string,
+  startIndex: number,
+): { delimiter: (typeof MATH_DELIMITERS)[number]; index: number } | null {
+  let match: { delimiter: (typeof MATH_DELIMITERS)[number]; index: number } | null = null;
+
+  for (const delimiter of MATH_DELIMITERS) {
+    const index = findUnescaped(value, delimiter.open, startIndex);
+    if (index === -1) continue;
+    if (
+      !match ||
+      index < match.index ||
+      (index === match.index && delimiter.open.length > match.delimiter.open.length)
+    ) {
+      match = { delimiter, index };
+    }
+  }
+
+  return match;
+}
+
+function findUnescaped(value: string, search: string, startIndex: number): number {
+  let index = value.indexOf(search, startIndex);
+  while (index !== -1) {
+    if (!isEscaped(value, index)) return index;
+    index = value.indexOf(search, index + search.length);
+  }
+  return -1;
+}
+
+function isEscaped(value: string, index: number): boolean {
+  let slashCount = 0;
+  for (let i = index - 1; i >= 0 && value[i] === '\\'; i -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function shouldSkipFormattingTag(token: string, tag: string): boolean {
+  return SKIP_INLINE_MARKDOWN_TAGS.has(tag) || /\bclass\s*=\s*["'][^"']*\bkatex\b/i.test(token);
+}
+
 export function formatInlineMarkdownBold(html: string): string {
-  if (!/[\\*\n•]|<br\s*\/?>|(?:^|\n)\s*(?:[-*]|\d+[.)])\s+/i.test(html)) return html;
+  if (!/[\\*$\n•]|<br\s*\/?>|(?:^|\n)\s*(?:[-*]|\d+[.)])\s+/i.test(html)) return html;
 
   const tokens = html.split(/(<\/?[^>]+>)/g);
   const tagStack: string[] = [];
@@ -122,7 +252,7 @@ export function formatInlineMarkdownBold(html: string): string {
       const opening = /^<\s*([a-z0-9-]+)/i.exec(token);
       if (opening && !/\/\s*>$/.test(token)) {
         const tag = opening[1].toLowerCase();
-        if (SKIP_INLINE_MARKDOWN_TAGS.has(tag)) tagStack.push(tag);
+        if (shouldSkipFormattingTag(token, tag)) tagStack.push(tag);
       }
       output.push(token);
       continue;

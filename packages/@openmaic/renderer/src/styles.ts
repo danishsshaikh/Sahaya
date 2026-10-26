@@ -28,7 +28,12 @@ ${selector} p:empty::before {
   content: '\\00a0';
 }
 ${selector} .katex-display {
-  margin: 0 !important;
+  max-width: 100%;
+  margin: 0.35em 0 !important;
+  overflow: hidden;
+}
+${selector} .katex {
+  max-width: 100%;
 }
 ${selector} ul {
   list-style-position: outside !important;

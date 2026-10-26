@@ -9,6 +9,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 // Note: Window.SpeechSynthesis declaration is already in the global scope
 
 export interface UseBrowserTTSOptions {
+  enabled?: boolean;
   onStart?: () => void;
   onEnd?: () => void;
   onError?: (error: string) => void;
@@ -20,6 +21,7 @@ export interface UseBrowserTTSOptions {
 
 export function useBrowserTTS(options: UseBrowserTTSOptions = {}) {
   const {
+    enabled = true,
     onStart,
     onEnd,
     onError,
@@ -36,7 +38,7 @@ export function useBrowserTTS(options: UseBrowserTTSOptions = {}) {
 
   // Load available voices
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) {
+    if (!enabled || typeof window === 'undefined' || !window.speechSynthesis) {
       return;
     }
 
@@ -57,10 +59,11 @@ export function useBrowserTTS(options: UseBrowserTTSOptions = {}) {
         window.speechSynthesis.onvoiceschanged = null;
       }
     };
-  }, []);
+  }, [enabled]);
 
   const speak = useCallback(
     (text: string, voiceURI?: string) => {
+      if (!enabled) return;
       if (typeof window === 'undefined' || !window.speechSynthesis) {
         onError?.('浏览器不支持 Web Speech API');
         return;
@@ -114,7 +117,7 @@ export function useBrowserTTS(options: UseBrowserTTSOptions = {}) {
       utteranceRef.current = utterance;
       window.speechSynthesis.speak(utterance);
     },
-    [rate, pitch, volume, lang, availableVoices, onStart, onEnd, onError],
+    [enabled, rate, pitch, volume, lang, availableVoices, onStart, onEnd, onError],
   );
 
   const pause = useCallback(() => {

@@ -1,13 +1,16 @@
-import { describe, expect, it, vi } from 'vitest';
-import { PlaybackEngine } from '@/lib/playback/engine';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AUTO_NARRATION_GAP_MS, PlaybackEngine } from '@/lib/playback/engine';
 import {
   canJumpWithinReconstructablePrefix,
   getActionLineProgress,
 } from '@/lib/playback/action-navigation';
 import type { ActionEngine } from '@/lib/action/engine';
-import type { AudioPlayer } from '@/lib/utils/audio-player';
+import { AudioPlayer } from '@/lib/utils/audio-player';
 import type { Action } from '@/lib/types/action';
 import type { Scene } from '@/lib/types/stage';
+
+const audioBytes = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/media/resolve-audio-bytes', () => ({ resolveAudioBlob: audioBytes }));
 
 function speech(id: string, text = id, audioId?: string): Action {
   return { id, type: 'speech', text, ...(audioId ? { audioId } : {}) } as Action;
@@ -159,5 +162,317 @@ describe('PlaybackEngine action-boundary seek compatibility', () => {
     expect(engine.getMode()).toBe('playing');
     expect(play).toHaveBeenCalledWith('audio-2', undefined);
     expect(engine.getSnapshot().actionIndex).toBe(2);
+  });
+});
+
+describe('generated narration completion ownership', () => {
+  const text =
+    'Today we are going to understand how vectors are represented using magnitude and direction in two-dimensional space.';
+  const nextText = 'Next, we will break each vector into horizontal and vertical components.';
+
+  class AudioElement extends EventTarget {
+    static instances: AudioElement[] = [];
+    paused = true;
+    currentTime = 0;
+    duration = 18;
+    playbackRate = 1;
+    defaultPlaybackRate = 1;
+    volume = 1;
+    src = '';
+    constructor() {
+      super();
+      AudioElement.instances.push(this);
+    }
+    play = vi.fn(async () => {
+      this.paused = false;
+    });
+    pause = vi.fn(() => {
+      this.paused = true;
+    });
+    end() {
+      this.paused = true;
+      this.currentTime = this.duration;
+      this.dispatchEvent(new Event('ended'));
+    }
+  }
+
+  const engines: PlaybackEngine[] = [];
+  afterEach(() => {
+    engines.splice(0).forEach((engine) => engine.stop());
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function setup(speed = 1) {
+    vi.useFakeTimers();
+    AudioElement.instances = [];
+    vi.stubGlobal('Audio', AudioElement);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:narration-test');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    audioBytes.mockReset().mockResolvedValue(new Blob(['complete mocked WAV']));
+    const player = new AudioPlayer();
+    player.setPlaybackRate(speed);
+    const onSpeechStart = vi.fn();
+    const onComplete = vi.fn();
+    const engine = new PlaybackEngine(
+      [scene([speech('one', text, 'ast_one'), speech('two', nextText, 'ast_two')])],
+      fakeActionEngine(),
+      player,
+      { onSpeechStart, onComplete, getPlaybackSpeed: () => speed },
+    );
+    engines.push(engine);
+    return { engine, player, onSpeechStart, onComplete };
+  }
+
+  it.each([1, 1.5, 2])(
+    'waits for native ended, not reading estimates, at speed %s',
+    async (speed) => {
+      const { engine, player, onSpeechStart, onComplete } = setup(speed);
+      engine.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(onSpeechStart).toHaveBeenCalledExactlyOnceWith(text);
+      expect(AudioElement.instances).toHaveLength(1);
+      expect(AudioElement.instances[0].playbackRate).toBe(speed);
+      expect(AudioElement.instances[0].pause).not.toHaveBeenCalled();
+      AudioElement.instances[0].end();
+      await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS - 1);
+      expect(onSpeechStart).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(onSpeechStart).toHaveBeenCalledTimes(2);
+      expect(onComplete).not.toHaveBeenCalled();
+      AudioElement.instances[1].end();
+      await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(player.hasActiveAudio()).toBe(false);
+    },
+  );
+
+  it('ignores an old clip completion while the next sentence is still playing', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const oldAudio = AudioElement.instances[0];
+    await engine.jumpToAction(1, { autoplay: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    const currentAudio = AudioElement.instances[1];
+    currentAudio.currentTime = 15; // The final words have not played yet.
+    oldAudio.end(); // A queued completion from the superseded element.
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(currentAudio.pause).not.toHaveBeenCalled();
+    currentAudio.end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes each natural completion once across consecutive speech actions', async () => {
+    const { engine, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = AudioElement.instances[0];
+    first.end();
+    await vi.advanceTimersByTimeAsync(0);
+    first.dispatchEvent(new Event('ended'));
+    expect(onComplete).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('retires the previous element while replacement audio bytes are still loading', async () => {
+    const { engine, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const oldAudio = AudioElement.instances[0];
+    let resolveBytes!: (blob: Blob) => void;
+    audioBytes.mockReturnValueOnce(
+      new Promise<Blob>((resolve) => {
+        resolveBytes = resolve;
+      }),
+    );
+    await engine.jumpToAction(1, { autoplay: true });
+    oldAudio.end();
+    expect(onComplete).not.toHaveBeenCalled();
+    resolveBytes(new Blob(['second complete WAV']));
+    await vi.advanceTimersByTimeAsync(0);
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes the same generated clip without a fallback timer', async () => {
+    const { engine, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = AudioElement.instances[0];
+    first.currentTime = 12;
+    engine.pause();
+    engine.resume();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(first.currentTime).toBe(12);
+    expect(AudioElement.instances).toHaveLength(1);
+    first.end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a pending narration gap when the user jumps manually', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    AudioElement.instances[0].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS / 2);
+
+    await engine.jumpToAction(1, { autoplay: true });
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    expect(onComplete).not.toHaveBeenCalled();
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('pause during generated audio does not duplicate completion or leave a delayed advance', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    engine.pause();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS * 2);
+    expect(onSpeechStart).toHaveBeenCalledTimes(1);
+    engine.resume();
+    AudioElement.instances[0].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    AudioElement.instances[1].end();
+    await vi.advanceTimersByTimeAsync(AUTO_NARRATION_GAP_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains estimated reading progression when generated audio is unavailable', async () => {
+    const { engine, onSpeechStart, onComplete } = setup();
+    audioBytes.mockResolvedValue(null);
+    engine.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onSpeechStart).toHaveBeenCalledTimes(2);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(AudioElement.instances).toHaveLength(0);
+  });
+
+  it('does not consume pending generated narration as silent reading progress', async () => {
+    vi.useFakeTimers();
+    const onSpeechStart = vi.fn();
+    const onComplete = vi.fn();
+    const onNarrationPending = vi.fn();
+    const play = vi.fn().mockResolvedValue(true);
+    const pendingScene = {
+      ...scene([speech('pending', 'Narration is still being generated.')]),
+      narrationStatus: 'pending',
+    } as Scene;
+    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(play), {
+      onSpeechStart,
+      onComplete,
+      onNarrationPending,
+    });
+    engines.push(engine);
+
+    engine.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(onSpeechStart).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(engine.getSnapshot().actionIndex).toBe(0);
+    expect(engine.getMode()).toBe('playing');
+    expect(onNarrationPending).toHaveBeenCalledWith('scene-1', 0);
+
+    engine.pause();
+    expect(engine.getMode()).toBe('paused');
+
+    engine.replaceScene({
+      ...pendingScene,
+      actions: [speech('pending', 'Narration is still being generated.', 'ast_ready')],
+    });
+    expect(engine.continuePendingNarration(0)).toBe(false);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it('plays a ready action while aggregate scene narration is still running', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const runningScene = {
+      ...scene([
+        speech('ready', 'Ready narration', 'ast_ready'),
+        speech('pending', 'Pending narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([runningScene], fakeActionEngine(), fakeAudio(play));
+
+    engine.start();
+    await flushPromises();
+
+    expect(play).toHaveBeenCalledWith('ast_ready', undefined);
+    expect(engine.getSnapshot().actionIndex).toBe(1);
+  });
+
+  it('continues a retained Play request at the exact action once narration is ready', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const onNarrationPending = vi.fn();
+    const pendingScene = {
+      ...scene([
+        { id: 'discussion-before-audio', type: 'discussion', topic: 'Already handled' } as Action,
+        speech('ready', 'Ready narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([pendingScene], fakeActionEngine(), fakeAudio(play), {
+      onNarrationPending,
+    });
+
+    expect(engine.continuePendingNarration(1)).toBe(true);
+    expect(onNarrationPending).toHaveBeenCalledWith('scene-1', 1);
+    expect(play).not.toHaveBeenCalled();
+
+    engine.replaceScene({
+      ...pendingScene,
+      actions: [pendingScene.actions[0], speech('ready', 'Ready narration', 'ast_ready')],
+    });
+    expect(engine.continuePendingNarration(1)).toBe(true);
+    await flushPromises();
+
+    expect(play).toHaveBeenCalledWith('ast_ready', undefined);
+    expect(engine.getSnapshot().actionIndex).toBe(2);
+  });
+
+  it('refreshes future narration audio without interrupting the active clip', async () => {
+    const play = vi.fn().mockResolvedValue(true);
+    const audio = fakeAudio(play);
+    const initialScene = {
+      ...scene([
+        speech('active', 'Active narration', 'ast_active'),
+        speech('future', 'Future narration'),
+      ]),
+      narrationStatus: 'running',
+    } as Scene;
+    const engine = new PlaybackEngine([initialScene], fakeActionEngine(), audio);
+    engine.start();
+    await flushPromises();
+
+    expect(
+      engine.replaceScene({
+        ...initialScene,
+        actions: [
+          speech('active', 'Active narration', 'ast_active'),
+          speech('future', 'Future narration', 'ast_future'),
+        ],
+      }),
+    ).toBe(true);
+
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(engine.getMode()).toBe('playing');
+    expect(engine.getSnapshot().actionIndex).toBe(1);
   });
 });

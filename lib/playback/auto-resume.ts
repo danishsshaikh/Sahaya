@@ -1,4 +1,20 @@
 import type { EngineMode } from './types';
+import type { Scene } from '@/lib/types/stage';
+
+export interface PendingNarrationIntent {
+  sceneId: string;
+  actionIndex: number;
+}
+
+export function pendingNarrationIntentState(
+  scene: Scene | undefined,
+  intent: PendingNarrationIntent | null,
+): 'unrelated' | 'pending' | 'ready' {
+  if (!scene || !intent || scene.id !== intent.sceneId) return 'unrelated';
+  const action = scene.actions?.[intent.actionIndex];
+  if (action?.type !== 'speech') return 'unrelated';
+  return action.audioId && !action.audioInvalidated ? 'ready' : 'pending';
+}
 
 /**
  * Where a chat-session cleanup originated. A confirmed or timed-out soft close

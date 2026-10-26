@@ -94,8 +94,10 @@ const stageState = {
   stage: { id: 'stage-1', whiteboard: [] },
   getCurrentScene: () =>
     stageState.scenes.find((candidate) => candidate.id === stageState.currentSceneId),
+  getSceneById: (sceneId: string) =>
+    stageState.scenes.find((candidate) => candidate.id === sceneId),
   scenes: [scene, secondScene] as Array<typeof scene | typeof interactiveScene>,
-  currentSceneId: scene.id,
+  currentSceneId: scene.id as string | null,
   setCurrentSceneId: vi.fn((sceneId: string) => {
     stageState.currentSceneId = sceneId;
   }),
@@ -318,17 +320,24 @@ vi.mock('@/lib/playback', () => ({
     jumpToAction() {
       return Promise.resolve(false);
     }
+    replaceScene() {
+      return true;
+    }
     handleUserInterrupt(text: string) {
       mocks.handleUserInterrupt(text);
       mocks.engineOptions?.onUserInterrupt?.(text);
     }
     start() {}
     continuePlayback() {}
+    continuePendingNarration() {
+      return false;
+    }
     pause() {}
     confirmDiscussion() {}
     skipDiscussion() {}
   },
   computePlaybackView: () => ({ kind: 'idle', isTopicActive: mocks.topicActive }),
+  pendingNarrationIntentState: () => 'unrelated',
   shouldAutoResumeLecture: () => false,
 }));
 vi.mock('@/lib/playback/action-navigation', () => ({
@@ -354,6 +363,7 @@ vi.mock('@/lib/utils/audio-player', () => ({
     setMuted: vi.fn(),
     setVolume: vi.fn(),
     setPlaybackRate: vi.fn(),
+    subscribePlayback: vi.fn(() => () => undefined),
   }),
 }));
 vi.mock('@/lib/hooks/use-discussion-tts', () => ({
@@ -557,6 +567,22 @@ describe('PlaybackChromeRoot element-reference ownership', () => {
         collapsed: false,
       }),
     );
+  });
+
+  it('passes the first generated scene into the mounted presentation canvas immediately', async () => {
+    stageState.scenes = [];
+    stageState.currentSceneId = null;
+    await renderOwner();
+    expect(mocks.canvasProps?.currentScene).toBeUndefined();
+
+    stageState.scenes = [scene];
+    stageState.currentSceneId = scene.id;
+    await rerenderOwner();
+
+    expect(mocks.canvasProps).toMatchObject({
+      currentScene: scene,
+      currentSceneIndex: 0,
+    });
   });
 
   it('skips disabled scenes in Sahaya playback navigation', async () => {

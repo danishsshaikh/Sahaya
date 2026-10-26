@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
       action.audioId || `tts_${action.id}`,
   ),
   speechAudioId: vi.fn((_sceneOrder: number, actionId: string) => `tts_${actionId}`),
+  requestPronunciationRepair: vi.fn(),
 }));
 
 vi.mock('@/lib/hooks/use-i18n', () => ({
@@ -56,6 +57,10 @@ vi.mock('@/lib/audio/regenerate-speech-tts', () => ({
 
 vi.mock('@/lib/hooks/use-scene-generator', () => ({
   fetchSceneActions: mocks.fetchSceneActions,
+}));
+
+vi.mock('@/lib/audio/pronunciation-repair', () => ({
+  requestPronunciationRepair: mocks.requestPronunciationRepair,
 }));
 
 const initialStageState = useStageStore.getState();
@@ -77,6 +82,7 @@ describe('ActionsBar edit-mode narration sync regressions', () => {
     );
     mocks.resolveSpeechAudioId.mockClear();
     mocks.speechAudioId.mockClear();
+    mocks.requestPronunciationRepair.mockReset();
     consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     setupStores(makeSyncedScene());
@@ -107,6 +113,7 @@ describe('ActionsBar edit-mode narration sync regressions', () => {
     );
 
     expect(hasText('edit.timeline.addAction')).toBe(false);
+    expect(hasLabel('edit.tts.fixPronunciation')).toBe(false);
 
     act(() => {
       useStageStore.getState().setMode('edit');
@@ -114,6 +121,80 @@ describe('ActionsBar edit-mode narration sync regressions', () => {
 
     await findText('edit.timeline.addAction');
     expect(hasText('edit.cue.speech')).toBe(true);
+    expect(hasLabel('edit.tts.fixPronunciation')).toBe(true);
+  });
+
+  it('does not gate pronunciation repair on narration work in another scene', async () => {
+    const current = makeSyncedScene();
+    const unrelated = {
+      ...makeSyncedScene(),
+      id: 'scene-2',
+      order: 2,
+      outlineId: 'outline-2',
+      narrationStatus: 'running' as const,
+    };
+    setupStores(current, [current, unrelated]);
+
+    mountActionsBar();
+    await findText('edit.timeline.addAction');
+
+    expect(requiredButton('edit.tts.fixPronunciation').disabled).toBe(false);
+  });
+
+  it('keeps pronunciation repair visible but disabled for its own pending audio', async () => {
+    const scene = {
+      ...makeSyncedScene(),
+      narrationStatus: 'running' as const,
+      actions: [speech('speech-1', 'Narration still generating.', '')],
+    };
+    setupStores(scene);
+
+    mountActionsBar();
+    await findText('edit.timeline.addAction');
+
+    const repair = requiredButton('edit.tts.fixPronunciation');
+    expect(repair.disabled).toBe(true);
+    expect(repair.title).toBe('edit.tts.pronunciationVoicePending');
+  });
+
+  it('opens pronunciation repair for the exact narration action card', async () => {
+    const scene = {
+      ...makeSyncedScene(),
+      actions: [
+        speech('speech-1', 'First narration.', 'audio-first'),
+        speech('speech-2', 'Hinduism, Buddhism, and Jainism.', 'audio-second'),
+      ],
+    };
+    setupStores(scene);
+
+    mountActionsBar();
+    await findText('edit.timeline.addAction');
+    const controls = mounted?.container.querySelectorAll(
+      '[aria-label="edit.tts.fixPronunciation"]',
+    );
+    expect(controls).toHaveLength(2);
+
+    act(() => (controls?.[1] as HTMLButtonElement).click());
+
+    await waitForCondition(
+      () =>
+        document.querySelector('[data-testid="pronunciation-original-text"]')?.textContent ===
+        'Hinduism, Buddhism, and Jainism.',
+    );
+  });
+
+  it('exposes pronunciation repair for Teaching Voice without the generic TTS toggle', async () => {
+    const scene = makeSyncedScene();
+    setupStores(scene);
+    useStageStore.setState((state) => ({
+      stage: state.stage ? { ...state.stage, teacherVoiceProfileId: 'faculty-voice' } : state.stage,
+    }));
+    useSettingsStore.setState({ ttsEnabled: false });
+
+    mountActionsBar();
+    await findText('edit.timeline.addAction');
+
+    expect(hasLabel('edit.tts.fixPronunciation')).toBe(true);
   });
 
   it('ignores unrelated settings updates without entering an external-store loop', async () => {

@@ -3,11 +3,23 @@
 import { useEffect, useState, Suspense, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
-import { CheckCircle2, Sparkles, AlertCircle, AlertTriangle, ArrowLeft, Bot } from 'lucide-react';
+import {
+  CheckCircle2,
+  Sparkles,
+  AlertCircle,
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  FileText,
+  ListTree,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { OutlinesEditor } from '@/components/generation/outlines-editor';
+import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 import { cn } from '@/lib/utils';
 import { useStageStore } from '@/lib/store/stage';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -19,17 +31,26 @@ import {
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
+import {
+  GenerationTeachingVoiceProfileError,
+  resolveGenerationTeachingVoiceProfileId,
+} from '@/lib/voice-cloning/selection-client';
+import {
+  normalizeTeachingVoiceLanguageId,
+  type TeachingVoiceLanguage,
+} from '@/lib/voice-cloning/language';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
   fetchSceneActions,
   fetchSceneContent,
-  generateTTSForScene,
+  commitSceneAttempt,
 } from '@/lib/hooks/use-scene-generator';
 import { isAbortError } from '@openmaic/generation';
 import { FOREGROUND_SCENE_RETRY_OPTIONS } from './foreground-retry';
 import {
   loadImageMapping,
   loadDocumentBlob,
+  deleteDocumentBlob,
   cleanupOldImages,
   storeImages,
 } from '@/lib/utils/image-storage';
@@ -42,13 +63,23 @@ import {
   buildDocumentBundle,
   type ParsedDocumentPart,
 } from '@/lib/document/bundle';
+import {
+  extractDocumentBatch,
+  hasUnresolvedDocumentSources,
+  removeDocumentSourceById,
+  updateDocumentSourceProcessing,
+} from '@/lib/document/extraction-batch';
 import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
 import {
   shouldGenerateClassroomAgents,
   teacherOnlyAgentIds,
   teacherOnlyAgentInfo,
 } from '@/lib/generation/agent-mode';
-import { isGeneratedClassroomAgentsEnabled } from '@/lib/config/feature-flags';
+import {
+  isGeneratedClassroomAgentsEnabled,
+  isStaticVoiceEnabled,
+  isVoiceCloningEnabled,
+} from '@/lib/config/feature-flags';
 import { nanoid } from 'nanoid';
 import type { GeneratedAgentConfig, Stage } from '@/lib/types/stage';
 import type {
@@ -59,6 +90,8 @@ import type {
 } from '@/lib/types/generation';
 import { AgentRevealModal } from '@/components/agent/agent-reveal-modal';
 import { createLogger } from '@/lib/logger';
+import type { LessonGenerationPhase } from '@/lib/generation/progress';
+import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
 import {
   type GenerationSessionState,
   ALL_STEPS,
@@ -67,6 +100,14 @@ import {
 } from './types';
 import { StepVisualizer } from './components/visualizers';
 import { resolveTaskEngineModeFromOutlineDoneEvent } from './vocational-mode';
+import {
+  normalizeGenerationPreviewLanguageState,
+  resolveGenerationPreviewLanguage,
+  validateGenerationPreviewVoiceSelection,
+} from './voice-language';
+import { sceneWithPendingNarration } from '@/lib/generation/scene-narration';
+import { finalizeFirstSceneVisual } from '@/lib/generation/first-scene-lifecycle';
+import { toast } from 'sonner';
 
 const log = createLogger('GenerationPreview');
 const OUTLINE_REVIEW_AUTO_CONTINUE_MS = 2500;
@@ -104,6 +145,17 @@ type SceneGenerationFailure = {
   statusCode?: number;
 };
 
+type PreviewGenerationProgress = {
+  stageId?: string;
+  sceneIndex: number;
+  totalScenes: number;
+  phase: LessonGenerationPhase;
+  sceneType?: SceneOutline['type'];
+  sceneStartedAt: number;
+  completedSceneDurationsMs: number[];
+  etaLabel: string;
+};
+
 function GenerationPreviewContent() {
   const router = useRouter();
   const { t } = useI18n();
@@ -111,6 +163,10 @@ function GenerationPreviewContent() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const outlineReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outlineReviewResolveRef = useRef<((outlines: SceneOutline[]) => void) | null>(null);
+  const parsedDocumentPartsRef = useRef(new Map<string, ParsedDocumentPart>());
+  const sourceReviewResolveRef = useRef<
+    ((result: { sources: SessionDocumentSource[]; parts: ParsedDocumentPart[] }) => void) | null
+  >(null);
   // Sticky flag: true once the user signals review intent (either by clicking the
   // streaming card mid-stream, or by restoring a session that was already in review).
   // Combined with `reviewOutlineEnabled` to decide whether the post-stream timer fires.
@@ -118,11 +174,15 @@ function GenerationPreviewContent() {
   const { profiles: voiceProfiles } = useAllVoiceProfiles();
 
   const [session, setSession] = useState<GenerationSessionState | null>(null);
+  const sessionRef = useRef<GenerationSessionState | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isComplete] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [generationProgress, setGenerationProgress] = useState<PreviewGenerationProgress | null>(
+    null,
+  );
   const [streamingOutlines, setStreamingOutlines] = useState<SceneOutline[] | null>(null);
   const [isOutlineStreaming, setIsOutlineStreaming] = useState(false);
   const [truncationWarnings, setTruncationWarnings] = useState<string[]>([]);
@@ -146,10 +206,38 @@ function GenerationPreviewContent() {
   const reviewOutlineEnabled = useSettingsStore((s) => s.reviewOutlineEnabled);
   const setReviewOutlineEnabled = useSettingsStore((s) => s.setReviewOutlineEnabled);
 
+  const updateGenerationProgress = (
+    event: string,
+    next: Omit<PreviewGenerationProgress, 'completedSceneDurationsMs' | 'etaLabel'> & {
+      completedSceneDurationsMs?: number[];
+    },
+  ) => {
+    const progress = {
+      ...next,
+      completedSceneDurationsMs: next.completedSceneDurationsMs ?? [],
+      etaLabel: lessonGenerationEtaLabel({
+        completedSceneDurationsMs: next.completedSceneDurationsMs ?? [],
+        currentSceneElapsedMs: Date.now() - next.sceneStartedAt,
+        sceneIndex: next.sceneIndex,
+        totalScenes: next.totalScenes,
+      }),
+    };
+    setGenerationProgress(progress);
+    console.info('[SceneProgressTrace]', {
+      event,
+      stageId: progress.stageId,
+      sceneIndex: progress.sceneIndex,
+      totalScenes: progress.totalScenes,
+      phase: progress.phase,
+      elapsedMs: Date.now() - progress.sceneStartedAt,
+    });
+  };
+
   // Compute active steps based on session state
   const activeSteps = getActiveSteps(session);
   const isOutlineReady = session?.previewPhase === 'outline-ready';
   const isReviewingOutlines = session?.previewPhase === 'review';
+  const isReviewingSources = session?.previewPhase === 'source-review';
 
   const sceneGenerationErrorMessage = (failure: SceneGenerationFailure): string => {
     if (
@@ -180,6 +268,7 @@ function GenerationPreviewContent() {
   };
 
   const persistSession = (nextSession: GenerationSessionState) => {
+    sessionRef.current = nextSession;
     setSession(nextSession);
     sessionStorage.setItem('generationSession', JSON.stringify(nextSession));
   };
@@ -229,7 +318,7 @@ function GenerationPreviewContent() {
     const saved = sessionStorage.getItem('generationSession');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as GenerationSessionState;
+        let parsed = JSON.parse(saved) as GenerationSessionState;
         if (!parsed.previewPhase) {
           parsed.previewPhase = parsed.sceneOutlines?.length ? 'outline-ready' : 'preparing';
         }
@@ -240,6 +329,9 @@ function GenerationPreviewContent() {
           outlineReviewIntentRef.current = true;
         }
         parsed.taskEngineMode = parsed.taskEngineMode === true;
+        parsed = normalizeGenerationPreviewLanguageState(parsed);
+        sessionStorage.setItem('generationSession', JSON.stringify(parsed));
+        sessionRef.current = parsed;
         setSession(parsed);
       } catch (e) {
         log.error('Failed to parse generation session:', e);
@@ -289,6 +381,102 @@ function GenerationPreviewContent() {
     return thinkingConfig ? { ...body, thinkingConfig } : body;
   };
 
+  const extractDocumentSource = async (
+    source: SessionDocumentSource,
+    generationSession: GenerationSessionState,
+    signal: AbortSignal,
+  ): Promise<ParsedDocumentPart> => {
+    const providerId = source.providerId || generationSession.pdfProviderId;
+    const legacySourceConfig = (
+      source as SessionDocumentSource & {
+        providerConfig?: {
+          apiKey?: string;
+          baseUrl?: string;
+          accessKeyId?: string;
+          accessKeySecret?: string;
+        };
+      }
+    ).providerConfig;
+    const providerConfig = generationSession.pdfProviderConfig || legacySourceConfig;
+    const documentBlob = await loadDocumentBlob(source.storageKey);
+    if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
+      throw new Error(t('generation.courseMaterialLoadFailed'));
+    }
+    const documentFile = new File([documentBlob], source.name || 'document.pdf', {
+      type: source.mimeType || documentBlob.type || 'application/pdf',
+    });
+    const parseFormData = new FormData();
+    parseFormData.append('file', documentFile);
+    if (providerId) parseFormData.append('providerId', providerId);
+    if (providerConfig?.apiKey?.trim()) parseFormData.append('apiKey', providerConfig.apiKey);
+    if (providerConfig?.baseUrl?.trim()) parseFormData.append('baseUrl', providerConfig.baseUrl);
+    if (providerConfig?.accessKeyId?.trim()) {
+      parseFormData.append('accessKeyId', providerConfig.accessKeyId);
+    }
+    if (providerConfig?.accessKeySecret?.trim()) {
+      parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
+    }
+    const parseResponse = await fetch('/api/extract-document', {
+      method: 'POST',
+      body: parseFormData,
+      signal,
+    });
+    if (!parseResponse.ok) throw new Error(t('generation.courseMaterialParseFailed'));
+    const parseResult = await parseResponse.json();
+    if (!parseResult.success || !parseResult.data) {
+      throw new Error(t('generation.courseMaterialParseFailed'));
+    }
+    const parseData = parseResult.data;
+    const rawImages = parseData.metadata?.pdfImages;
+    const images = rawImages
+      ? rawImages.map((img: ParsedDocumentResponseImage) => ({
+          id: img.id,
+          src: img.src || '',
+          pageNumber: img.pageNumber ?? 1,
+          description: img.description,
+          width: img.width,
+          height: img.height,
+        }))
+      : ((parseData.images as string[] | undefined) ?? []).map((src, index) => ({
+          id: `img_${index + 1}`,
+          src,
+          pageNumber: 1,
+        }));
+
+    return {
+      source: {
+        id: source.id,
+        name: source.name,
+        size: source.size,
+        lastModified: source.lastModified,
+        mimeType: source.mimeType,
+        order: source.order,
+        providerId,
+        processingStatus: 'ready',
+      },
+      text: parseData.text as string,
+      rawTextLength: (parseData.text as string).length,
+      pageCount: parseData.metadata?.pageCount,
+      images,
+    };
+  };
+
+  const waitForSourceReview = (
+    signal: AbortSignal,
+  ): Promise<{ sources: SessionDocumentSource[]; parts: ParsedDocumentPart[] }> =>
+    new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      sourceReviewResolveRef.current = resolve;
+      const onAbort = () => {
+        sourceReviewResolveRef.current = null;
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+
   // Auto-start generation when session is loaded
   useEffect(() => {
     if (!session || hasStartedRef.current) return;
@@ -297,6 +485,7 @@ function GenerationPreviewContent() {
     const shouldAutoStart =
       !phase ||
       phase === 'preparing' ||
+      phase === 'source-review' ||
       phase === 'generating-content' ||
       // Refresh during early-review: editor is shown but outlines weren't persisted,
       // so kick off SSE again — the editor will receive streaming outlines.
@@ -342,85 +531,52 @@ function GenerationPreviewContent() {
       if (hasPdfToAnalyze) {
         log.debug('=== Generation Preview: Extracting course material bundle ===');
         validateDocumentSources(documentSources, t);
-        const sortedDocumentSources = [...documentSources].sort((a, b) => a.order - b.order);
-        const parsedParts = await Promise.all(
-          sortedDocumentSources.map(async (source): Promise<ParsedDocumentPart> => {
-            const providerId = source.providerId || currentSession.pdfProviderId;
-            const legacySourceConfig = (
-              source as SessionDocumentSource & {
-                providerConfig?: {
-                  apiKey?: string;
-                  baseUrl?: string;
-                  accessKeyId?: string;
-                  accessKeySecret?: string;
-                };
-              }
-            ).providerConfig;
-            const providerConfig = currentSession.pdfProviderConfig || legacySourceConfig;
-            const documentBlob = await loadDocumentBlob(source.storageKey);
-            if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
-              throw new Error(t('generation.courseMaterialLoadFailed'));
-            }
-            const documentFile = new File([documentBlob], source.name || 'document.pdf', {
-              type: source.mimeType || documentBlob.type || 'application/pdf',
-            });
-            const parseFormData = new FormData();
-            parseFormData.append('file', documentFile);
-            if (providerId) parseFormData.append('providerId', providerId);
-            if (providerConfig?.apiKey?.trim())
-              parseFormData.append('apiKey', providerConfig.apiKey);
-            if (providerConfig?.baseUrl?.trim())
-              parseFormData.append('baseUrl', providerConfig.baseUrl);
-            if (providerConfig?.accessKeyId?.trim()) {
-              parseFormData.append('accessKeyId', providerConfig.accessKeyId);
-            }
-            if (providerConfig?.accessKeySecret?.trim()) {
-              parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
-            }
-            const parseResponse = await fetch('/api/extract-document', {
-              method: 'POST',
-              body: parseFormData,
-              signal,
-            });
-            if (!parseResponse.ok) throw new Error(t('generation.courseMaterialParseFailed'));
-            const parseResult = await parseResponse.json();
-            if (!parseResult.success || !parseResult.data) {
-              throw new Error(t('generation.courseMaterialParseFailed'));
-            }
-            const parseData = parseResult.data;
-            const rawImages = parseData.metadata?.pdfImages;
-            const images = rawImages
-              ? rawImages.map((img: ParsedDocumentResponseImage) => ({
-                  id: img.id,
-                  src: img.src || '',
-                  pageNumber: img.pageNumber ?? 1,
-                  description: img.description,
-                  width: img.width,
-                  height: img.height,
-                }))
-              : ((parseData.images as string[] | undefined) ?? []).map((src, i) => ({
-                  id: `img_${i + 1}`,
-                  src,
-                  pageNumber: 1,
-                }));
+        let sortedDocumentSources: SessionDocumentSource[] = [...documentSources]
+          .sort((a, b) => a.order - b.order)
+          .map((source) => ({
+            ...source,
+            processingStatus: 'processing' as const,
+            processingError: undefined,
+          }));
+        currentSession = { ...currentSession, documentSources: sortedDocumentSources };
+        persistSession(currentSession);
 
-            return {
-              source: {
-                id: source.id,
-                name: source.name,
-                size: source.size,
-                lastModified: source.lastModified,
-                mimeType: source.mimeType,
-                order: source.order,
-                providerId,
-              },
-              text: parseData.text as string,
-              rawTextLength: (parseData.text as string).length,
-              pageCount: parseData.metadata?.pageCount,
-              images,
-            };
-          }),
+        const extraction = await extractDocumentBatch(sortedDocumentSources, (source) =>
+          extractDocumentSource(source, currentSession, signal),
         );
+        parsedDocumentPartsRef.current.clear();
+        for (const result of extraction.successes) {
+          parsedDocumentPartsRef.current.set(result.source.id, result.value);
+        }
+        const failedById = new Map(
+          extraction.failures.map((failure) => [failure.source.id, failure.error]),
+        );
+        sortedDocumentSources = sortedDocumentSources.map((source) => ({
+          ...source,
+          processingStatus: failedById.has(source.id) ? 'failed' : 'ready',
+          processingError: failedById.get(source.id),
+        }));
+
+        let parsedParts = extraction.successes.map((result) => result.value);
+        if (extraction.failures.length > 0) {
+          setStatusMessage('Some source files need attention.');
+          currentSession = {
+            ...currentSession,
+            documentSources: sortedDocumentSources,
+            previewPhase: 'source-review',
+          };
+          persistSession(currentSession);
+          const reviewed = await waitForSourceReview(signal);
+          setStatusMessage('');
+          sortedDocumentSources = reviewed.sources;
+          parsedParts = reviewed.parts;
+          currentSession = {
+            ...currentSession,
+            documentSources: sortedDocumentSources,
+            previewPhase: 'preparing',
+          };
+          persistSession(currentSession);
+        }
 
         const bundle = buildDocumentBundle(parsedParts);
         const imageStorageIds = await storeImages(bundle.images);
@@ -443,7 +599,7 @@ function GenerationPreviewContent() {
         // Update session with extracted document data
         const updatedSession = {
           ...currentSession,
-          documentSources,
+          documentSources: sortedDocumentSources,
           pdfText: bundle.text,
           pdfImages,
           imageStorageIds,
@@ -553,11 +709,19 @@ function GenerationPreviewContent() {
       // ── Generate outlines first (infers languageDirective) ──
       let outlines = currentSession.sceneOutlines;
       let languageDirective = currentSession.languageDirective;
+      let lessonLanguage = normalizeTeachingVoiceLanguageId(currentSession.lessonLanguage);
       let courseTitle = currentSession.courseTitle;
 
       const outlineStepIdx = activeSteps.findIndex((s) => s.id === 'outline');
       setCurrentStepIndex(outlineStepIdx >= 0 ? outlineStepIdx : 0);
       if (!outlines || outlines.length === 0) {
+        updateGenerationProgress('generation-ui-start', {
+          stageId,
+          sceneIndex: 1,
+          totalScenes: 1,
+          phase: 'outline',
+          sceneStartedAt: Date.now(),
+        });
         log.debug('=== Generating outlines (SSE) ===');
         setStreamingOutlines([]);
         setIsOutlineStreaming(true);
@@ -565,11 +729,13 @@ function GenerationPreviewContent() {
         const outlineResult = await new Promise<{
           outlines: SceneOutline[];
           languageDirective: string;
+          lessonLanguage?: TeachingVoiceLanguage;
           courseTitle?: string;
           taskEngineMode: boolean;
         }>((resolve, reject) => {
           const collected: SceneOutline[] = [];
           let directive: string | undefined;
+          let sseLanguage: string | null = null;
           let title: string | undefined;
 
           fetch('/api/generate/scene-outlines-stream', {
@@ -615,6 +781,19 @@ function GenerationPreviewContent() {
                         const evt = JSON.parse(line.slice(6));
                         if (evt.type === 'languageDirective') {
                           directive = evt.data;
+                          sseLanguage =
+                            typeof evt.lessonLanguage === 'string' ? evt.lessonLanguage : null;
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-languageDirective',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                         } else if (evt.type === 'courseTitle') {
                           title = evt.data;
                         } else if (evt.type === 'outline') {
@@ -627,16 +806,32 @@ function GenerationPreviewContent() {
                           // succeeding attempt that omits them must fall back, not
                           // inherit the previous attempt's stale values.
                           directive = undefined;
+                          sseLanguage = null;
                           title = undefined;
                           setStreamingOutlines([]);
                           setStatusMessage(t('generation.outlineRetrying'));
                         } else if (evt.type === 'done') {
                           directive = evt.languageDirective || directive;
+                          if (typeof evt.lessonLanguage === 'string') {
+                            sseLanguage = evt.lessonLanguage;
+                          }
+                          const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                            sseLanguage,
+                            languageDirective: directive,
+                          });
+                          log.info('[LessonLanguageTrace]', {
+                            event: 'preview-sse-done',
+                            parsedLanguage: normalizeTeachingVoiceLanguageId(sseLanguage),
+                            resolvedLanguage: resolution.language,
+                            source: resolution.source,
+                            reason: resolution.reason,
+                          });
                           resolve({
                             outlines: evt.outlines || collected,
                             languageDirective:
                               directive ||
                               'Teach in the language that matches the user requirement.',
+                            lessonLanguage: resolution.language || undefined,
                             courseTitle: evt.courseTitle || title,
                             taskEngineMode: resolveTaskEngineModeFromOutlineDoneEvent(evt),
                           });
@@ -652,10 +847,15 @@ function GenerationPreviewContent() {
                   }
                   if (done) {
                     if (collected.length > 0) {
+                      const resolution = resolveGenerationPreviewLanguage(currentSession, {
+                        sseLanguage,
+                        languageDirective: directive,
+                      });
                       resolve({
                         outlines: collected,
                         languageDirective:
                           directive || 'Teach in the language that matches the user requirement.',
+                        lessonLanguage: resolution.language || undefined,
                         // Carry any title latched from a streaming `courseTitle`
                         // event here too — symmetric with languageDirective — so
                         // a stream that ends without an explicit `done` event
@@ -678,9 +878,18 @@ function GenerationPreviewContent() {
 
         outlines = outlineResult.outlines;
         languageDirective = outlineResult.languageDirective;
+        lessonLanguage = outlineResult.lessonLanguage || null;
         courseTitle = outlineResult.courseTitle;
         const effectiveTaskEngineMode = outlineResult.taskEngineMode;
         setIsOutlineStreaming(false);
+        updateGenerationProgress('phase-changed', {
+          stageId,
+          sceneIndex: 1,
+          totalScenes: Math.max(1, outlines.length),
+          phase: 'finalizing',
+          sceneType: outlines[0]?.type,
+          sceneStartedAt: Date.now(),
+        });
 
         // Mid-stream review intent (sticky ref) overrides the auto-continue timer.
         const userOpenedReviewEarly = outlineReviewIntentRef.current;
@@ -690,6 +899,7 @@ function GenerationPreviewContent() {
           ...currentSession,
           sceneOutlines: outlines,
           languageDirective,
+          lessonLanguage: lessonLanguage || undefined,
           courseTitle,
           taskEngineMode: effectiveTaskEngineMode,
           previewPhase: shouldReviewOutlines ? 'review' : 'outline-ready',
@@ -728,9 +938,93 @@ function GenerationPreviewContent() {
       }
       stage.taskEngineMode = currentSession.taskEngineMode === true;
 
+      // Older preview sessions predate the structured field. Resolve once from
+      // the retained directive, then persist it separately for refresh/re-entry.
+      const normalizedLanguageSession = normalizeGenerationPreviewLanguageState(
+        currentSession,
+        languageDirective,
+      );
+      if (normalizedLanguageSession !== currentSession) {
+        currentSession = normalizedLanguageSession;
+        persistSession(currentSession);
+      }
+      lessonLanguage = currentSession.lessonLanguage || null;
+
       // Store languageDirective on the stage
       if (languageDirective) {
         stage.languageDirective = languageDirective;
+      }
+      if (lessonLanguage) {
+        stage.lessonLanguage = lessonLanguage;
+      }
+      // Voice selection precedes language inference. Verify before generating media.
+      if (stage.teacherVoiceProfileId) {
+        const languageResolution = resolveGenerationPreviewLanguage(currentSession, {
+          languageDirective,
+        });
+        log.info('[LessonLanguageTrace]', {
+          event: 'preview-validation-start',
+          lessonLanguage: languageResolution.language,
+          source: languageResolution.source,
+          reason: languageResolution.reason,
+          profileId: stage.teacherVoiceProfileId,
+        });
+        try {
+          const profile = await validateGenerationPreviewVoiceSelection(currentSession);
+          log.info('[LessonLanguageTrace]', {
+            event: 'preview-validation-success',
+            lessonLanguage,
+            stageLanguage: stage.lessonLanguage,
+            profileId: profile?.id,
+            provider: profile?.provider,
+            profileLanguage: profile?.language,
+          });
+        } catch (error) {
+          log.warn('[LessonLanguageTrace]', {
+            event: 'preview-validation-failure',
+            lessonLanguage: languageResolution.language,
+            source: languageResolution.source,
+            reason: error instanceof Error ? error.message : languageResolution.reason || 'unknown',
+            profileId: stage.teacherVoiceProfileId,
+          });
+          const compatibleProfileId = lessonLanguage
+            ? await resolveGenerationTeachingVoiceProfileId(
+                undefined,
+                fetch,
+                undefined,
+                lessonLanguage,
+              )
+            : undefined;
+          if (compatibleProfileId) {
+            stage.teacherVoiceProfileId = compatibleProfileId;
+            currentSession = {
+              ...currentSession,
+              teacherVoiceProfileId: compatibleProfileId,
+            };
+            persistSession(currentSession);
+            await validateGenerationPreviewVoiceSelection(currentSession);
+          } else {
+            stage.teacherVoiceProfileId = undefined;
+            currentSession = { ...currentSession, teacherVoiceProfileId: undefined };
+            persistSession(currentSession);
+            toast.warning(
+              'No Teaching Voice matches this lesson language. The visual lesson will continue without narration.',
+            );
+          }
+        }
+      } else if (lessonLanguage && isVoiceCloningEnabled()) {
+        const compatibleProfileId = await resolveGenerationTeachingVoiceProfileId(
+          undefined,
+          fetch,
+          undefined,
+          lessonLanguage,
+        );
+        if (compatibleProfileId) {
+          stage.teacherVoiceProfileId = compatibleProfileId;
+          currentSession = { ...currentSession, teacherVoiceProfileId: compatibleProfileId };
+          persistSession(currentSession);
+          await validateGenerationPreviewVoiceSelection(currentSession);
+        }
       }
 
       // Adopt the LLM-inferred course title as the stage name when available,
@@ -979,6 +1273,21 @@ function GenerationPreviewContent() {
       store.setGeneratingOutlines(outlines);
 
       const firstOutline = outlines[0];
+      const firstSceneStartedAt = Date.now();
+      log.info('[LessonLanguageTrace]', {
+        event: 'scene-1-generation-start',
+        lessonLanguage: stage.lessonLanguage,
+        profileId: stage.teacherVoiceProfileId,
+        outlineId: firstOutline.id,
+      });
+      updateGenerationProgress('current-scene-changed', {
+        stageId: stage.id,
+        sceneIndex: 1,
+        totalScenes: outlines.length,
+        phase: 'content',
+        sceneType: firstOutline.type,
+        sceneStartedAt: firstSceneStartedAt,
+      });
 
       // Step 2: Generate content (currentStepIndex is already 2)
       const contentData = await fetchSceneContent(
@@ -1000,10 +1309,26 @@ function GenerationPreviewContent() {
       if (!contentData.success || !contentData.content) {
         throw new Error(sceneGenerationErrorMessage(contentData));
       }
+      console.info('[SceneProgressTrace]', {
+        event: 'phase-changed',
+        stageId: stage.id,
+        sceneIndex: 1,
+        totalScenes: outlines.length,
+        phase: 'actions',
+        elapsedMs: Date.now() - firstSceneStartedAt,
+      });
 
       // Generate actions (activate actions step indicator)
       const actionsStepIdx = activeSteps.findIndex((s) => s.id === 'actions');
       setCurrentStepIndex(actionsStepIdx >= 0 ? actionsStepIdx : currentStepIndex + 1);
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              phase: 'actions',
+            }
+          : current,
+      );
 
       const data = await fetchSceneActions(
         {
@@ -1015,6 +1340,8 @@ function GenerationPreviewContent() {
           previousSpeeches: [],
           userProfile,
           languageDirective,
+          attemptId: contentData.attemptId,
+          generationVersion: contentData.generationVersion,
         },
         signal,
         FOREGROUND_SCENE_RETRY_OPTIONS,
@@ -1023,49 +1350,68 @@ function GenerationPreviewContent() {
       if (!data.success || !data.scene) {
         throw new Error(sceneGenerationErrorMessage(data));
       }
-      const firstScene = data.scene;
-
-      // Generate TTS for first scene (part of actions step — blocking)
       if (
+        data.attemptId !== contentData.attemptId ||
+        data.generationVersion !== contentData.generationVersion
+      ) {
+        throw new Error('First scene generation attempt lost authority before commit.');
+      }
+      const narrationEnabled = Boolean(
         stage.teacherVoiceProfileId ||
-        (settings.ttsEnabled &&
+        (isStaticVoiceEnabled() &&
+          settings.ttsEnabled &&
           settings.ttsProviderId !== 'browser-native-tts' &&
           isTTSProviderEnabled(
             settings.ttsProviderId,
             settings.ttsProvidersConfig?.[settings.ttsProviderId],
-          ))
-      ) {
-        const ttsResult = await generateTTSForScene(
-          firstScene,
-          languageDirective,
-          signal,
-          FOREGROUND_SCENE_RETRY_OPTIONS,
-        );
-        if (!ttsResult.success) throw new Error(t('generation.speechFailed'));
+          )),
+      );
+      const authoritativeScene = { ...data.scene, outlineId: firstOutline.id };
+      const firstScene = narrationEnabled
+        ? sceneWithPendingNarration(authoritativeScene)
+        : authoritativeScene;
+      const commitResult = await commitSceneAttempt({
+        attemptId: contentData.attemptId!,
+        generationVersion: contentData.generationVersion!,
+        stageId: stage.id,
+        outlineId: firstOutline.id,
+        sceneId: firstScene.id,
+      });
+      if (!commitResult.success || !commitResult.accepted) {
+        throw new Error(commitResult.error || 'First scene generation attempt could not commit.');
       }
 
-      // Add scene to store and navigate
-      store.addScene(firstScene);
-      store.setCurrentSceneId(firstScene.id);
-
-      // Set remaining outlines as skeleton placeholders
-      const remaining = outlines.filter((o) => o.order !== firstScene.order);
-      store.setGeneratingOutlines(remaining);
-
-      // Store generation params for classroom to continue generation
-      sessionStorage.setItem(
-        'generationParams',
-        JSON.stringify({
-          pdfImages: currentSession.pdfImages,
-          agents,
-          userProfile,
-          languageDirective,
-        }),
-      );
-
-      sessionStorage.removeItem('generationSession');
-      await store.saveToStorage();
-      router.push(`/classroom/${stage.id}`);
+      // Visual readiness is content + actions + authoritative commit. Teaching
+      // Voice is recovered by the classroom's single narration observer after
+      // the pending visual scene is durable and navigable.
+      await finalizeFirstSceneVisual({
+        commitVisual: () => {
+          store.addScene(firstScene);
+          store.setCurrentSceneId(firstScene.id);
+          store.setGeneratingOutlines([]);
+          updateGenerationProgress('scene-complete', {
+            stageId: stage.id,
+            sceneIndex: 1,
+            totalScenes: outlines.length,
+            phase: 'finalizing',
+            sceneType: firstOutline.type,
+            sceneStartedAt: firstSceneStartedAt,
+            completedSceneDurationsMs: [Date.now() - firstSceneStartedAt],
+          });
+          sessionStorage.setItem(
+            'generationParams',
+            JSON.stringify({
+              pdfImages: currentSession.pdfImages,
+              agents,
+              userProfile,
+              languageDirective,
+            }),
+          );
+          sessionStorage.removeItem('generationSession');
+        },
+        persistVisual: () => store.saveToStorage(),
+        navigateToClassroom: () => router.push(`/classroom/${stage.id}`),
+      });
     } catch (err) {
       setIsOutlineStreaming(false);
       // AbortError is expected when navigating away — don't show as error
@@ -1073,7 +1419,9 @@ function GenerationPreviewContent() {
         log.info('[GenerationPreview] Generation aborted');
         return;
       }
-      sessionStorage.removeItem('generationSession');
+      if (!(err instanceof GenerationTeachingVoiceProfileError)) {
+        sessionStorage.removeItem('generationSession');
+      }
       setError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -1092,6 +1440,106 @@ function GenerationPreviewContent() {
     outlineReviewIntentRef.current = false;
     sessionStorage.removeItem('generationSession');
     router.push('/');
+  };
+
+  const finishSourceReviewIfReady = (nextSession: GenerationSessionState) => {
+    const sources = resolveSessionDocumentSources(nextSession).sort((a, b) => a.order - b.order);
+    if (hasUnresolvedDocumentSources(sources) || !sourceReviewResolveRef.current) return;
+    const resolve = sourceReviewResolveRef.current;
+    sourceReviewResolveRef.current = null;
+    resolve({
+      sources,
+      parts: sources.flatMap((source) => {
+        const part = parsedDocumentPartsRef.current.get(source.id);
+        return part ? [part] : [];
+      }),
+    });
+  };
+
+  const retryDocumentSource = async (sourceId: string) => {
+    const activeSession = sessionRef.current;
+    if (!activeSession || !abortControllerRef.current) return;
+    const source = activeSession.documentSources?.find((candidate) => candidate.id === sourceId);
+    if (!source || source.processingStatus === 'processing') return;
+
+    const processingSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: updateDocumentSourceProcessing(
+        activeSession.documentSources ?? [],
+        sourceId,
+        'processing',
+      ),
+    };
+    persistSession(processingSession);
+    try {
+      const part = await extractDocumentSource(
+        source,
+        processingSession,
+        abortControllerRef.current.signal,
+      );
+      parsedDocumentPartsRef.current.set(sourceId, part);
+      const latestSession = sessionRef.current ?? processingSession;
+      const readySession: GenerationSessionState = {
+        ...latestSession,
+        documentSources: updateDocumentSourceProcessing(
+          latestSession.documentSources ?? [],
+          sourceId,
+          'ready',
+        ),
+      };
+      persistSession(readySession);
+      finishSourceReviewIfReady(readySession);
+    } catch (sourceError) {
+      if (isAbortError(sourceError)) return;
+      const latestSession = sessionRef.current ?? processingSession;
+      const failedSession: GenerationSessionState = {
+        ...latestSession,
+        documentSources: updateDocumentSourceProcessing(
+          latestSession.documentSources ?? [],
+          sourceId,
+          'failed',
+          sourceError instanceof Error
+            ? sourceError.message
+            : t('generation.courseMaterialParseFailed'),
+        ),
+      };
+      persistSession(failedSession);
+    }
+  };
+
+  const removeDocumentSource = async (sourceId: string) => {
+    const activeSession = sessionRef.current;
+    if (!activeSession) return;
+    const source = activeSession.documentSources?.find((candidate) => candidate.id === sourceId);
+    const nextSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: removeDocumentSourceById(activeSession.documentSources ?? [], sourceId),
+    };
+    parsedDocumentPartsRef.current.delete(sourceId);
+    persistSession(nextSession);
+    if (source?.storageKey) await deleteDocumentBlob(source.storageKey).catch(() => undefined);
+    finishSourceReviewIfReady(nextSession);
+  };
+
+  const continueWithoutFailedSources = async () => {
+    const activeSession = sessionRef.current;
+    if (!activeSession) return;
+    const failedSources = activeSession.documentSources?.filter(
+      (source) => source.processingStatus === 'failed',
+    );
+    const failedIds = new Set(failedSources?.map((source) => source.id) ?? []);
+    const nextSession: GenerationSessionState = {
+      ...activeSession,
+      documentSources: (activeSession.documentSources ?? []).filter(
+        (source) => !failedIds.has(source.id),
+      ),
+    };
+    for (const source of failedSources ?? []) {
+      parsedDocumentPartsRef.current.delete(source.id);
+      await deleteDocumentBlob(source.storageKey).catch(() => undefined);
+    }
+    persistSession(nextSession);
+    finishSourceReviewIfReady(nextSession);
   };
 
   // Triggered when the user clicks the streaming outline card mid-stream.
@@ -1405,9 +1853,6 @@ function GenerationPreviewContent() {
                         stepId={activeStep.id}
                         outlines={session.sceneOutlines ?? streamingOutlines}
                         webSearchSources={webSearchSources}
-                        onExpandOutline={
-                          activeStep.id === 'outline' ? handleExpandStreamingOutline : undefined
-                        }
                       />
                     </motion.div>
                   )}
@@ -1438,6 +1883,15 @@ function GenerationPreviewContent() {
                           ? t('generation.classroomReady')
                           : statusMessage || t(activeStepText.description)}
                     </p>
+                    {!error && !isComplete && generationProgress ? (
+                      <LessonGenerationProgress
+                        sceneIndex={generationProgress.sceneIndex}
+                        totalScenes={generationProgress.totalScenes}
+                        phase={generationProgress.phase}
+                        sceneType={generationProgress.sceneType}
+                        etaLabel={generationProgress.etaLabel}
+                      />
+                    ) : null}
                   </motion.div>
                 </AnimatePresence>
 
@@ -1498,6 +1952,97 @@ function GenerationPreviewContent() {
                   )}
                 </AnimatePresence>
               </div>
+
+              {activeStep.id === 'outline' && !error ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full max-w-xs"
+                  onClick={handleExpandStreamingOutline}
+                >
+                  <ListTree className="size-4" />
+                  {t('generation.outlineExpandHint')}
+                </Button>
+              ) : null}
+
+              {isReviewingSources ? (
+                <div className="w-full max-w-sm border-t border-border/70 pt-4 text-left">
+                  <div className="space-y-2">
+                    {session.documentSources?.map((source) => {
+                      const isProcessing = source.processingStatus === 'processing';
+                      const isFailed = source.processingStatus === 'failed';
+                      return (
+                        <div
+                          key={source.id}
+                          className="flex items-center gap-2 rounded-md border border-border/60 px-2.5 py-2"
+                        >
+                          <FileText
+                            className={cn(
+                              'size-4 shrink-0',
+                              isFailed ? 'text-destructive' : 'text-muted-foreground',
+                            )}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-xs font-medium text-foreground">
+                              {source.name}
+                            </p>
+                            <p
+                              className={cn(
+                                'truncate text-[10px]',
+                                isFailed ? 'text-destructive' : 'text-muted-foreground',
+                              )}
+                            >
+                              {isProcessing
+                                ? 'Processing'
+                                : isFailed
+                                  ? source.processingError || 'Could not process this file'
+                                  : 'Ready'}
+                            </p>
+                          </div>
+                          {isFailed || isProcessing ? (
+                            <button
+                              type="button"
+                              onClick={() => void retryDocumentSource(source.id)}
+                              disabled={isProcessing}
+                              className="grid size-7 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                              aria-label={`Retry ${source.name}`}
+                              title="Retry file"
+                            >
+                              <RefreshCw
+                                className={cn('size-3.5', isProcessing && 'animate-spin')}
+                              />
+                            </button>
+                          ) : null}
+                          {isFailed ? (
+                            <button
+                              type="button"
+                              onClick={() => void removeDocumentSource(source.id)}
+                              className="grid size-7 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              aria-label={`Remove ${source.name}`}
+                              title="Remove file"
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={() => void continueWithoutFailedSources()}
+                    disabled={session.documentSources?.some(
+                      (source) => source.processingStatus === 'processing',
+                    )}
+                  >
+                    Continue without failed files
+                  </Button>
+                </div>
+              ) : null}
             </div>
           </Card>
         </motion.div>
@@ -1515,7 +2060,7 @@ function GenerationPreviewContent() {
                   {t('generation.goBackAndRetry')}
                 </Button>
               </motion.div>
-            ) : isOutlineReady ? null : !isComplete ? (
+            ) : isOutlineReady || isReviewingSources ? null : !isComplete ? (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

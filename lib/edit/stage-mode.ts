@@ -16,13 +16,12 @@ export interface StageEditModeContext {
 /**
  * Whether edit mode should remain active for the given stage state.
  * Returns false in cases that would otherwise strand the user in an empty
- * edit shell — pending scene, no scenes, generation in flight, or no current
- * scene resolved yet.
+ * edit shell — pending scene, no scenes, or no current scene resolved yet.
+ * Generation of later scenes does not lock a materialized current scene.
  */
 export function isCurrentSceneEditable(ctx: StageEditModeContext): boolean {
   if (ctx.currentSceneId === PENDING_SCENE_ID) return false;
   if (ctx.sceneCount === 0) return false;
-  if (ctx.generatingOutlineCount > 0) return false;
   if (!ctx.hasCurrentScene) return false;
   return true;
 }

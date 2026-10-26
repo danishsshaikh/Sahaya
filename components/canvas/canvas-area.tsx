@@ -16,6 +16,7 @@ import { ContainBox } from '@/components/edit/ContainBox';
 import { useInWorkbenchPanel } from '@/lib/workbench/panel-context';
 import type { PPTElement } from '@openmaic/dsl';
 import { SlideElementPickOverlay } from '@/components/canvas/slide-element-pick-overlay';
+import { isWhiteboardEnabled } from '@/lib/config/feature-flags';
 
 interface CanvasAreaProps extends CanvasToolbarProps {
   readonly currentScene: Scene | null;
@@ -64,7 +65,9 @@ export function CanvasArea({
 }: CanvasAreaProps) {
   const { t } = useI18n();
   const inWorkbenchPanel = useInWorkbenchPanel();
-  const showControls = mode === 'playback' && !whiteboardOpen;
+  const whiteboardEnabled = isWhiteboardEnabled();
+  const visibleWhiteboardOpen = whiteboardEnabled && whiteboardOpen;
+  const showControls = mode === 'playback' && !visibleWhiteboardOpen;
   const showPlayHint =
     showControls &&
     engineState !== 'playing' &&
@@ -120,14 +123,16 @@ export function CanvasArea({
           onClick={handleSlideClick}
         >
           {/* Whiteboard Layer */}
-          <div className="absolute inset-0 z-[110] pointer-events-none">
-            <SceneProvider>
-              <Whiteboard isOpen={whiteboardOpen} onClose={onWhiteboardClose} />
-            </SceneProvider>
-          </div>
+          {whiteboardEnabled ? (
+            <div className="pointer-events-none absolute inset-0 z-[110]">
+              <SceneProvider>
+                <Whiteboard isOpen={visibleWhiteboardOpen} onClose={onWhiteboardClose} />
+              </SceneProvider>
+            </div>
+          ) : null}
 
           {/* Scene Content */}
-          {currentScene && !whiteboardOpen && (
+          {currentScene && !visibleWhiteboardOpen && (
             <div className="absolute inset-0">
               <SceneProvider>
                 <SceneRenderer scene={currentScene} mode={mode} />
@@ -284,7 +289,7 @@ export function CanvasArea({
           isLiveSession={isLiveSession}
           isSoftClosing={isSoftClosing}
           softCloseDeadline={softCloseDeadline}
-          whiteboardOpen={whiteboardOpen}
+          whiteboardOpen={visibleWhiteboardOpen}
           sidebarCollapsed={sidebarCollapsed}
           chatCollapsed={chatCollapsed}
           onToggleSidebar={onToggleSidebar}

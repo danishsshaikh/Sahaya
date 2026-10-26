@@ -58,6 +58,7 @@ import { isAbortError } from './generation-retry.js';
 import { generatePBLV2ProjectSingleCall } from './pbl/planner-single-call.js';
 import { PlannerV2Error } from './pbl/planner-core.js';
 import type { PBLPlannerV2Input } from './pbl/types.js';
+import { repairGeneratedSlideLayout } from './slide-layout.js';
 
 function isGeneratedMediaPlaceholder(value: string | undefined): value is string {
   return !!value && /^gen_(img|vid)_[\w-]+$/i.test(value);
@@ -886,6 +887,8 @@ async function generateSlideContent(
     rotate: 0,
   })) as PPTElement[];
 
+  const layoutRepaired = repairGeneratedSlideLayout(processedElements, log);
+
   // Process background
   let background: SlideBackground | undefined;
   if (generatedData.background) {
@@ -900,7 +903,7 @@ async function generateSlideContent(
   }
 
   return {
-    elements: processedElements,
+    elements: layoutRepaired.elements,
     background,
     remark: generatedData.remark || outline.description,
   };
@@ -949,22 +952,87 @@ async function generateQuizContent(
 
   log.debug(`Got ${generatedQuestions.length} questions for: ${outline.title}`);
 
-  // Ensure each question has an ID and normalize options format
-  const questions: QuizQuestion[] = generatedQuestions.map((q) => {
-    const isText = q.type === 'short_answer';
-    const options = isText ? undefined : normalizeQuizOptions(q.options);
-    return {
-      ...q,
-      id: q.id || `q_${nanoid(8)}`,
-      options,
-      answer: isText
-        ? undefined
-        : normalizeQuizAnswer(q as unknown as Record<string, unknown>, options),
-      hasAnswer: isText ? false : true,
-    };
+  // Treat model JSON as untrusted at this boundary. Optional metadata may be
+  // absent, but a question without renderable prompt/options must not reach the
+  // classroom as a falsely typed QuizQuestion.
+  const questions: QuizQuestion[] = generatedQuestions.flatMap((candidate, questionIndex) => {
+    if (!candidate || typeof candidate !== 'object') {
+      log.warn('[QuizValidation]', { questionIndex, field: 'question', reason: 'not-an-object' });
+      return [];
+    }
+    const q = candidate as unknown as Record<string, unknown>;
+    const type = q.type;
+    const question = typeof q.question === 'string' && q.question.trim() ? q.question : undefined;
+    if (!question || !['single', 'multiple', 'short_answer'].includes(String(type))) {
+      log.warn('[QuizValidation]', {
+        questionIndex,
+        field: !question ? 'question' : 'type',
+        reason: 'missing-or-invalid-required-field',
+      });
+      return [];
+    }
+
+    const isText = type === 'short_answer';
+    const rawOptions = Array.isArray(q.options) ? q.options : undefined;
+    if (!isText) {
+      rawOptions?.forEach((option, optionIndex) => {
+        if (!quizOptionLabel(option)) {
+          log.warn('[QuizValidation]', {
+            outlineId: outline.id,
+            questionIndex,
+            field: `options[${optionIndex}].label`,
+            reason: 'missing-option-text',
+          });
+        }
+      });
+    }
+    const options = isText ? undefined : normalizeQuizOptions(rawOptions);
+    if (!isText && (!options || options.length < 2)) {
+      log.warn('[QuizValidation]', {
+        questionIndex,
+        field: 'options',
+        reason: 'no-renderable-options',
+      });
+      return [];
+    }
+    if (q.analysis != null && (typeof q.analysis !== 'string' || !q.analysis.trim())) {
+      log.warn('[QuizValidation]', {
+        outlineId: outline.id,
+        questionIndex,
+        field: 'analysis',
+        reason: 'invalid-optional-text',
+      });
+    }
+
+    return [
+      {
+        id: typeof q.id === 'string' && q.id.trim() ? q.id : `q_${nanoid(8)}`,
+        type: type as QuizQuestion['type'],
+        question,
+        ...(options ? { options } : {}),
+        answer: isText ? undefined : normalizeQuizAnswer(q, options),
+        hasAnswer: !isText,
+        ...(typeof q.analysis === 'string' && q.analysis.trim() ? { analysis: q.analysis } : {}),
+        ...(typeof q.commentPrompt === 'string' && q.commentPrompt.trim()
+          ? { commentPrompt: q.commentPrompt }
+          : {}),
+        ...(typeof q.points === 'number' && Number.isFinite(q.points) && q.points > 0
+          ? { points: q.points }
+          : {}),
+      },
+    ];
   });
 
   return { questions };
+}
+
+function quizOptionLabel(option: unknown): string | undefined {
+  if (typeof option === 'string' && option.trim()) return option;
+  if (!option || typeof option !== 'object') return undefined;
+  const record = option as Record<string, unknown>;
+  if (typeof record.label === 'string' && record.label.trim()) return record.label;
+  if (typeof record.text === 'string' && record.text.trim()) return record.text;
+  return undefined;
 }
 
 /**
@@ -977,23 +1045,24 @@ function normalizeQuizOptions(
 ): { value: string; label: string }[] | undefined {
   if (!options || !Array.isArray(options)) return undefined;
 
-  return options.map((opt, index) => {
+  const normalized = options.flatMap((opt, index) => {
     const letter = String.fromCharCode(65 + index); // A, B, C, D...
 
-    if (typeof opt === 'string') {
-      return { value: letter, label: opt };
-    }
-
+    const label = quizOptionLabel(opt);
+    if (!label) return [];
     if (typeof opt === 'object' && opt !== null) {
       const obj = opt as Record<string, unknown>;
-      return {
-        value: typeof obj.value === 'string' ? obj.value : letter,
-        label: typeof obj.label === 'string' ? obj.label : String(obj.value || obj.text || letter),
-      };
+      return [
+        {
+          value: typeof obj.value === 'string' && obj.value.trim() ? obj.value : letter,
+          label,
+        },
+      ];
     }
 
-    return { value: letter, label: String(opt) };
+    return [{ value: letter, label }];
   });
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 /**
@@ -1429,7 +1498,20 @@ export async function generateWidgetContent(
   log.info(`Generating ${widgetType} widget for: ${outline.title}`);
   const response = await aiCall(prompts.system, prompts.user);
   const htmlResult = extractHtml(response);
-  const html = htmlResult.html;
+  const html =
+    htmlResult.html ??
+    (widgetType === 'simulation'
+      ? await repairMalformedSimulationHtml({
+          response,
+          htmlResult,
+          outline,
+          widgetType,
+          aiCall,
+          languageDirective,
+          targetLanguage: options.targetLanguage,
+          logger: log,
+        })
+      : undefined);
 
   if (!html) {
     log.error(`Failed to extract HTML from ${widgetType} response for: ${outline.title}`, {
@@ -1547,6 +1629,77 @@ function extractWidgetConfigJson(html: string): string | undefined {
     }
   }
   return undefined;
+}
+
+async function repairMalformedSimulationHtml({
+  response,
+  htmlResult,
+  outline,
+  widgetType,
+  aiCall,
+  languageDirective,
+  targetLanguage,
+  logger,
+}: {
+  response: string;
+  htmlResult: HtmlExtractionResult;
+  outline: SceneOutline;
+  widgetType: WidgetType;
+  aiCall: AICallFn;
+  languageDirective?: string;
+  targetLanguage?: string;
+  logger?: GenerationLogger;
+}): Promise<string | null> {
+  const log = logger ?? noopGenerationLogger;
+  log.warn(`Simulation HTML repair attempted: ${outline.title}`, {
+    sceneType: outline.type,
+    widgetType,
+    failureCategory: htmlResult.diagnostics.failureCategory,
+    repairAttempted: true,
+  });
+
+  const repairResponse = await aiCall(
+    [
+      'You repair generated simulation HTML without changing behavior.',
+      'Return exactly one complete HTML document and nothing else.',
+      'Preserve CSS, JavaScript logic, IDs, element relationships, widget config, and educational meaning.',
+      'Use English for all user-facing natural-language UI strings.',
+      'Do not add explanations or markdown fences.',
+    ].join('\n'),
+    [
+      `Simulation title: ${outline.title}`,
+      `Requested output language: ${describeRequestedSimulationLanguage(languageDirective, targetLanguage)}`,
+      languageDirective ? `Language directive: ${languageDirective}` : '',
+      `Extraction failure: ${htmlResult.diagnostics.failureCategory ?? 'UNKNOWN_HTML_FAILURE'}`,
+      '',
+      'Repair the malformed simulation below into one complete HTML document.',
+      '',
+      response,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+  const repairedHtmlResult = extractHtml(repairResponse);
+  if (!repairedHtmlResult.html) {
+    log.error(`Simulation HTML repair produced invalid HTML: ${outline.title}`, {
+      sceneType: outline.type,
+      widgetType,
+      failureCategory: repairedHtmlResult.diagnostics.failureCategory,
+      repairSucceeded: false,
+      responsePreview: repairResponse.slice(0, 120),
+    });
+    return null;
+  }
+
+  log.info(`Simulation HTML repair passed: ${outline.title}`, {
+    sceneType: outline.type,
+    widgetType,
+    originalFailureCategory: htmlResult.diagnostics.failureCategory,
+    repairSucceeded: true,
+  });
+
+  return repairedHtmlResult.html;
 }
 
 export function validateSimulationOutputLanguage(

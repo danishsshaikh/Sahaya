@@ -129,6 +129,13 @@ describe('Chatterbox service scaffold', () => {
     expect(source).toContain('active_model = get_model(variant)');
   });
 
+  it('passes the validated synthesis language to Chatterbox language_id', () => {
+    const source = readFileSync(servicePath, 'utf8');
+    expect(source).toContain('language = normalize_language_id(req.language)');
+    expect(source).toContain('language_id=language_id');
+    expect(source).toContain('SUPPORTED_LANGUAGE_IDS');
+  });
+
   it('accepts validated per-request generation settings without changing model lifecycle', () => {
     const source = readFileSync(servicePath, 'utf8');
     expect(source).toContain('class GenerationSettings(BaseModel)');

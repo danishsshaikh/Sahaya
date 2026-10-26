@@ -34,7 +34,7 @@ describe('edit toggle gate', () => {
     ).toBe(true);
   });
 
-  it('keeps genuinely uneditable classroom states blocked even when the flag is enabled', async () => {
+  it('does not tie edit availability to whole-lesson generation completion', async () => {
     process.env[FLAG_KEY] = 'true';
     const { isMaicEditorEnabled } = await loadFlags();
 
@@ -45,6 +45,21 @@ describe('edit toggle gate', () => {
         sceneCount: 1,
         generatingOutlineCount: 1,
         hasCurrentScene: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps unresolved pending scenes blocked even when the flag is enabled', async () => {
+    process.env[FLAG_KEY] = 'true';
+    const { isMaicEditorEnabled } = await loadFlags();
+
+    expect(isMaicEditorEnabled()).toBe(true);
+    expect(
+      isCurrentSceneEditable({
+        currentSceneId: '__pending__',
+        sceneCount: 1,
+        generatingOutlineCount: 1,
+        hasCurrentScene: false,
       }),
     ).toBe(false);
   });

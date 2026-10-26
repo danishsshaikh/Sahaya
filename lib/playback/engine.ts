@@ -47,10 +47,13 @@ import {
 } from '@/lib/playback/action-navigation';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useSettingsStore } from '@/lib/store/settings';
+import { useStageStore } from '@/lib/store/stage';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PlaybackEngine');
+export const AUTO_NARRATION_GAP_MS = 1000;
+type RuntimeSpeechAction = SpeechAction & { audioInvalidated?: boolean };
 
 /**
  * If more than 30% of characters are CJK, treat the text as Chinese.
@@ -84,6 +87,7 @@ export class PlaybackEngine {
   // Internal state
   private currentTrigger: TriggerEvent | null = null;
   private triggerDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoNarrationGapTimer: ReturnType<typeof setTimeout> | null = null;
   // Reading-time timer for speech actions without pre-generated audio (TTS disabled)
   private speechTimer: ReturnType<typeof setTimeout> | null = null;
   private speechTimerStart: number = 0; // Date.now() when timer was scheduled
@@ -144,6 +148,13 @@ export class PlaybackEngine {
     this.sceneIndex = snapshot.sceneIndex;
     this.actionIndex = snapshot.actionIndex;
     this.consumedDiscussions = new Set(snapshot.consumedDiscussions);
+  }
+
+  /** Refresh the active scene data without interrupting current playback. */
+  replaceScene(scene: Scene): boolean {
+    if (this.scenes.length !== 1 || this.scenes[0]?.id !== scene.id) return false;
+    this.scenes[0] = scene;
+    return true;
   }
 
   /** idle → playing (from beginning) */
@@ -218,6 +229,19 @@ export class PlaybackEngine {
     return true;
   }
 
+  /** Resume an explicit Play request that stopped at an unready narration action. */
+  continuePendingNarration(actionIndex: number): boolean {
+    const action = this.scenes[0]?.actions?.[actionIndex];
+    if ((this.mode !== 'idle' && this.mode !== 'playing') || action?.type !== 'speech')
+      return false;
+    this.sceneIndex = 0;
+    this.actionIndex = actionIndex;
+    this.invalidatePlaybackGeneration();
+    if (this.mode === 'idle') this.setMode('playing');
+    this.processNext();
+    return true;
+  }
+
   /** playing → paused | live → paused (abort SSE, truncate, topic pending) */
   pause(): void {
     if (this.mode === 'playing') {
@@ -226,6 +250,10 @@ export class PlaybackEngine {
       if (this.triggerDelayTimer) {
         clearTimeout(this.triggerDelayTimer);
         this.triggerDelayTimer = null;
+      }
+      if (this.autoNarrationGapTimer) {
+        clearTimeout(this.autoNarrationGapTimer);
+        this.autoNarrationGapTimer = null;
       }
       if (this.speechTimer) {
         // Save remaining time so resume() can reschedule
@@ -288,11 +316,7 @@ export class PlaybackEngine {
         // Audio is paused — resume it; TTS onend will call processNext
         const generation = this.playbackGeneration;
         this.audioPlayer.onEnded(() => {
-          if (!this.isCurrentGeneration(generation)) return;
-          this.callbacks.onSpeechEnd?.();
-          if (this.mode === 'playing') {
-            this.processNext(generation);
-          }
+          this.completeGeneratedSpeech(generation);
         });
         this.audioPlayer.resume();
       } else if (this.speechTimerRemaining > 0) {
@@ -325,6 +349,10 @@ export class PlaybackEngine {
     if (this.triggerDelayTimer) {
       clearTimeout(this.triggerDelayTimer);
       this.triggerDelayTimer = null;
+    }
+    if (this.autoNarrationGapTimer) {
+      clearTimeout(this.autoNarrationGapTimer);
+      this.autoNarrationGapTimer = null;
     }
     if (this.speechTimer) {
       clearTimeout(this.speechTimer);
@@ -505,6 +533,10 @@ export class PlaybackEngine {
     this.actionEngine.clearEffects();
     useCanvasStore.getState().pauseVideo();
 
+    if (this.autoNarrationGapTimer) {
+      clearTimeout(this.autoNarrationGapTimer);
+      this.autoNarrationGapTimer = null;
+    }
     if (this.triggerDelayTimer) {
       clearTimeout(this.triggerDelayTimer);
       this.triggerDelayTimer = null;
@@ -530,6 +562,19 @@ export class PlaybackEngine {
     }
     this.savedSceneIndex = null;
     this.savedActionIndex = null;
+  }
+
+  private completeGeneratedSpeech(generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.callbacks.onSpeechEnd?.();
+    if (this.mode !== 'playing') return;
+    if (this.autoNarrationGapTimer) clearTimeout(this.autoNarrationGapTimer);
+    this.autoNarrationGapTimer = setTimeout(() => {
+      this.autoNarrationGapTimer = null;
+      if (this.mode === 'playing' && this.isCurrentGeneration(generation)) {
+        this.processNext(generation);
+      }
+    }, AUTO_NARRATION_GAP_MS);
   }
 
   /**
@@ -573,6 +618,21 @@ export class PlaybackEngine {
 
     const { action } = current;
 
+    const currentScene = this.scenes[this.sceneIndex];
+    if (
+      action.type === 'speech' &&
+      (!(action as RuntimeSpeechAction).audioId ||
+        (action as RuntimeSpeechAction).audioInvalidated) &&
+      ['pending', 'queued', 'running'].includes(currentScene?.narrationStatus ?? '')
+    ) {
+      // Do not consume a generated narration line with a reading-time timer
+      // while its selected Teaching Voice is still being produced. Keep the
+      // cursor at this action and retain the user's active Play intent. The UI
+      // may pause that intent before the clip becomes ready.
+      this.callbacks.onNarrationPending?.(current.sceneId, this.actionIndex);
+      return;
+    }
+
     // Notify progress BEFORE advancing the cursor so the snapshot points at
     // the current action.  On restore the same action will be replayed — this
     // is the desired behaviour for speech (user may have only heard half).
@@ -587,11 +647,7 @@ export class PlaybackEngine {
 
         // onEnded → processNext; if paused, resume() will call processNext
         this.audioPlayer.onEnded(() => {
-          if (!this.isCurrentGeneration(generation)) return;
-          this.callbacks.onSpeechEnd?.();
-          if (this.mode === 'playing') {
-            this.processNext(generation);
-          }
+          this.completeGeneratedSpeech(generation);
         });
 
         // Estimated reading time when no pre-generated audio (TTS disabled).
@@ -619,6 +675,7 @@ export class PlaybackEngine {
         // empty SpeechSynthesisUtterance doesn't reliably fire onend in Chromium,
         // which would hang playback on that slide.
         const hasText = !!speechAction.text.trim();
+        const playbackRequestedAt = Date.now();
 
         this.audioPlayer
           // The legacy URL of an unconverted pair rides along as the
@@ -626,11 +683,22 @@ export class PlaybackEngine {
           .play(speechAction.audioId || '', (speechAction as LegacySpeechAction).audioUrl)
           .then((audioStarted) => {
             if (!this.isCurrentGeneration(generation)) return;
+            if (audioStarted) {
+              log.info('[SceneNarration]', {
+                event: 'narration-playback-started',
+                stageId: currentScene.stageId,
+                outlineId: currentScene.outlineId,
+                sceneId: current.sceneId,
+                actionId: speechAction.id,
+                elapsedMs: Date.now() - playbackRequestedAt,
+              });
+            }
             if (!audioStarted) {
               // No pre-generated audio — try browser-native TTS only when it is
               // the selected provider AND actually enabled (opt-in, #665).
               const settings = useSettingsStore.getState();
               if (
+                !useStageStore.getState().stage?.teacherVoiceProfileId &&
                 hasText &&
                 settings.ttsEnabled &&
                 settings.ttsProviderId === 'browser-native-tts' &&

@@ -1,6 +1,13 @@
 export type VoiceProfileStatus = 'processing' | 'preview-ready' | 'ready' | 'failed' | 'deleted';
 export type ChatterboxModelVariant = 'v2' | 'v3';
 export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'custom';
+export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
+export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
+export type Qwen3TtsCloneMode = 'speaker-embedding' | 'icl';
+export type TeachingVoiceEngine = 'chatterbox' | 'qwen3-tts' | 'indicf5';
+
+export const VOICE_PREVIEW_MODELS = ['chatterbox-v3', 'qwen3-tts-1.7b-base'] as const;
+export const QWEN3_TTS_CLONE_MODES = ['speaker-embedding', 'icl'] as const;
 
 export const CHATTERBOX_MODEL_VARIANTS = ['v2', 'v3'] as const;
 export const DEFAULT_CHATTERBOX_MODEL_VARIANT: ChatterboxModelVariant = 'v3';
@@ -46,9 +53,18 @@ export const VOICE_SETTINGS_PRESETS: Record<
 };
 
 export interface VoiceConfiguration {
-  modelVariant: ChatterboxModelVariant;
+  modelVariant?: ChatterboxModelVariant;
+  /** Chatterbox generation language. This is independent of the recorded reference language. */
   languageId: string;
-  generationSettings: VoiceGenerationSettings;
+  generationSettings?: VoiceGenerationSettings;
+  /** Optional post-processing preference. Legacy profiles resolve to standard. */
+  enhancementMode?: VoiceEnhancementMode;
+}
+
+export type VoicePreviewTextLanguage = 'en' | 'hi';
+
+export interface VoicePreviewConfiguration extends VoiceConfiguration {
+  previewTextLanguageId?: VoicePreviewTextLanguage;
 }
 
 export interface VoicePreview {
@@ -57,9 +73,29 @@ export interface VoicePreview {
   createdAt: string;
 }
 
-export interface VoiceDraftPreview {
-  config: VoiceConfiguration;
+export interface VoicePreviewComparison {
+  original: VoicePreview;
+  enhanced?: VoicePreview;
+  enhancementError?: string;
+}
+
+export interface VoiceModelPreviewResult {
+  previewModel: VoicePreviewModel;
+  qwenCloneMode?: Qwen3TtsCloneMode;
+  enhancementMode: VoiceEnhancementMode;
   preview: VoicePreview;
+  comparison: VoicePreviewComparison;
+}
+
+export interface Qwen3TtsPreviewCache {
+  cacheKey: string;
+  result: VoiceModelPreviewResult;
+}
+
+export interface VoiceDraftPreview {
+  config: VoicePreviewConfiguration;
+  preview: VoicePreview;
+  comparison?: VoicePreviewComparison;
 }
 
 export interface VoiceEnrollmentQualitySummary {
@@ -72,6 +108,7 @@ export interface VoiceProfile {
   ownerId: string;
   displayName: string;
   provider: string;
+  /** Language spoken in the retained reference recording. */
   language: string;
   status: VoiceProfileStatus;
   createdAt: string;
@@ -79,34 +116,50 @@ export interface VoiceProfile {
   consentTimestamp: string;
   consentVersion: string;
   referenceAudioKey?: string;
+  referenceText?: string;
   providerReferenceId?: string;
   modelVariant?: ChatterboxModelVariant;
   languageId?: string;
   generationSettings?: VoiceGenerationSettings;
+  enhancementMode?: VoiceEnhancementMode;
+  activeEngine?: TeachingVoiceEngine;
+  qwenEnhancementMode?: VoiceEnhancementMode;
+  qwenPreviewCache?: Qwen3TtsPreviewCache;
   replacesProfileId?: string;
+  enrollmentAttemptId?: string;
   profileVersion: number;
   preview?: VoicePreview;
+  previewComparison?: VoicePreviewComparison;
+  previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
   failureReason?: string;
+  failurePhase?: string;
 }
 
 export interface PublicVoiceProfile {
   id: string;
   displayName: string;
   provider: string;
+  /** Language spoken in the retained reference recording. */
   language: string;
   status: VoiceProfileStatus;
   createdAt: string;
   updatedAt: string;
   consentTimestamp: string;
   consentVersion: string;
-  modelVariant: ChatterboxModelVariant;
+  modelVariant?: ChatterboxModelVariant;
   languageId: string;
-  generationSettings: VoiceGenerationSettings;
+  generationSettings?: VoiceGenerationSettings;
+  enhancementMode?: VoiceEnhancementMode;
+  activeEngine: TeachingVoiceEngine;
+  qwenEnhancementMode?: VoiceEnhancementMode;
+  qwenPreview?: VoiceModelPreviewResult;
   profileVersion: number;
   preview?: VoicePreview;
+  previewComparison?: VoicePreviewComparison;
+  previewTextLanguageId?: VoicePreviewTextLanguage;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -117,9 +170,10 @@ export interface VoiceCloningProvider {
   createProfile(input: {
     profileId: string;
     referenceAudioKey: string;
+    referenceText?: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{
     providerReferenceId: string;
   }>;
@@ -127,15 +181,15 @@ export interface VoiceCloningProvider {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }>;
   synthesize(input: {
     providerReferenceId: string;
     text: string;
     language: string;
-    modelVariant: ChatterboxModelVariant;
-    generationSettings: VoiceGenerationSettings;
+    modelVariant?: ChatterboxModelVariant;
+    generationSettings?: VoiceGenerationSettings;
   }): Promise<{ audio: Uint8Array; format: string }>;
   deleteProfile(input: { providerReferenceId: string }): Promise<void>;
 }
@@ -144,9 +198,81 @@ export function isChatterboxModelVariant(value: unknown): value is ChatterboxMod
   return value === 'v2' || value === 'v3';
 }
 
+export function isVoicePreviewModel(value: unknown): value is VoicePreviewModel {
+  return VOICE_PREVIEW_MODELS.includes(value as VoicePreviewModel);
+}
+
+export function isQwen3TtsCloneMode(value: unknown): value is Qwen3TtsCloneMode {
+  return QWEN3_TTS_CLONE_MODES.includes(value as Qwen3TtsCloneMode);
+}
+
+export function resolveVoiceProfileProvider(profile: { provider?: string }): string {
+  // Profiles enrolled during the retired Qwen3 period retain their reference WAV.
+  // Resolve them to Chatterbox for new synthesis while preserving the stored
+  // metadata until a successful Chatterbox registration migrates the profile.
+  if (profile.provider === undefined || profile.provider === 'qwen3') return 'chatterbox';
+  return profile.provider;
+}
+
+export function resolveVoiceProfileActiveEngine(profile: {
+  provider?: string;
+  activeEngine?: string | null;
+}): TeachingVoiceEngine {
+  const provider = resolveVoiceProfileProvider(profile);
+  if (provider === 'indicf5') return 'indicf5';
+  return profile.activeEngine === 'qwen3-tts' ? 'qwen3-tts' : 'chatterbox';
+}
+
+export function resolveVoiceProfileQwenEnhancementMode(profile: {
+  qwenEnhancementMode?: string | null;
+}): VoiceEnhancementMode {
+  return isVoiceEnhancementMode(profile.qwenEnhancementMode)
+    ? profile.qwenEnhancementMode
+    : 'standard';
+}
+
+export class TeachingVoiceError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+    this.name = 'TeachingVoiceError';
+  }
+}
+
+export type TeachingVoiceProviderOperation =
+  | 'provider_registration'
+  | 'preview_generation'
+  | 'synthesis'
+  | 'profile_deletion'
+  | 'health_check';
+
+export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
+  constructor(
+    message: string,
+    status: number,
+    readonly metadata: {
+      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts';
+      endpoint: string;
+      operation: TeachingVoiceProviderOperation;
+      providerStatus?: number;
+      providerContentType?: string;
+      providerDetail?: string;
+    },
+  ) {
+    super(message, status);
+    this.name = 'TeachingVoiceProviderOperationError';
+  }
+}
+
 export function resolveVoiceProfileModelVariant(profile: {
+  provider?: string | null;
   modelVariant?: string | null;
 }): ChatterboxModelVariant {
+  if (profile.provider === 'qwen3' && !isChatterboxModelVariant(profile.modelVariant)) {
+    return DEFAULT_CHATTERBOX_MODEL_VARIANT;
+  }
   return isChatterboxModelVariant(profile.modelVariant)
     ? profile.modelVariant
     : LEGACY_CHATTERBOX_MODEL_VARIANT;
@@ -163,6 +289,16 @@ export function resolveVoiceProfileGenerationSettings(profile: {
   generationSettings?: Partial<VoiceGenerationSettings> | null;
 }): VoiceGenerationSettings {
   return validateVoiceGenerationSettings(profile.generationSettings ?? undefined);
+}
+
+export function isVoiceEnhancementMode(value: unknown): value is VoiceEnhancementMode {
+  return value === 'standard' || value === 'resemble-enhance';
+}
+
+export function resolveVoiceProfileEnhancementMode(profile: {
+  enhancementMode?: string | null;
+}): VoiceEnhancementMode {
+  return isVoiceEnhancementMode(profile.enhancementMode) ? profile.enhancementMode : 'standard';
 }
 
 export function resolveNewVoiceProfileModelVariant(value: unknown): ChatterboxModelVariant | null {
@@ -240,23 +376,44 @@ export function isVoiceProviderProfileNotFoundError(
 
 export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceProfile | null {
   if (!profile || profile.status === 'deleted') return null;
+  const legacyQwenProfile = profile.provider === 'qwen3';
   return {
     id: profile.id,
     displayName: profile.displayName,
-    provider: profile.provider,
+    provider: resolveVoiceProfileProvider(profile),
     language: profile.language,
     status: profile.status,
-    modelVariant: resolveVoiceProfileModelVariant(profile),
+    activeEngine: resolveVoiceProfileActiveEngine(profile),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
+      ? { qwenEnhancementMode: resolveVoiceProfileQwenEnhancementMode(profile) }
+      : {}),
     languageId: resolveVoiceProfileLanguageId(profile),
-    generationSettings: resolveVoiceProfileGenerationSettings(profile),
+    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
+      ? {
+          modelVariant: resolveVoiceProfileModelVariant(profile),
+          generationSettings: resolveVoiceProfileGenerationSettings(profile),
+          enhancementMode: resolveVoiceProfileEnhancementMode(profile),
+        }
+      : {}),
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     consentTimestamp: profile.consentTimestamp,
     consentVersion: profile.consentVersion,
     profileVersion: profile.profileVersion,
-    ...(profile.preview ? { preview: profile.preview } : {}),
-    ...(profile.previewVariants ? { previewVariants: profile.previewVariants } : {}),
-    ...(profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
+    ...(!legacyQwenProfile && profile.preview ? { preview: profile.preview } : {}),
+    ...(!legacyQwenProfile && profile.previewComparison
+      ? { previewComparison: profile.previewComparison }
+      : {}),
+    ...(!legacyQwenProfile && profile.previewTextLanguageId
+      ? { previewTextLanguageId: profile.previewTextLanguageId }
+      : {}),
+    ...(!legacyQwenProfile && profile.previewVariants
+      ? { previewVariants: profile.previewVariants }
+      : {}),
+    ...(!legacyQwenProfile && profile.draftPreview ? { draftPreview: profile.draftPreview } : {}),
+    ...(!legacyQwenProfile && profile.qwenPreviewCache
+      ? { qwenPreview: profile.qwenPreviewCache.result }
+      : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
 }

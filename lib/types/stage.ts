@@ -21,6 +21,7 @@ import type { WidgetConfig } from '@/lib/types/widgets';
 import type { PBLProjectConfig } from '@/lib/pbl/legacy/read';
 import type { PBLProjectV2 } from '@/lib/pbl/v2/types';
 import type { NarrationSyncMetadata } from '@/lib/audio/narration-sync';
+import type { TeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 
 export type {
   SceneType,
@@ -56,6 +57,8 @@ export type { SceneContent as SceneContentBase } from '@openmaic/dsl';
 export type { Scene as SceneShape } from '@openmaic/dsl';
 
 export type Stage = DslStage & {
+  /** Normalized lesson language for Teaching Voice profile and synthesis requests. */
+  lessonLanguage?: TeachingVoiceLanguage;
   /**
    * Opaque faculty voice profile selected for AI Teacher narration.
    * Absence means the default configured TTS voice is used.
@@ -122,6 +125,10 @@ export type AppScene = DslScene<Action, SceneContent> & {
    * discarding the last successful audio.
    */
   sync?: NarrationSyncMetadata;
+  /** Narration is independent from visual scene readiness. */
+  narrationStatus?: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'needs-retry';
+  /** Safe user-facing failure context. Never contains provider payloads or narration text. */
+  narrationError?: string;
 };
 export type Scene = AppScene;
 

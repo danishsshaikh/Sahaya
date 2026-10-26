@@ -19,7 +19,13 @@ import { SceneSidebar } from '@/components/stage/scene-sidebar';
 import { Header } from '@/components/header';
 import { CanvasArea } from '@/components/canvas/canvas-area';
 import { Roundtable } from '@/components/roundtable';
-import { PlaybackEngine, computePlaybackView, shouldAutoResumeLecture } from '@/lib/playback';
+import {
+  PlaybackEngine,
+  computePlaybackView,
+  pendingNarrationIntentState,
+  shouldAutoResumeLecture,
+  type PendingNarrationIntent,
+} from '@/lib/playback';
 import type { EngineMode, TriggerEvent, Effect } from '@/lib/playback';
 import {
   canJumpWithinReconstructablePrefix,
@@ -67,12 +73,20 @@ import {
   isCoursewareReferenceEnabled,
   isPiChatEnabled,
   isSceneEnabled,
+  isWhiteboardEnabled,
 } from '@/lib/config/feature-flags';
 import {
   getSlideElementPresentation,
   getSlideElementTypeLabel,
 } from '@/components/canvas/slide-element-pick-overlay';
 import { shouldClearDraftElementReference } from '@/components/chat/element-reference-receipt';
+import {
+  findNarrationCueIndex,
+  resolveNarrationCues,
+  type ActiveNarrationHighlight,
+  type NarrationCue,
+} from '@/lib/playback/narration-cues';
+import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
 
 type DraftElementReference = {
   reference: ElementReference;
@@ -112,6 +126,7 @@ interface PlaybackChromeRootProps {
   readonly hideHeader?: boolean;
   readonly hideHeaderGlobalControls?: boolean;
   readonly hideHeaderCourseActions?: boolean;
+  readonly headerStatus?: ReactNode;
   readonly onInteractivePickerChange?: (state: PlaybackInteractivePickerState | null) => void;
 }
 
@@ -134,6 +149,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       hideHeader,
       hideHeaderGlobalControls,
       hideHeaderCourseActions,
+      headerStatus,
       onInteractivePickerChange,
     },
     ref,
@@ -197,6 +213,9 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const [playbackCompleted, setPlaybackCompleted] = useState(false); // Distinguishes "never played" idle from "finished" idle
     const [lectureSpeech, setLectureSpeech] = useState<string | null>(null); // From PlaybackEngine (lecture)
     const [currentPlaybackActionIndex, setCurrentPlaybackActionIndex] = useState<number | null>(0);
+    const [narrationHighlight, setNarrationHighlight] = useState<ActiveNarrationHighlight | null>(
+      null,
+    );
     const [liveSpeech, setLiveSpeech] = useState<string | null>(null); // From buffer (discussion/QA)
     const [speechProgress, setSpeechProgress] = useState<number | null>(null); // StreamBuffer reveal progress (0–1)
     const [discussionTrigger, setDiscussionTrigger] = useState<TriggerEvent | null>(null);
@@ -240,8 +259,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const [isPresentationInteractionActive, setIsPresentationInteractionActive] = useState(false);
 
     // Whiteboard state (from canvas store so AI tools can open it)
-    const whiteboardOpen = useCanvasStore.use.whiteboardOpen();
+    const storedWhiteboardOpen = useCanvasStore.use.whiteboardOpen();
     const setWhiteboardOpenManually = useCanvasStore.use.setWhiteboardOpenManually();
+    const whiteboardEnabled = isWhiteboardEnabled();
+    const whiteboardOpen = whiteboardEnabled && storedWhiteboardOpen;
 
     // Selected agents from settings store (Zustand)
     const selectedAgentIds = useSettingsStore((s) => s.selectedAgentIds);
@@ -295,11 +316,21 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     const engineRef = useRef<PlaybackEngine | null>(null);
     const audioPlayerRef = useRef(createAudioPlayer());
+    const activeNarrationRef = useRef<{
+      sceneId: string;
+      actionIndex: number;
+      actionId: string;
+      text: string;
+      durationMs: number;
+      cues: NarrationCue[];
+      cueIndex: number;
+    } | null>(null);
     const chatAreaRef = useRef<ChatAreaRef>(null);
     const lectureSessionIdRef = useRef<string | null>(null);
     const lectureActionCounterRef = useRef(0);
     const currentPlaybackActionIndexRef = useRef<number | null>(currentPlaybackActionIndex);
     const activeSceneIdRef = useRef<string | null>(currentSceneId);
+    const pendingNarrationPlayRef = useRef<PendingNarrationIntent | null>(null);
     const discussionAbortRef = useRef<AbortController | null>(null);
     const presentationIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cursorSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -460,6 +491,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         setShowEndFlash(false);
         setActiveBubbleId(null);
         setDiscussionTrigger(null);
+        activeNarrationRef.current = null;
+        setNarrationHighlight(null);
       },
       [resetLiveState, updateCurrentPlaybackActionIndex],
     );
@@ -569,6 +602,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       ref,
       () => ({
         teardown: async () => {
+          pendingNarrationPlayRef.current = null;
           await chatAreaRef.current?.endActiveSession();
           if (discussionAbortRef.current) {
             discussionAbortRef.current.abort();
@@ -686,6 +720,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       const initializeScene = async () => {
         const previousSceneId = activeSceneIdRef.current;
         if (previousSceneId && previousSceneId !== currentScene?.id) {
+          pendingNarrationPlayRef.current = null;
           saveSceneResumePosition(previousSceneId, currentPlaybackActionIndexRef.current);
         }
 
@@ -818,6 +853,26 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
           onSpeechStart: (text) => {
             setLectureSpeech(text);
+            const actionIndex = currentPlaybackActionIndexRef.current;
+            const playbackScene = useStageStore.getState().getSceneById(currentScene.id);
+            const action = actionIndex === null ? undefined : playbackScene?.actions?.[actionIndex];
+            activeNarrationRef.current =
+              typeof actionIndex === 'number' &&
+              action?.type === 'speech' &&
+              action.text === text &&
+              !!action.audioId &&
+              !action.audioInvalidated
+                ? {
+                    sceneId: currentScene.id,
+                    actionIndex,
+                    actionId: action.id,
+                    text,
+                    durationMs: 0,
+                    cues: [],
+                    cueIndex: -1,
+                  }
+                : null;
+            setNarrationHighlight(null);
             // Add to lecture session with incrementing index for dedup
             // Chat area pacing is handled by the StreamBuffer (onTextReveal)
             if (lectureSessionIdRef.current) {
@@ -838,6 +893,14 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             // onSpeechStart replaces it or the scene transitions.
             // Clearing here causes fallback to idleText (first sentence).
             setActiveBubbleId(null);
+            activeNarrationRef.current = null;
+            setNarrationHighlight(null);
+          },
+          onNarrationPending: (sceneId, actionIndex) => {
+            pendingNarrationPlayRef.current = { sceneId, actionIndex };
+            setLectureSpeech(t('stage.narrationPreparing'));
+            activeNarrationRef.current = null;
+            setNarrationHighlight(null);
           },
           onEffectFire: (effect: Effect) => {
             // Add to lecture session with incrementing index
@@ -907,6 +970,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
           getPlaybackSpeed: () => useSettingsStore.getState().playbackSpeed || 1,
           onComplete: () => {
+            pendingNarrationPlayRef.current = null;
             // lectureSpeech intentionally NOT cleared — last sentence stays visible
             // until scene transition (auto-play) or user restarts. Scene change
             // effect handles the reset.
@@ -960,8 +1024,25 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           },
         });
 
+        const latestCurrentScene = useStageStore.getState().getSceneById(currentScene.id);
+        if (latestCurrentScene) engine.replaceScene(latestCurrentScene);
         engineRef.current = engine;
         activeSceneIdRef.current = currentScene.id;
+
+        const pendingNarration = pendingNarrationPlayRef.current;
+        const pendingNarrationState = pendingNarrationIntentState(
+          latestCurrentScene ?? currentScene,
+          pendingNarration,
+        );
+        if (pendingNarrationState !== 'unrelated' && pendingNarration) {
+          if (pendingNarrationState === 'ready') {
+            pendingNarrationPlayRef.current = null;
+          }
+          if (!engine.continuePendingNarration(pendingNarration.actionIndex)) {
+            pendingNarrationPlayRef.current = null;
+          }
+          return;
+        }
 
         // Auto-start if triggered by auto-play scene advance
         if (autoStartRef.current) {
@@ -995,14 +1076,76 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       return () => {
         cancelled = true;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- Only re-run when scene changes, functions are stable refs
-    }, [currentScene, currentSceneEnabled]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- Scene data updates are synchronized into the installed engine below without interrupting playback.
+    }, [currentScene?.id, currentSceneEnabled]);
+
+    useEffect(() => {
+      const engine = engineRef.current;
+      if (!engine || !currentScene || activeSceneIdRef.current !== currentScene.id) return;
+      if (!engine.replaceScene(currentScene)) return;
+
+      const pendingNarration = pendingNarrationPlayRef.current;
+      if (
+        !pendingNarration ||
+        pendingNarrationIntentState(currentScene, pendingNarration) !== 'ready'
+      ) {
+        return;
+      }
+      pendingNarrationPlayRef.current = null;
+      if (!engine.continuePendingNarration(pendingNarration.actionIndex)) {
+        pendingNarrationPlayRef.current = pendingNarration;
+      }
+    }, [currentScene]);
+
+    useEffect(() => {
+      return audioPlayerRef.current.subscribePlayback((progress) => {
+        const active = activeNarrationRef.current;
+        if (!active || !progress || progress.ended) {
+          if (progress?.ended) activeNarrationRef.current = null;
+          if (active?.cueIndex !== -1 || progress?.ended) {
+            if (active) active.cueIndex = -1;
+            setNarrationHighlight(null);
+          }
+          return;
+        }
+        if (progress.durationMs <= 0) return;
+        if (active.durationMs !== progress.durationMs) {
+          active.durationMs = progress.durationMs;
+          active.cues = resolveNarrationCues({
+            text: active.text,
+            durationMs: progress.durationMs,
+          });
+        }
+        const cueIndex = findNarrationCueIndex(active.cues, progress.currentTimeMs);
+        if (cueIndex === active.cueIndex) return;
+        active.cueIndex = cueIndex;
+        const cue = active.cues[cueIndex];
+        if (!cue) {
+          setNarrationHighlight(null);
+          return;
+        }
+        setNarrationHighlight((current) =>
+          current?.actionId === active.actionId &&
+          current.cue.startOffset === cue.startOffset &&
+          current.cue.endOffset === cue.endOffset
+            ? current
+            : {
+                sceneId: active.sceneId,
+                actionIndex: active.actionIndex,
+                actionId: active.actionId,
+                text: active.text,
+                cue,
+              },
+        );
+      });
+    }, []);
 
     // Cleanup on unmount
     useEffect(() => {
       const audioPlayer = audioPlayerRef.current;
       const chatArea = chatAreaRef.current;
       return () => {
+        pendingNarrationPlayRef.current = null;
         if (cursorSaveTimerRef.current) clearTimeout(cursorSaveTimerRef.current);
         cursorSaveTimerRef.current = null;
         const pendingCursor = pendingCursorRef.current;
@@ -1170,6 +1313,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
       const mode = engine.getMode();
       if (mode === 'playing' || mode === 'live') {
+        pendingNarrationPlayRef.current = null;
         saveSceneResumePosition(currentScene?.id, currentPlaybackActionIndexRef.current);
         engine.pause();
         // Pause lecture buffer so text stops immediately
@@ -1203,7 +1347,12 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // get scene information
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
-    const hasNextPending = generatingOutlines.length > 0;
+    const pendingScene = useMemo(
+      () =>
+        generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
+      [failedOutlines, generationComplete, outlines, scenes],
+    );
+    const hasNextPending = pendingScene !== null;
     // True when every outline has materialized into a scene and nothing is
     // currently generating — signals the classroom has finished and the user
     // can see a completion page. Comparing scenes.length === outlines.length
@@ -1459,6 +1608,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // whiteboard toggle
     const handleWhiteboardToggle = () => {
+      if (!whiteboardEnabled) return;
       if (!whiteboardOpen) setElementPickActive(false);
       setWhiteboardOpenManually(!whiteboardOpen);
     };
@@ -1660,6 +1810,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               hideBackControl={hideHeaderBackControl}
               hideGlobalControls={hideHeaderGlobalControls}
               hideCourseActions={hideHeaderCourseActions}
+              statusSlot={headerStatus}
             />
           )}
 
@@ -1715,12 +1866,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               hideToolbar={mode === 'playback' || (isPresenting && !controlsVisible)}
               isPendingScene={isPendingScene}
               isCourseComplete={isCourseComplete}
-              isGenerationFailed={
-                isPendingScene && failedOutlines.some((f) => f.id === generatingOutlines[0]?.id)
-              }
+              isGenerationFailed={isPendingScene && pendingScene?.failed === true}
               onRetryGeneration={
-                onRetryOutline && generatingOutlines[0]
-                  ? () => onRetryOutline(generatingOutlines[0].id)
+                onRetryOutline && pendingScene?.failed
+                  ? () => onRetryOutline(pendingScene.outline.id)
                   : undefined
               }
             />
@@ -1849,6 +1998,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
                   }
                   // Also pause playback engine
                   if (engineRef.current && (engineMode === 'playing' || engineMode === 'live')) {
+                    pendingNarrationPlayRef.current = null;
                     engineRef.current.pause();
                   }
                 }}
@@ -1921,6 +2071,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             onActiveBubble={(id) => setActiveBubbleId(id)}
             currentSceneId={currentSceneId}
             currentActionIndex={currentPlaybackActionIndex}
+            narrationHighlight={narrationHighlight}
             canJumpToAction={canJumpToAction}
             onJumpToAction={(sceneId, actionIndex) => {
               void handleJumpToAction(sceneId, actionIndex);

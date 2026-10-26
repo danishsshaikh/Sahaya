@@ -8,6 +8,7 @@ import type {
   ImageMapping,
   SessionDocumentSource,
 } from '@/lib/types/generation';
+import type { TeachingVoiceLanguage } from '@/lib/voice-cloning/language';
 
 // Session state stored in sessionStorage
 export interface GenerationSessionState {
@@ -20,7 +21,7 @@ export interface GenerationSessionState {
   imageMapping?: ImageMapping;
   sceneOutlines?: SceneOutline[] | null;
   currentStep: 'generating' | 'complete';
-  previewPhase?: 'preparing' | 'outline-ready' | 'review' | 'generating-content';
+  previewPhase?: 'preparing' | 'source-review' | 'outline-ready' | 'review' | 'generating-content';
   // PDF deferred parsing fields
   pdfStorageKey?: string;
   pdfFileName?: string;
@@ -37,6 +38,8 @@ export interface GenerationSessionState {
   researchSources?: Array<{ title: string; url: string }>;
   // Language directive inferred from outline generation
   languageDirective?: string;
+  // Structured lesson language used only at Teaching Voice API boundaries.
+  lessonLanguage?: TeachingVoiceLanguage;
   // Concise course title inferred from outline generation (used as the stage name)
   courseTitle?: string;
   // Server-effective vocational mode from the outline generation done event.

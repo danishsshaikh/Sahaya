@@ -29,7 +29,7 @@ const scene = (id: string, stageId = 'stage-1'): Scene => ({
   stageId,
   type: 'slide',
   title: id,
-  order: 1,
+  order: Number(id.split('-').at(-1)) || 1,
   content: {
     type: 'slide',
     canvas: {

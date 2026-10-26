@@ -43,6 +43,7 @@ export interface PlaybackEngineCallbacks {
   onSceneChange?: (sceneId: string) => void;
   onSpeechStart?: (text: string) => void;
   onSpeechEnd?: () => void;
+  onNarrationPending?: (sceneId: string, actionIndex: number) => void;
   onTextDelta?: (content: string) => void;
   onSpeakerChange?: (role: string) => void;
   onEffectFire?: (effect: Effect) => void;

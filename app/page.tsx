@@ -83,10 +83,14 @@ import { useDraftCache } from '@/lib/hooks/use-draft-cache';
 import { SpeechButton } from '@/components/audio/speech-button';
 import { useImportClassroom } from '@/lib/import/use-import-classroom';
 import {
+  isClassroomImportEnabled,
   isInteractiveScenesEnabled,
+  isPromptPersonalizationEnabled,
   isProWorkbenchEnabled,
   isPptxImportEnabled,
+  isStaticVoiceEnabled,
   isVoiceCloningEnabled,
+  isWebSearchEnabled,
   shouldShowVocationalTestUi,
 } from '@/lib/config/feature-flags';
 import { useImportPptx } from '@/lib/import/use-import-pptx';
@@ -101,12 +105,37 @@ import {
   readLastWorkspaceSessionId,
   workspaceResumeHref,
 } from '@/lib/workbench/workspace-session-memory';
+import { resolveGenerationTeachingVoiceProfileId } from '@/lib/voice-cloning/selection-client';
+import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion';
 
 const log = createLogger('Home');
 
 const WEB_SEARCH_STORAGE_KEY = 'webSearchEnabled';
 const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
 const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
+const HOMEPAGE_TAGLINE = 'Create focused, engaging lessons with an AI teaching assistant.';
+const TEACHING_PROMPT_SUGGESTIONS = [
+  {
+    label: 'Explain a Concept',
+    prompt:
+      'Explain Fourier transforms to second-year engineering students using a signal-processing example.',
+  },
+  {
+    label: 'Tell a Historical Story',
+    prompt:
+      'Tell the historical story of Indian astronomy, clearly separating mythology, cultural tradition, and scientific evidence.',
+  },
+  {
+    label: 'Create a Quiz',
+    prompt:
+      "Create a five-question formative quiz on Newton's laws, with explanations for every answer.",
+  },
+  {
+    label: 'Teach with Examples',
+    prompt:
+      'Teach recursion in Python with three progressively harder examples for undergraduate students.',
+  },
+] as const;
 
 // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
 // yet, so the flow only logs the parsed slides. Hide the entry point behind a
@@ -145,6 +174,10 @@ function HomePage() {
   const showVocationalTestUi = shouldShowVocationalTestUi();
   const interactiveScenesEnabled = isInteractiveScenesEnabled();
   const voiceCloningEnabled = isVoiceCloningEnabled();
+  const staticVoiceEnabled = isStaticVoiceEnabled();
+  const promptPersonalizationEnabled = isPromptPersonalizationEnabled();
+  const webSearchEnabled = isWebSearchEnabled();
+  const classroomImportEnabled = isClassroomImportEnabled();
   const workbenchBuildEnabled = isProWorkbenchEnabled();
   const [workbenchRuntimeEnabled, setWorkbenchRuntimeEnabled] = useState(
     workbenchRuntimeCache === true,
@@ -207,7 +240,7 @@ function HomePage() {
       /* localStorage unavailable */
     }
     try {
-      const savedWebSearch = localStorage.getItem(WEB_SEARCH_STORAGE_KEY);
+      const savedWebSearch = webSearchEnabled ? localStorage.getItem(WEB_SEARCH_STORAGE_KEY) : null;
       const savedInteractiveMode = localStorage.getItem(INTERACTIVE_MODE_STORAGE_KEY);
       const updates: Partial<FormState> = {};
       if (savedWebSearch === 'true') updates.webSearch = true;
@@ -218,7 +251,7 @@ function HomePage() {
     } catch {
       /* localStorage unavailable */
     }
-  }, []);
+  }, [webSearchEnabled]);
 
   // Restore requirement draft from localStorage on mount. The previous derived-state
   // pattern initialised `prev` from the cached value itself, so on the first client
@@ -519,7 +552,9 @@ function HomePage() {
   const updateForm = <K extends keyof FormState>(field: K, value: FormState[K]) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     try {
-      if (field === 'webSearch') localStorage.setItem(WEB_SEARCH_STORAGE_KEY, String(value));
+      if (field === 'webSearch' && webSearchEnabled) {
+        localStorage.setItem(WEB_SEARCH_STORAGE_KEY, String(value));
+      }
       if (field === 'interactiveMode')
         localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
       if (field === 'requirement') updateRequirementCache(value as string);
@@ -614,12 +649,20 @@ function HomePage() {
     // Flip the generating UI state before material bytes are copied locally.
     setPreparingGenerate(true);
     try {
-      const userProfile = useUserProfileStore.getState();
+      const teacherVoiceProfileId = voiceCloningEnabled
+        ? await resolveGenerationTeachingVoiceProfileId(form.teacherVoiceProfileId)
+        : undefined;
+      if (teacherVoiceProfileId && teacherVoiceProfileId !== form.teacherVoiceProfileId) {
+        setForm((prev) => ({ ...prev, teacherVoiceProfileId }));
+      }
+      const userProfile = promptPersonalizationEnabled
+        ? useUserProfileStore.getState()
+        : { nickname: '', bio: '' };
       const requirements: UserRequirements = {
         requirement: form.requirement,
         userNickname: userProfile.nickname || undefined,
         userBio: userProfile.bio || undefined,
-        webSearch: form.webSearch || undefined,
+        webSearch: webSearchEnabled && form.webSearch ? true : undefined,
         interactiveMode: interactiveScenesEnabled
           ? form.vocationalTestMode
             ? true
@@ -658,6 +701,7 @@ function HomePage() {
               order: index + 1,
               storageKey,
               providerId: pdfProviderId,
+              processingStatus: 'pending',
             });
           }
         } catch (error) {
@@ -681,7 +725,7 @@ function HomePage() {
         pdfProviderConfig,
         sceneOutlines: null,
         currentStep: 'generating' as const,
-        teacherVoiceProfileId: form.teacherVoiceProfileId,
+        teacherVoiceProfileId,
       };
       sessionStorage.setItem('generationSession', JSON.stringify(sessionState));
 
@@ -719,13 +763,15 @@ function HomePage() {
 
   return (
     <div className="relative flex min-h-[100dvh] w-full flex-col items-center overflow-x-hidden bg-background p-4 pt-16 md:p-8 md:pt-16">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".zip"
-        onChange={handleFileChange}
-        className="hidden"
-      />
+      {classroomImportEnabled ? (
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".zip"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+      ) : null}
       {PPTX_IMPORT_ENABLED && (
         <input
           ref={pptxFileInputRef}
@@ -853,12 +899,9 @@ function HomePage() {
             stiffness: 200,
             damping: 20,
           }}
-          className="relative mb-5 flex flex-col items-center"
+          className="relative mb-3 flex flex-col items-center"
           data-pro-morph="lockup"
         >
-          <div className="mb-3 rounded-full border border-primary/20 bg-card/80 px-3.5 py-1.5 text-[11px] font-semibold text-primary shadow-[0_10px_26px_-22px_rgb(var(--brand-shadow)/0.32)] backdrop-blur dark:shadow-none">
-            {brandConfig.heroEyebrow}
-          </div>
           <h1 className="sahaya-hero-title text-6xl leading-none text-foreground sm:text-7xl md:text-8xl lg:text-9xl">
             {brandConfig.productName}
           </h1>
@@ -874,9 +917,9 @@ function HomePage() {
           initial={heroEnter({ opacity: 0 })}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.25 }}
-          className="mb-8 max-w-2xl text-center text-sm leading-6 text-muted-foreground"
+          className="mb-7 max-w-2xl text-center text-sm leading-6 text-muted-foreground"
         >
-          {brandConfig.productDescription}
+          {HOMEPAGE_TAGLINE}
         </motion.p>
 
         {/* ── Unified input area ── */}
@@ -892,23 +935,43 @@ function HomePage() {
           >
             <div className="h-1 bg-[linear-gradient(90deg,var(--brand-primary),var(--brand-secondary),var(--brand-gold))] dark:hidden" />
             {/* ── Greeting + Profile + Agents ── */}
-            <div className="relative z-20 flex items-start justify-between">
-              <GreetingBar />
-              <div className="pr-3 pt-3.5 shrink-0">
-                <AgentBar />
+            {promptPersonalizationEnabled || staticVoiceEnabled ? (
+              <div className="relative z-20 flex items-start justify-between">
+                {promptPersonalizationEnabled ? <GreetingBar /> : null}
+                {staticVoiceEnabled ? (
+                  <div className="ml-auto shrink-0 pr-3 pt-3.5">
+                    <AgentBar />
+                  </div>
+                ) : null}
               </div>
-            </div>
+            ) : null}
 
             {/* Textarea */}
             <textarea
               ref={textareaRef}
-              placeholder={t('upload.requirementPlaceholder')}
-              className="min-h-[140px] max-h-[300px] w-full resize-none border-0 bg-transparent px-4 pb-2 pt-1 text-[13px] leading-relaxed placeholder:text-muted-foreground/45 focus:outline-none"
+              placeholder="What would you like to teach today?"
+              className="min-h-[120px] max-h-[300px] w-full resize-none border-0 bg-transparent px-4 pb-2 pt-1 text-[13px] leading-relaxed placeholder:text-muted-foreground/55 focus:outline-none"
               value={form.requirement}
               onChange={(e) => updateForm('requirement', e.target.value)}
               onKeyDown={handleKeyDown}
               rows={4}
             />
+
+            <Suggestions className="px-3 pb-3" aria-label="Teaching prompt suggestions">
+              {TEACHING_PROMPT_SUGGESTIONS.map(({ label, prompt }) => (
+                <Suggestion
+                  key={label}
+                  suggestion={prompt}
+                  onClick={(value) => {
+                    updateForm('requirement', value);
+                    textareaRef.current?.focus();
+                  }}
+                  className="h-7 border-border/70 bg-background/70 px-3 text-[11px] text-muted-foreground hover:border-primary/35 hover:bg-primary/5 hover:text-foreground"
+                >
+                  {label}
+                </Suggestion>
+              ))}
+            </Suggestions>
 
             {/* Toolbar row */}
             <div className="px-3 pb-3 flex items-end gap-2">
@@ -1179,16 +1242,18 @@ function HomePage() {
                 )}
               </AnimatePresence>
 
-              <button
-                onClick={triggerImport}
-                disabled={importing}
-                className="group/import grid grid-cols-[auto_0fr] hover:grid-cols-[auto_1fr] items-center gap-1 rounded-full px-1.5 py-0.5 text-[12px] text-muted-foreground/35 hover:text-muted-foreground/70 hover:bg-muted/50 transition-all duration-200 cursor-pointer"
-              >
-                <Upload className="size-3" />
-                <span className="overflow-hidden opacity-0 group-hover/import:opacity-100 transition-opacity duration-200 whitespace-nowrap">
-                  {t('import.classroom')}
-                </span>
-              </button>
+              {classroomImportEnabled ? (
+                <button
+                  onClick={triggerImport}
+                  disabled={importing}
+                  className="group/import grid grid-cols-[auto_0fr] items-center gap-1 rounded-full px-1.5 py-0.5 text-[12px] text-muted-foreground/35 transition-all duration-200 hover:grid-cols-[auto_1fr] hover:bg-muted/50 hover:text-muted-foreground/70 cursor-pointer"
+                >
+                  <Upload className="size-3" />
+                  <span className="overflow-hidden whitespace-nowrap opacity-0 transition-opacity duration-200 group-hover/import:opacity-100">
+                    {t('import.classroom')}
+                  </span>
+                </button>
+              ) : null}
               {PPTX_IMPORT_ENABLED && (
                 <button
                   onClick={triggerPptxFileSelect}

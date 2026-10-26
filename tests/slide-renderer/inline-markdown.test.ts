@@ -8,6 +8,15 @@ describe('slide inline markdown formatting', () => {
     expect(formatSnapshotInlineMarkdownBold(input)).toBe(output);
   }
 
+  function expectBothContain(input: string, fragments: string[]) {
+    const classroom = formatClassroomInlineMarkdownBold(input);
+    const snapshot = formatSnapshotInlineMarkdownBold(input);
+    expect(classroom).toBe(snapshot);
+    for (const fragment of fragments) {
+      expect(classroom).toContain(fragment);
+    }
+  }
+
   it('renders simple inline bold without visible markdown markers', () => {
     expectBoth('This is **important** text', 'This is <strong>important</strong> text');
   });
@@ -42,15 +51,55 @@ describe('slide inline markdown formatting', () => {
     );
   });
 
+  it('renders generated inline LaTeX in ordinary slide text', () => {
+    expectBothContain('Momentum is $p = mv$ in motion.', [
+      'Momentum is ',
+      'class="katex"',
+      'mord mathnormal',
+      ' in motion.',
+    ]);
+    expectBothContain('Use \\(E = mc^2\\) for mass-energy equivalence.', [
+      'class="katex"',
+      'mord mathnormal',
+    ]);
+  });
+
+  it('renders generated block LaTeX without leaving raw delimiters', () => {
+    const output = formatClassroomInlineMarkdownBold('$$\\frac{a}{b} = c$$');
+    expect(output).toContain('class="katex-display"');
+    expect(output).toContain('mfrac');
+    expect(output).not.toContain('$$');
+    expect(formatSnapshotInlineMarkdownBold('$$\\frac{a}{b} = c$$')).toBe(output);
+  });
+
+  it('renders math inside generated list items', () => {
+    expectBothContain('- Force $F = ma$\n- Energy $E = mc^2$', [
+      '<ul>',
+      '<li>Force ',
+      'class="katex"',
+      '<li>Energy ',
+    ]);
+  });
+
   it('keeps code-like expressions unchanged', () => {
     expectBoth('Arrays use arr[i]', 'Arrays use arr[i]');
     expectBoth('a * b', 'a * b');
+    expectBoth(
+      'The fee is $25 and the grant is US$100.',
+      'The fee is $25 and the grant is US$100.',
+    );
+    expectBoth('$HOME and ${PATH} are shell values.', '$HOME and ${PATH} are shell values.');
     expect(formatClassroomInlineMarkdownBold('<code>A \\rightarrow B</code>')).toBe(
       '<code>A \\rightarrow B</code>',
     );
     expect(formatSnapshotInlineMarkdownBold('<pre>A \\rightarrow B</pre>')).toBe(
       '<pre>A \\rightarrow B</pre>',
     );
+  });
+
+  it('does not expand very large malformed math blocks into raw slide text', () => {
+    const rawLatex = `$$${'\\badcommand '.repeat(60)}$$`;
+    expectBoth(rawLatex, '<span class="slide-math-unavailable">Formula unavailable</span>');
   });
 
   it('normalizes generated inline unicode bullets into visible list items', () => {

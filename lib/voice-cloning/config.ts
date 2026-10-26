@@ -1,5 +1,10 @@
 import path from 'path';
 import { isVoiceCloningEnabled } from '@/lib/config/feature-flags';
+import {
+  DEFAULT_CHATTERBOX_MODEL_VARIANT,
+  isChatterboxModelVariant,
+  type ChatterboxModelVariant,
+} from '@/lib/voice-cloning/types';
 
 export function isVoiceCloningServerEnabled(): boolean {
   return isVoiceCloningEnabled();
@@ -27,6 +32,108 @@ export function getVoiceCloningTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
 }
 
-export function getChatterboxDefaultModelVariant(): string {
-  return (process.env.CHATTERBOX_T3_MODEL || 'v3').trim().toLowerCase() || 'v3';
+export function isQwen3TtsPreviewEnabled(): boolean {
+  return envFlag('QWEN3_TTS_PREVIEW_ENABLED', false);
+}
+
+export function isQwen3TtsClassroomEnabled(): boolean {
+  return envFlag('QWEN3_TTS_CLASSROOM_ENABLED', false);
+}
+
+export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs: number } {
+  return {
+    baseUrl: (process.env.QWEN3_TTS_BASE_URL || 'http://127.0.0.1:8771').trim().replace(/\/$/, ''),
+    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 1000, 900000)),
+  };
+}
+
+export function getChatterboxDefaultModelVariant(): ChatterboxModelVariant {
+  const configured = (process.env.CHATTERBOX_T3_MODEL || '').trim().toLowerCase();
+  return isChatterboxModelVariant(configured) ? configured : DEFAULT_CHATTERBOX_MODEL_VARIANT;
+}
+
+export type VoiceEnhancementSurface = 'preview' | 'classroom';
+
+export interface VoiceEnhancementConfig {
+  enabled: boolean;
+  backend: 'resemble-enhance';
+  previewEnabled: boolean;
+  classroomEnabled: boolean;
+  hindiEnabled: boolean;
+  timeoutMs: number;
+  maxConcurrency: number;
+  pythonExecutable: string;
+  workerPath: string;
+  device: string;
+  nfe: number;
+  solver: 'midpoint' | 'rk4' | 'euler';
+  denoiseStrength: number;
+  priorTemperature: number;
+}
+
+function envFlag(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (value === undefined || value === '') return fallback;
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
+function boundedNumber(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+export function getVoiceEnhancementConfig(): VoiceEnhancementConfig {
+  const backend = (process.env.VOICE_ENHANCEMENT_BACKEND || 'resemble-enhance')
+    .trim()
+    .toLowerCase();
+  if (backend !== 'resemble-enhance') {
+    throw new Error(`Unsupported voice enhancement backend: ${backend}`);
+  }
+  const solverValue = (process.env.RESEMBLE_ENHANCE_SOLVER || 'midpoint').trim().toLowerCase();
+  const solver =
+    solverValue === 'rk4' || solverValue === 'euler' || solverValue === 'midpoint'
+      ? solverValue
+      : 'midpoint';
+  return {
+    enabled: envFlag('VOICE_ENHANCEMENT_ENABLED', false),
+    backend,
+    previewEnabled: envFlag('VOICE_ENHANCEMENT_PREVIEW_ENABLED', true),
+    classroomEnabled: envFlag('VOICE_ENHANCEMENT_CLASSROOM_ENABLED', false),
+    hindiEnabled: envFlag('VOICE_ENHANCEMENT_HINDI_ENABLED', false),
+    timeoutMs: Math.floor(boundedNumber('VOICE_ENHANCEMENT_TIMEOUT_MS', 120000, 1000, 900000)),
+    maxConcurrency: Math.floor(boundedNumber('VOICE_ENHANCEMENT_MAX_CONCURRENCY', 1, 1, 4)),
+    pythonExecutable: process.env.RESEMBLE_ENHANCE_PYTHON?.trim() || 'python3',
+    workerPath:
+      process.env.RESEMBLE_ENHANCE_WORKER_PATH?.trim() ||
+      path.join(process.cwd(), 'services', 'resemble-enhance', 'worker.py'),
+    device: process.env.RESEMBLE_ENHANCE_DEVICE?.trim() || 'cuda',
+    nfe: Math.floor(boundedNumber('RESEMBLE_ENHANCE_NFE', 32, 1, 128)),
+    solver,
+    denoiseStrength: boundedNumber('RESEMBLE_ENHANCE_DENOISE_STRENGTH', 0.1, 0, 1),
+    priorTemperature: boundedNumber('RESEMBLE_ENHANCE_PRIOR_TEMPERATURE', 0.5, 0, 1),
+  };
+}
+
+export function isVoiceEnhancementAllowed(
+  providerId: 'chatterbox' | 'indicf5' | 'qwen3-tts',
+  languageId: string,
+  surface: VoiceEnhancementSurface,
+): boolean {
+  const config = getVoiceEnhancementConfig();
+  if (providerId === 'indicf5') return false;
+  if (!config.enabled) return false;
+  if (surface === 'preview' && !config.previewEnabled) return false;
+  if (surface === 'classroom' && !config.classroomEnabled) return false;
+  if (languageId === 'en') return true;
+  return languageId === 'hi' && config.hindiEnabled;
+}
+
+export function getTeachingVoiceServiceConfig(_provider: 'indicf5') {
+  const baseUrl = process.env.INDICF5_VOICE_CLONING_BASE_URL || 'http://127.0.0.1:8772';
+  const defaultTimeout = 900000;
+  const parsed = Number(process.env.INDICF5_VOICE_CLONING_TIMEOUT_MS || defaultTimeout);
+  return {
+    baseUrl: baseUrl.trim().replace(/\/$/, ''),
+    timeoutMs: Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : defaultTimeout,
+  };
 }

@@ -40,8 +40,12 @@ const CODE_LIKE_INCREMENT_RE = /^([ijk])\s*=\s*\1\s*[+-]\s*1$/i;
 const SENTENCE_BOUNDARY_CHAR_RE = /^[.,!?;:]$/;
 const TOKEN_RE = /\S+/g;
 
-export function isLikelyStandaloneMathText(value: string): boolean {
-  const text = value.trim();
+function normalizeMathText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+export function isLikelyStandaloneMathText(value: unknown): boolean {
+  const text = normalizeMathText(value).trim();
   if (text.length < 3) return false;
   if (!FORMULA_CHAR_RE.test(text)) return false;
   if (!LETTER_OR_COMMAND_RE.test(text) && !EQUATION_OR_POWER_RE.test(text)) return false;
@@ -218,25 +222,26 @@ function isLikelyDelimitedMathText(value: string): boolean {
   return false;
 }
 
-export function renderQuizMathText(value: string): QuizMathTextSegment[] {
-  const likelyStandalone = isLikelyStandaloneMathText(value);
-  const hasExplicitDelimiter = EXPLICIT_DELIMITER_RE.test(value);
+export function renderQuizMathText(value: unknown): QuizMathTextSegment[] {
+  const text = normalizeMathText(value);
+  const likelyStandalone = isLikelyStandaloneMathText(text);
+  const hasExplicitDelimiter = EXPLICIT_DELIMITER_RE.test(text);
 
   if (!hasExplicitDelimiter && !likelyStandalone) {
-    return parseEmbeddedMathText(value) ?? [{ type: 'text', value }];
+    return parseEmbeddedMathText(text) ?? [{ type: 'text', value: text }];
   }
 
-  const delimited = parseQuizMathText(value);
+  const delimited = parseQuizMathText(text);
   if (delimited.some((segment) => segment.type === 'math')) return delimited;
 
-  if (!likelyStandalone) return [{ type: 'text', value }];
+  if (!likelyStandalone) return [{ type: 'text', value: text }];
 
-  const latex = value.trim();
+  const latex = text.trim();
   const html = renderLatexToHtml(latex, false);
-  if (!html) return [{ type: 'text', value }];
+  if (!html) return [{ type: 'text', value: text }];
 
-  const prefix = value.slice(0, value.indexOf(latex));
-  const suffix = value.slice(value.indexOf(latex) + latex.length);
+  const prefix = text.slice(0, text.indexOf(latex));
+  const suffix = text.slice(text.indexOf(latex) + latex.length);
 
   return mergeTextSegments([
     ...(prefix ? ([{ type: 'text', value: prefix }] as QuizMathTextSegment[]) : []),

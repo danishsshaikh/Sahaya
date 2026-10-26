@@ -78,6 +78,8 @@ export interface SessionDocumentSource {
    */
   contentDigest?: string;
   providerId?: string;
+  processingStatus?: 'pending' | 'processing' | 'ready' | 'failed';
+  processingError?: string;
 }
 
 // ==================== Stage 1 Input ====================

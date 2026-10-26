@@ -24,6 +24,7 @@ import {
   markVoiceBindingUnavailable,
   trackAssignedVoiceBinding,
 } from '@/lib/audio/unavailable-voice-bindings';
+import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
 interface DiscussionTTSOptions {
   enabled: boolean;
@@ -50,6 +51,7 @@ interface PreparedSegment {
 }
 
 export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: DiscussionTTSOptions) {
+  const playbackEnabled = enabled && isStaticVoiceEnabled();
   const { locale, t } = useI18n();
   const ttsProvidersConfig = useSettingsStore((s) => s.ttsProvidersConfig);
   const ttsSpeed = useSettingsStore((s) => s.ttsSpeed);
@@ -87,6 +89,7 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
     resume: browserResume,
     cancel: browserCancel,
   } = useBrowserTTS({
+    enabled: playbackEnabled,
     rate: ttsSpeed,
     onEnd: () => {
       if (currentProviderRef.current !== 'browser-native-tts' || !isPlayingRef.current) return;
@@ -122,12 +125,12 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
   // picker uses, so discussion resolution and the picker stay in sync.
   const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (!playbackEnabled || typeof window === 'undefined' || !window.speechSynthesis) return;
     const load = () => setBrowserVoices(window.speechSynthesis.getVoices());
     load();
     window.speechSynthesis.addEventListener('voiceschanged', load);
     return () => window.speechSynthesis.removeEventListener('voiceschanged', load);
-  }, []);
+  }, [playbackEnabled]);
 
   const resolveVoiceForAgent = useCallback(
     (agentId: string | null): ResolvedVoice | null => {
@@ -269,7 +272,7 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
   const prefetchNext = useCallback(() => {
     // One active synthesis at a time, with at most one prepared segment ahead
     // of playback. Browser speech stays on the sequential playback path.
-    if (!enabled || ttsMuted || pausedRef.current || !isPlayingRef.current) return;
+    if (!playbackEnabled || ttsMuted || pausedRef.current || !isPlayingRef.current) return;
     if (abortControllerRef.current || prefetchedRef.current) return;
     const item = queueRef.current[0];
     if (!item || item.providerId === 'browser-native-tts') return;
@@ -282,13 +285,13 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
         (error: unknown) => ({ error }),
       ),
     };
-  }, [enabled, ttsMuted, generateAudio]);
+  }, [playbackEnabled, ttsMuted, generateAudio]);
   prefetchNextRef.current = prefetchNext;
 
   const processQueue = useCallback(async () => {
     if (pausedRef.current) return; // Don't advance while paused
     if (isPlayingRef.current || queueRef.current.length === 0) return;
-    if (!enabled || ttsMuted) {
+    if (!playbackEnabled || ttsMuted) {
       queueRef.current = [];
       return;
     }
@@ -405,13 +408,13 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
         queueMicrotask(() => processQueueRef.current());
       }
     }
-  }, [enabled, t, ttsMuted, generateAudio]);
+  }, [playbackEnabled, t, ttsMuted, generateAudio]);
 
   processQueueRef.current = processQueue;
 
   const handleSegmentSealed = useCallback(
     (messageId: string, partId: string, fullText: string, agentId: string | null) => {
-      if (!enabled || ttsMuted || !fullText.trim()) return;
+      if (!playbackEnabled || ttsMuted || !fullText.trim()) return;
 
       // No enabled provider for this agent ⇒ skip TTS (no silent browser-native).
       const resolved = resolveVoiceForAgent(agentId);
@@ -455,7 +458,7 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
       }
     },
     [
-      enabled,
+      playbackEnabled,
       globalTtsProviderId,
       globalTtsVoice,
       resolveVoiceForAgent,
@@ -536,12 +539,12 @@ export function useDiscussionTTS({ enabled, agents, onAudioStateChange }: Discus
     if (ttsMuted) {
       prefetchedRef.current?.controller.abort();
       prefetchedRef.current = null;
-    } else if (!enabled) {
+    } else if (!playbackEnabled) {
       cleanup();
     } else {
       prefetchNextRef.current();
     }
-  }, [enabled, ttsMuted, cleanup]);
+  }, [playbackEnabled, ttsMuted, cleanup]);
 
   useEffect(() => cleanup, [cleanup]);
 
