@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +55,24 @@ describe('voice profile user isolation', () => {
     await expect(findCurrentVoiceProfile('usr_b')).resolves.toMatchObject({ id: 'vcp_b' });
     await expect(referenceAudioExists(referenceKey)).resolves.toBe(true);
     expect(referenceKey).toContain(join('users', 'usr_a', 'voice-profiles', 'vcp_a'));
+  });
+
+  it('retains exact original enrollment bytes in owner-scoped protected storage', async () => {
+    const { writeOriginalRecording } = await import('@/lib/voice-cloning/storage');
+    const bytes = new Uint8Array([9, 1, 4, 1, 5, 9, 2, 6]);
+    const stored = await writeOriginalRecording('vcp_a', 'usr_a', {
+      bytes,
+      mimeType: 'audio/ogg;codecs=opus',
+      fileName: 'faculty.ogg',
+    });
+    expect(stored.key).toContain(join('users', 'usr_a', 'voice-profiles', 'vcp_a'));
+    expect(stored.mimeType).toBe('audio/ogg;codecs=opus');
+    expect(stored.byteLength).toBe(bytes.byteLength);
+    expect(
+      createHash('sha256')
+        .update(await readFile(stored.key))
+        .digest('hex'),
+    ).toBe(createHash('sha256').update(bytes).digest('hex'));
   });
 
   it('looks up and replaces only ready profiles in the requested language', async () => {

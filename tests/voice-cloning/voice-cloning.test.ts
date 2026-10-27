@@ -561,7 +561,7 @@ describe('faculty voice setup UI contract', () => {
     expect(source).toContain('<option value="en">English</option>');
     expect(source).toContain('<option value="hi">Hindi-influenced</option>');
     expect(source).toContain('Voice Output');
-    expect(source).toContain('Preview Changes');
+    expect(source).toContain('Generate Preview');
     expect(source).not.toContain('Voice Model');
     expect(source).not.toContain('Advanced Voice Settings');
     expect(source).not.toContain('Expert Settings');
@@ -724,6 +724,7 @@ describe('voice profile model preview API', () => {
   const findVoiceProfileByEnrollmentAttempt = vi.fn();
   const deleteVoiceProfileAssets = vi.fn();
   const writeReferenceAudio = vi.fn();
+  const writeOriginalRecording = vi.fn();
   const referenceAudioExists = vi.fn();
   const normalizeVoiceEnrollmentRecording = vi.fn();
   const masterGeneratedVoiceAudio = vi.fn();
@@ -746,6 +747,7 @@ describe('voice profile model preview API', () => {
     findVoiceProfileByEnrollmentAttempt.mockReset();
     deleteVoiceProfileAssets.mockReset();
     writeReferenceAudio.mockReset();
+    writeOriginalRecording.mockReset();
     referenceAudioExists.mockReset();
     normalizeVoiceEnrollmentRecording.mockReset();
     masterGeneratedVoiceAudio.mockReset();
@@ -764,6 +766,12 @@ describe('voice profile model preview API', () => {
     findCurrentVoiceProfile.mockResolvedValue(null);
     findVoiceProfileByEnrollmentAttempt.mockResolvedValue(null);
     writeReferenceAudio.mockResolvedValue('/private/reference.wav');
+    writeOriginalRecording.mockResolvedValue({
+      key: '/private/original-recording.webm',
+      mimeType: 'audio/webm',
+      byteLength: 4,
+      createdAt: '2026-10-26T00:00:00.000Z',
+    });
     normalizeVoiceEnrollmentRecording.mockResolvedValue({
       referenceAudio: new Uint8Array([9, 9]),
       durationSeconds: 15,
@@ -829,6 +837,7 @@ describe('voice profile model preview API', () => {
       readVoiceProfile,
       referenceAudioExists,
       writeReferenceAudio,
+      writeOriginalRecording,
       writeVoiceProfile,
       resolveReferenceAudioPath: (key: string) => key,
     }));
@@ -975,6 +984,15 @@ describe('voice profile model preview API', () => {
       'vcp_new',
       'local-faculty',
       new Uint8Array([9, 9]),
+    );
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({
+        bytes: new Uint8Array([1, 2, 3, 4]),
+        mimeType: 'audio/webm',
+        fileName: 'voice.webm',
+      }),
     );
     expect(createProfile).toHaveBeenCalledWith(
       expect.objectContaining({

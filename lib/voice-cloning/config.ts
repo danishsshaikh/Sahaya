@@ -47,6 +47,22 @@ export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs:
   };
 }
 
+export function isMing3TtsPreviewEnabled(): boolean {
+  return envFlag('MING3_TTS_PREVIEW_ENABLED', false);
+}
+
+export function getMing3TtsPreviewServiceConfig(): {
+  baseUrl: string;
+  timeoutMs: number;
+  maxConcurrency: number;
+} {
+  return {
+    baseUrl: (process.env.MING3_TTS_BASE_URL || 'http://127.0.0.1:8773').trim().replace(/\/$/, ''),
+    timeoutMs: Math.floor(boundedNumber('MING3_TTS_TIMEOUT_MS', 300000, 1000, 900000)),
+    maxConcurrency: Math.floor(boundedNumber('MING3_TTS_MAX_CONCURRENCY', 1, 1, 2)),
+  };
+}
+
 export function getChatterboxDefaultModelVariant(): ChatterboxModelVariant {
   const configured = (process.env.CHATTERBOX_T3_MODEL || '').trim().toLowerCase();
   return isChatterboxModelVariant(configured) ? configured : DEFAULT_CHATTERBOX_MODEL_VARIANT;

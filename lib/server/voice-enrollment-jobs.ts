@@ -21,6 +21,7 @@ import {
   referenceAudioExists,
   resolveReferenceAudioPath,
   writeReferenceAudio,
+  writeOriginalRecording,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
 import {
@@ -221,6 +222,7 @@ export async function generateVariantPreview(
     onPhase?: (phase: VoiceEnrollmentJobPhase) => void;
     attemptId?: string;
     previewTextLanguageId?: 'en' | 'hi';
+    previewText?: string;
   } = {},
 ): Promise<{
   providerReferenceId: string;
@@ -257,7 +259,9 @@ export async function generateVariantPreview(
   options.onPhase?.('preview_generation');
   const preview = await provider.generatePreview({
     providerReferenceId,
-    text: getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
+    text:
+      options.previewText ??
+      getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
@@ -495,7 +499,17 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       input.ownerUserId,
       normalizedReference.referenceAudio,
     );
-    profile = { ...profile, referenceAudioKey, updatedAt: new Date().toISOString() };
+    const originalRecording = await writeOriginalRecording(
+      profileId,
+      input.ownerUserId,
+      input.recording,
+    );
+    profile = {
+      ...profile,
+      referenceAudioKey,
+      originalRecording,
+      updatedAt: new Date().toISOString(),
+    };
     await writeVoiceProfile(profile);
     log.info('voice reference preprocessing completed', {
       attemptId: input.attemptId,
@@ -510,6 +524,8 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       clippedSampleRatio: normalizedReference.quality.clippedSampleRatio,
       maxConsecutiveClippingMs: normalizedReference.quality.maxConsecutiveClippingMs,
       qualityDecision: normalizedReference.qualityDecision.severity,
+      originalRecordingRetained: true,
+      originalRecordingMimeType: input.recording.mimeType,
     });
 
     const config: VoiceConfiguration = {
@@ -777,6 +793,7 @@ export async function acceptVoiceProfilePreview(
     preview: profile.draftPreview?.preview,
     previewComparison: profile.draftPreview?.comparison,
     previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
+    previewText: profile.draftPreview?.config.previewText,
     draftPreview: undefined,
     updatedAt: new Date().toISOString(),
   };
@@ -801,6 +818,7 @@ export async function acceptVoiceProfilePreview(
         ...previousProfile,
         status: 'deleted',
         referenceAudioKey: undefined,
+        originalRecording: undefined,
         referenceText: undefined,
         providerReferenceId: undefined,
         preview: undefined,

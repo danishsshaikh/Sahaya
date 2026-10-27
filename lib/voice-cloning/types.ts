@@ -65,6 +65,7 @@ export type VoicePreviewTextLanguage = 'en' | 'hi';
 
 export interface VoicePreviewConfiguration extends VoiceConfiguration {
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
 }
 
 export interface VoicePreview {
@@ -85,11 +86,32 @@ export interface VoiceModelPreviewResult {
   enhancementMode: VoiceEnhancementMode;
   preview: VoicePreview;
   comparison: VoicePreviewComparison;
+  previewText?: string;
 }
 
 export interface Qwen3TtsPreviewCache {
   cacheKey: string;
   result: VoiceModelPreviewResult;
+}
+
+export interface SarvamVoiceRegistration {
+  voiceId: string;
+  consentTimestamp: string;
+  consentVersion: string;
+  createdAt: string;
+  referenceAudioKey: string;
+  profileVersion: number;
+  referenceLanguage: string;
+  referenceProvenance?: 'original-upload' | 'processed-reference';
+  referenceMimeType?: string;
+  providerReferenceText?: string;
+}
+
+export interface OriginalVoiceRecording {
+  key: string;
+  mimeType: string;
+  byteLength: number;
+  createdAt: string;
 }
 
 export interface VoiceDraftPreview {
@@ -125,12 +147,19 @@ export interface VoiceProfile {
   activeEngine?: TeachingVoiceEngine;
   qwenEnhancementMode?: VoiceEnhancementMode;
   qwenPreviewCache?: Qwen3TtsPreviewCache;
+  /** Exact bytes received from the enrollment upload. Never exposed to the browser. */
+  originalRecording?: OriginalVoiceRecording;
+  /** Legacy Sarvam registrations are preserved for reuse and never overwritten implicitly. */
+  sarvamVoice?: SarvamVoiceRegistration;
+  /** Sarvam clone made from an exact, provider-supported original upload. */
+  sarvamRawVoice?: SarvamVoiceRegistration;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -156,10 +185,18 @@ export interface PublicVoiceProfile {
   activeEngine: TeachingVoiceEngine;
   qwenEnhancementMode?: VoiceEnhancementMode;
   qwenPreview?: VoiceModelPreviewResult;
+  sarvamVoice?: {
+    ready: true;
+    consentTimestamp: string;
+    createdAt: string;
+    referenceProvenance: 'original-upload' | 'processed-reference' | 'unknown';
+  };
+  originalRecordingRetained?: boolean;
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -253,7 +290,7 @@ export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
     message: string,
     status: number,
     readonly metadata: {
-      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts';
+      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts' | 'ming3-tts';
       endpoint: string;
       operation: TeachingVoiceProviderOperation;
       providerStatus?: number;
@@ -407,6 +444,7 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(!legacyQwenProfile && profile.previewTextLanguageId
       ? { previewTextLanguageId: profile.previewTextLanguageId }
       : {}),
+    ...(!legacyQwenProfile && profile.previewText ? { previewText: profile.previewText } : {}),
     ...(!legacyQwenProfile && profile.previewVariants
       ? { previewVariants: profile.previewVariants }
       : {}),
@@ -414,6 +452,19 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(!legacyQwenProfile && profile.qwenPreviewCache
       ? { qwenPreview: profile.qwenPreviewCache.result }
       : {}),
+    ...(!legacyQwenProfile && (profile.sarvamRawVoice || profile.sarvamVoice)
+      ? {
+          sarvamVoice: {
+            ready: true as const,
+            consentTimestamp: (profile.sarvamRawVoice || profile.sarvamVoice)!.consentTimestamp,
+            createdAt: (profile.sarvamRawVoice || profile.sarvamVoice)!.createdAt,
+            referenceProvenance: profile.sarvamRawVoice
+              ? 'original-upload'
+              : (profile.sarvamVoice?.referenceProvenance ?? 'processed-reference'),
+          },
+        }
+      : {}),
+    ...(profile.originalRecording ? { originalRecordingRetained: true } : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
 }
