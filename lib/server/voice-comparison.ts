@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import {
   BODHAN_STYLES,
   BODHAN_VOICES,
@@ -10,6 +11,7 @@ import {
 } from '@/lib/voice-comparison/catalog';
 import { concatenatePcmWav, readWavMetadata, splitSpeechText } from '@/lib/voice-comparison/audio';
 import { BodhanIndicSpeakPreviewProvider } from '@/lib/voice-comparison/providers/bodhan';
+import { Ming3TtsPreviewProvider } from '@/lib/voice-comparison/providers/ming3';
 import {
   SarvamVoiceCloningPreviewProvider,
   sarvamReferenceUploadType,
@@ -35,7 +37,11 @@ import {
   writeVoiceComparisonCache,
 } from '@/lib/server/voice-comparison-cache';
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
-import { isQwen3TtsPreviewEnabled } from '@/lib/voice-cloning/config';
+import {
+  getMing3TtsPreviewServiceConfig,
+  isMing3TtsPreviewEnabled,
+  isQwen3TtsPreviewEnabled,
+} from '@/lib/voice-cloning/config';
 import { resolveVoiceProfileReferenceLanguage } from '@/lib/voice-cloning/language';
 import { getVoiceCloningProvider } from '@/lib/voice-cloning/provider';
 import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
@@ -57,7 +63,25 @@ import { createLogger } from '@/lib/logger';
 
 const SARVAM_CONSENT_VERSION = 'sarvam-external-voice-raw-v2';
 const SARVAM_RAW_PROCESSING_MODE = 'raw-provider-output-v1';
+const MING3_PROCESSING_MODE = 'official-model-runtime-v1';
 const log = createLogger('VoiceComparison');
+
+function mingReference(profile: VoiceProfile): {
+  key: string;
+  provenance: 'original-upload' | 'processed-reference';
+} | null {
+  const originalMime = profile.originalRecording?.mimeType.toLowerCase().split(';', 1)[0];
+  if (
+    profile.originalRecording &&
+    originalMime &&
+    ['audio/wav', 'audio/x-wav', 'audio/flac', 'audio/ogg', 'audio/opus'].includes(originalMime)
+  ) {
+    return { key: profile.originalRecording.key, provenance: 'original-upload' };
+  }
+  return profile.referenceAudioKey
+    ? { key: profile.referenceAudioKey, provenance: 'processed-reference' }
+    : null;
+}
 
 function voiceProviderAvailability(
   profile: VoiceProfile,
@@ -89,6 +113,18 @@ function voiceProviderAvailability(
       : available
         ? undefined
         : 'Requires a ready English Teaching Voice recording.';
+  } else if (providerId === 'ming3-tts') {
+    configured = isMing3TtsPreviewEnabled();
+    available =
+      configured &&
+      referenceReady &&
+      referenceLanguage === 'en' &&
+      Boolean(profile.referenceText?.trim());
+    unavailableReason = !configured
+      ? 'Not configured'
+      : available
+        ? undefined
+        : 'Requires a ready English Teaching Voice recording and transcript.';
   } else if (providerId === 'indicf5') {
     available =
       referenceReady &&
@@ -234,6 +270,9 @@ function voiceComparisonCacheKey(input: {
     profileId: input.profile.id,
     profileVersion: input.profile.profileVersion,
     referenceAudioKey: input.profile.referenceAudioKey ?? null,
+    ...(input.request.providerId === 'ming3-tts'
+      ? { mingReferenceAudioKey: mingReference(input.profile)?.key ?? null }
+      : {}),
     providerId: input.request.providerId,
     language: input.request.language,
     text: input.synthesisText,
@@ -250,13 +289,35 @@ function voiceComparisonCacheKey(input: {
         : null,
     qwenCloneMode: input.request.providerId === 'qwen3-tts' ? 'speaker-embedding' : null,
     processingMode:
-      input.request.providerId === 'sarvam' ? SARVAM_RAW_PROCESSING_MODE : 'standard-v1',
-    outputCodec: input.request.providerId === 'sarvam' ? 'wav' : null,
+      input.request.providerId === 'sarvam'
+        ? SARVAM_RAW_PROCESSING_MODE
+        : input.request.providerId === 'ming3-tts'
+          ? MING3_PROCESSING_MODE
+          : 'standard-v1',
+    outputCodec:
+      input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts'
+        ? 'wav'
+        : null,
     providerGenerationParameters:
       input.request.providerId === 'sarvam'
         ? { enableVad: false, enableTextNormalization: false, enableQc: false }
-        : null,
+        : input.request.providerId === 'ming3-tts'
+          ? {
+              task: 'TTS',
+              languageId: 'English',
+              useSpeakerEmbedding: true,
+              rawText: true,
+              modelDefaults: true,
+            }
+          : null,
   });
+}
+
+function mingServiceProfileId(profile: VoiceProfile): string {
+  return `ming_${createHash('sha256')
+    .update(`${profile.ownerId}\0${profile.id}\0${profile.profileVersion}`)
+    .digest('hex')
+    .slice(0, 32)}`;
 }
 
 function validLegacySarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
@@ -414,7 +475,13 @@ async function generateProviderAudio(input: {
   request: VoiceComparisonPreviewRequest;
   sarvamRegistration?: SarvamVoiceRegistration;
   signal?: AbortSignal;
-}): Promise<{ audio: Uint8Array; durationSeconds?: number; requestId?: string; chunked: boolean }> {
+}): Promise<{
+  audio: Uint8Array;
+  durationSeconds?: number;
+  requestId?: string;
+  referenceTransformation?: string;
+  chunked: boolean;
+}> {
   const { profile, request } = input;
   if (request.providerId === 'sarvam') {
     if (!input.sarvamRegistration) throw new TeachingVoiceError('Sarvam AI voice is not ready.');
@@ -435,6 +502,45 @@ async function generateProviderAudio(input: {
       audio: result.audio,
       durationSeconds: result.durationSeconds,
       ...(result.requestId ? { requestId: result.requestId } : {}),
+      chunked: false,
+    };
+  }
+  if (request.providerId === 'ming3-tts') {
+    if (!request.text.trim()) throw new TeachingVoiceError('Enter text to compare.');
+    if (request.text.length > 1000) {
+      throw new TeachingVoiceError(
+        'Ming 3.0 TTS preview is limited to 1000 characters for one direct model request.',
+      );
+    }
+    const reference = mingReference(profile);
+    if (!reference || !profile.referenceText?.trim()) {
+      throw new TeachingVoiceError(
+        'Ming 3.0 TTS requires the saved English reference audio and transcript.',
+      );
+    }
+    const provider = new Ming3TtsPreviewProvider();
+    const serviceProfileId = mingServiceProfileId(profile);
+    await provider.registerProfile(
+      {
+        profileId: serviceProfileId,
+        referenceAudioPath: resolveReferenceAudioPath(reference.key),
+        referenceText: profile.referenceText,
+      },
+      input.signal,
+    );
+    const result = await provider.synthesize({
+      profileId: serviceProfileId,
+      text: request.text,
+      language: 'en',
+      signal: input.signal,
+    });
+    return {
+      audio: result.audio,
+      durationSeconds: result.durationSeconds,
+      ...(result.requestId ? { requestId: result.requestId } : {}),
+      ...(result.referenceTransformation
+        ? { referenceTransformation: result.referenceTransformation }
+        : {}),
       chunked: false,
     };
   }
@@ -509,12 +615,16 @@ export async function generateVoiceComparisonPreview(input: {
   validateRequest(profile, input.request);
   const capability = getVoiceComparisonProvider(input.request.providerId);
   const synthesisText =
-    input.request.providerId === 'sarvam' ? input.request.text : input.request.text.trim();
-  if (input.request.providerId === 'sarvam') {
+    input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts'
+      ? input.request.text
+      : input.request.text.trim();
+  if (input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts') {
     if (!synthesisText.trim()) throw new TeachingVoiceError('Enter text to compare.');
     if (synthesisText.length > 1000) {
       throw new TeachingVoiceError(
-        'Raw Sarvam comparison is limited to 1000 characters so the result remains one untouched provider response.',
+        input.request.providerId === 'sarvam'
+          ? 'Raw Sarvam comparison is limited to 1000 characters so the result remains one untouched provider response.'
+          : 'Ming 3.0 TTS preview is limited to 1000 characters for one direct model request.',
       );
     }
   } else {
@@ -548,7 +658,8 @@ export async function generateVoiceComparisonPreview(input: {
       referenceProvenance: cached.referenceProvenance,
       providerRequestId: cached.providerRequestId,
       cache: 'hit',
-      sahayaAudioProcessingApplied: input.request.providerId !== 'sarvam',
+      sahayaAudioProcessingApplied:
+        input.request.providerId !== 'sarvam' && input.request.providerId !== 'ming3-tts',
     });
     return cached;
   }
@@ -558,7 +669,9 @@ export async function generateVoiceComparisonPreview(input: {
       ? getSarvamVoiceCloningConfig()
       : input.request.providerId === 'bodhan'
         ? getBodhanTtsConfig()
-        : null;
+        : input.request.providerId === 'ming3-tts'
+          ? getMing3TtsPreviewServiceConfig()
+          : null;
   return runControlledVoicePreview({
     providerId: input.request.providerId,
     requestKey: `voice-preview:${input.ownerId}:${cacheKey}`,
@@ -595,13 +708,25 @@ export async function generateVoiceComparisonPreview(input: {
         generatedAt,
         cached: false,
         cacheKey,
-        processingMode: input.request.providerId === 'sarvam' ? 'raw-provider-output' : 'standard',
+        processingMode:
+          input.request.providerId === 'sarvam'
+            ? 'raw-provider-output'
+            : input.request.providerId === 'ming3-tts'
+              ? 'model-native-output'
+              : 'standard',
         outputCodec: 'wav',
         ...(generated.requestId ? { providerRequestId: generated.requestId } : {}),
         ...(input.request.providerId === 'sarvam' && sarvamRegistration
           ? {
               referenceProvenance: sarvamRegistration.referenceProvenance ?? 'processed-reference',
             }
+          : input.request.providerId === 'ming3-tts'
+            ? {
+                referenceProvenance: mingReference(profile)?.provenance ?? ('unknown' as const),
+              }
+            : {}),
+        ...(generated.referenceTransformation
+          ? { referenceTransformation: generated.referenceTransformation }
           : {}),
         chunked: generated.chunked,
         request: {
@@ -622,7 +747,8 @@ export async function generateVoiceComparisonPreview(input: {
         providerRequestId: result.providerRequestId,
         cache: 'miss',
         chunked: result.chunked,
-        sahayaAudioProcessingApplied: input.request.providerId !== 'sarvam',
+        sahayaAudioProcessingApplied:
+          input.request.providerId !== 'sarvam' && input.request.providerId !== 'ming3-tts',
       });
       await writeVoiceComparisonCache(input.ownerId, result);
       return result;

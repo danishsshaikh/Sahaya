@@ -97,7 +97,7 @@ type VoiceEnrollmentResponse = ApiProfileResponse & {
 
 type SetupStep = 'record' | 'preview' | 'review';
 type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
-type CustomizationEngine = 'chatterbox' | 'qwen3-tts' | 'sarvam' | 'bodhan';
+type CustomizationEngine = 'chatterbox' | 'qwen3-tts' | 'sarvam' | 'bodhan' | 'ming3-tts';
 
 const BUSY_LABELS: Record<BusyPhase, string> = {
   checking: 'Checking your recording...',
@@ -244,7 +244,9 @@ export function TeachingVoiceCard({
   const [chatterboxClassroomEnhancementAvailable, setChatterboxClassroomEnhancementAvailable] =
     useState(false);
   const [customizationEngine, setCustomizationEngine] = useState<CustomizationEngine>('chatterbox');
-  const [externalPreviewEngine, setExternalPreviewEngine] = useState<'sarvam' | 'bodhan'>('sarvam');
+  const [externalPreviewEngine, setExternalPreviewEngine] = useState<
+    'sarvam' | 'bodhan' | 'ming3-tts'
+  >('sarvam');
   const [previewText, setPreviewText] = useState(DEFAULT_VOICE_COMPARISON_TEXT);
   const [busy, setBusy] = useState(false);
   const [busyPhase, setBusyPhase] = useState<BusyPhase | null>(null);
@@ -1314,6 +1316,7 @@ export function TeachingVoiceCard({
       label: string;
       kind: 'Cloned voice' | 'Preset voice';
       previewOnly: boolean;
+      experimental?: boolean;
       disabled?: boolean;
     }> = [
       { id: 'chatterbox', label: 'Chatterbox V3', kind: 'Cloned voice', previewOnly: false },
@@ -1326,6 +1329,13 @@ export function TeachingVoiceCard({
       },
       { id: 'sarvam', label: 'Sarvam AI', kind: 'Cloned voice', previewOnly: true },
       { id: 'bodhan', label: 'Bodhan Indic-Speak', kind: 'Preset voice', previewOnly: true },
+      {
+        id: 'ming3-tts',
+        label: 'Ming 3.0 TTS 0.5B',
+        kind: 'Cloned voice',
+        previewOnly: true,
+        experimental: true,
+      },
     ];
     const localEngine = customizationEngine === 'chatterbox' || customizationEngine === 'qwen3-tts';
 
@@ -1353,7 +1363,11 @@ export function TeachingVoiceCard({
                   setCustomizationEngine(engine.id);
                   if (engine.id === 'chatterbox') setDraftPreviewModel('chatterbox-v3');
                   if (engine.id === 'qwen3-tts') setDraftPreviewModel('qwen3-tts-1.7b-base');
-                  if (engine.id === 'sarvam' || engine.id === 'bodhan') {
+                  if (
+                    engine.id === 'sarvam' ||
+                    engine.id === 'bodhan' ||
+                    engine.id === 'ming3-tts'
+                  ) {
                     setExternalPreviewEngine(engine.id);
                   }
                   setPreviewError(null);
@@ -1369,6 +1383,7 @@ export function TeachingVoiceCard({
                 <span className="block truncate text-xs font-semibold">{engine.label}</span>
                 <span className="mt-0.5 block text-[11px]">
                   {engine.kind}
+                  {engine.experimental ? ' · Experimental' : ''}
                   {engine.previewOnly ? ' · Preview only' : ''}
                 </span>
               </button>

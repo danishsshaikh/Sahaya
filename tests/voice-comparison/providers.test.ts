@@ -4,6 +4,7 @@ import {
   BodhanIndicSpeakPreviewProvider,
   bodhanSpeechEndpoint,
 } from '@/lib/voice-comparison/providers/bodhan';
+import { Ming3TtsPreviewProvider } from '@/lib/voice-comparison/providers/ming3';
 import { SarvamVoiceCloningPreviewProvider } from '@/lib/voice-comparison/providers/sarvam';
 
 function pcmWav(): Uint8Array {
@@ -116,6 +117,102 @@ describe('Sarvam voice cloning preview provider', () => {
         referenceLanguage: 'en',
       }),
     ).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe('Ming 3.0 TTS preview provider', () => {
+  const config = {
+    baseUrl: 'http://127.0.0.1:8773',
+    timeoutMs: 5000,
+    maxConcurrency: 1,
+  };
+
+  it('registers an English reference transcript and preserves synthesis text and WAV bytes', async () => {
+    const wav = pcmWav();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            providerReferenceId: 'ming_owner_profile',
+            referencePreparation: 'official-runtime-mono-resample-and-front-pad',
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(Buffer.from(wav), {
+          headers: {
+            'content-type': 'audio/wav',
+            'x-request-id': 'req-ming',
+            'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+          },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new Ming3TtsPreviewProvider(config);
+    await provider.registerProfile({
+      profileId: 'ming_owner_profile',
+      referenceAudioPath: '/private/owner/reference.wav',
+      referenceText: ' Exact authorized transcript. ',
+    });
+    const text = " Newton's first law. ";
+    const result = await provider.synthesize({
+      profileId: 'ming_owner_profile',
+      text,
+      language: 'en',
+    });
+
+    expect(result.audio).toEqual(wav);
+    expect(result).toMatchObject({
+      requestId: 'req-ming',
+      referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      profileId: 'ming_owner_profile',
+      referenceAudioPath: '/private/owner/reference.wav',
+      referenceText: ' Exact authorized transcript. ',
+      referenceLanguage: 'en',
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      profileId: 'ming_owner_profile',
+      text,
+      language: 'en',
+    });
+  });
+
+  it('reports a missing model service without falling back', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: 'Ming 3.0 TTS model is not loaded' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    await expect(
+      new Ming3TtsPreviewProvider(config).synthesize({
+        profileId: 'ming_owner_profile',
+        text: 'Preview',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      message: expect.stringContaining('unavailable'),
+      metadata: { provider: 'ming3-tts', providerStatus: 503 },
+    });
+  });
+
+  it('rejects an invalid or truncated WAV response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not-a-wave', { status: 200 })));
+    await expect(
+      new Ming3TtsPreviewProvider(config).synthesize({
+        profileId: 'ming_owner_profile',
+        text: 'Preview',
+        language: 'en',
+      }),
+    ).rejects.toThrow('invalid WAV audio');
   });
 });
 

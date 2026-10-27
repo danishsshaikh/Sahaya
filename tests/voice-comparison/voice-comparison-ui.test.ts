@@ -337,4 +337,88 @@ describe('voice comparison UI', () => {
     expect(host.textContent).toContain('temporarily unavailable');
     expect(host.querySelector('audio')?.getAttribute('src')).toContain('cHJldmlvdXM=');
   });
+
+  it('generates and regenerates only the selected Ming preview with exact text', async () => {
+    const mingProvider = {
+      id: 'ming3-tts' as const,
+      name: 'Ming 3.0 TTS 0.5B',
+      category: 'voice-cloning' as const,
+      voiceType: 'cloned' as const,
+      supportedLanguages: ['en' as const],
+      supportsCloning: true,
+      supportsPresetVoices: false,
+      supportsEnhancement: false,
+      supportsClassroom: false,
+      supportsPreview: true,
+      experimental: true,
+      configured: true,
+      available: true,
+    };
+    const comparison = { ...bootstrap, providers: [...bootstrap.providers, mingProvider] };
+    const text = " Newton's first law. ";
+    const preview = {
+      profileId: profile.id,
+      providerId: 'ming3-tts' as const,
+      providerName: mingProvider.name,
+      voiceType: 'cloned' as const,
+      language: 'en' as const,
+      audio: { format: 'wav', base64: 'bWluZw==', createdAt: '2026-10-27T00:00:00.000Z' },
+      durationSeconds: 1,
+      generationLatencyMs: 120,
+      generatedAt: '2026-10-27T00:00:00.000Z',
+      cached: false,
+      cacheKey: 'ming-key',
+      processingMode: 'model-native-output' as const,
+      outputCodec: 'wav',
+      referenceProvenance: 'processed-reference' as const,
+      referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      chunked: false,
+      request: { text, language: 'en' as const },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, comparison }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValue(
+        new Response(JSON.stringify({ success: true, preview }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push(root);
+    act(() =>
+      root.render(createElement(VoiceComparisonPanel, { profile, providerId: 'ming3-tts', text })),
+    );
+    await flush();
+
+    const generate = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Generate Preview'),
+    );
+    act(() => generate!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flush();
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      providerId: 'ming3-tts',
+      text,
+      bypassCache: false,
+    });
+    expect(host.textContent).toContain('Ming model preprocessing');
+
+    const regenerate = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Regenerate Preview'),
+    );
+    act(() => regenerate!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flush();
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      providerId: 'ming3-tts',
+      text,
+      bypassCache: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

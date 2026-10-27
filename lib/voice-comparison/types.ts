@@ -6,6 +6,7 @@ export const DEFAULT_VOICE_COMPARISON_TEXT =
 export type VoiceComparisonProviderId =
   | 'chatterbox'
   | 'qwen3-tts'
+  | 'ming3-tts'
   | 'sarvam'
   | 'bodhan'
   | 'indicf5';
@@ -103,10 +104,11 @@ export interface VoiceComparisonPreviewResult {
   generatedAt: string;
   cached: boolean;
   cacheKey: string;
-  processingMode?: 'raw-provider-output' | 'standard';
+  processingMode?: 'raw-provider-output' | 'model-native-output' | 'standard';
   outputCodec?: string;
   providerRequestId?: string;
   referenceProvenance?: 'original-upload' | 'processed-reference' | 'unknown';
+  referenceTransformation?: string;
   chunked?: boolean;
   /** Owner-scoped request metadata used to restore the matching saved preview. */
   request?: {

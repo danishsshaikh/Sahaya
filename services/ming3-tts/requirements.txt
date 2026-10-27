@@ -1,0 +1,5 @@
+# Install the official Ming repository's pinned requirements first.
+# These are only the HTTP service dependencies added by Sahaya.
+fastapi==0.115.8
+pydantic==2.10.6
+uvicorn[standard]==0.34.0

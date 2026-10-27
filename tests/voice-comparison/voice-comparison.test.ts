@@ -512,6 +512,90 @@ describe('voice comparison coordinator', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('generates and caches one owner-scoped Ming preview without changing engines or text', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    vi.stubEnv('MING3_TTS_BASE_URL', 'http://ming.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    const retainedOriginal = await storage.writeOriginalRecording(original.id, original.ownerId, {
+      bytes: new TextEncoder().encode('OggS-synthetic-authorized-reference'),
+      mimeType: 'audio/ogg;codecs=opus',
+      fileName: 'authorized.ogg',
+    });
+    await storage.writeVoiceProfile({
+      ...original,
+      referenceAudioKey,
+      originalRecording: retainedOriginal,
+    });
+    const wav = pcmWav();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The opaque ID is intentionally unknown until the registration request is observed.
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        providerReferenceId?: string;
+        profileId: string;
+      };
+      return new Response(JSON.stringify({ providerReferenceId: body.profileId }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(Buffer.from(wav), {
+        headers: {
+          'content-type': 'audio/wav',
+          'x-request-id': 'req-ming-owner',
+          'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+        },
+      }),
+    );
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+    const text = " Newton's first law stays unchanged. ";
+    const request = {
+      profileId: original.id,
+      providerId: 'ming3-tts' as const,
+      text,
+      language: 'en' as const,
+    };
+    const [result, duplicate] = await Promise.all([
+      generateVoiceComparisonPreview({ ownerId: original.ownerId, request }),
+      generateVoiceComparisonPreview({ ownerId: original.ownerId, request }),
+    ]);
+
+    expect(result).toMatchObject({
+      providerId: 'ming3-tts',
+      processingMode: 'model-native-output',
+      referenceProvenance: 'original-upload',
+      referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      chunked: false,
+    });
+    expect(duplicate.audio.base64).toBe(result.audio.base64);
+    expect(Buffer.from(result.audio.base64, 'base64')).toEqual(Buffer.from(wav));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const registration = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const synthesis = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(registration).toMatchObject({
+      referenceAudioPath: retainedOriginal.key,
+      referenceText: original.referenceText,
+      referenceLanguage: 'en',
+    });
+    expect(registration.profileId).toMatch(/^ming_[a-f0-9]{32}$/);
+    expect(synthesis).toEqual({ profileId: registration.profileId, text, language: 'en' });
+    expect((await storage.readVoiceProfile(original.id, original.ownerId))?.provider).toBe(
+      'chatterbox',
+    );
+
+    const cached = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
+    expect(cached.cached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not expose or use another owner profile', async () => {
     const storage = await import('@/lib/voice-cloning/storage');
     await storage.writeVoiceProfile(profile('usr_owner'));

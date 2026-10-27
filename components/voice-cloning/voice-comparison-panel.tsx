@@ -12,7 +12,7 @@ import type {
   VoiceComparisonProviderAvailability,
 } from '@/lib/voice-comparison/types';
 
-type ExternalPreviewProviderId = 'sarvam' | 'bodhan';
+type ExternalPreviewProviderId = 'sarvam' | 'bodhan' | 'ming3-tts';
 
 type ResultState = {
   result: VoiceComparisonPreviewResult;
@@ -41,7 +41,10 @@ function providerSignature(input: {
 }): string {
   return JSON.stringify({
     providerId: input.providerId,
-    text: input.providerId === 'sarvam' ? input.text : input.text.trim(),
+    text:
+      input.providerId === 'sarvam' || input.providerId === 'ming3-tts'
+        ? input.text
+        : input.text.trim(),
     language: input.language,
     voice: input.providerId === 'bodhan' ? (input.voice ?? '') : '',
     style: input.providerId === 'bodhan' ? (input.style ?? '') : '',
@@ -49,7 +52,12 @@ function providerSignature(input: {
 }
 
 function resultSignature(result: VoiceComparisonPreviewResult): string | null {
-  if (!result.request || (result.providerId !== 'sarvam' && result.providerId !== 'bodhan')) {
+  if (
+    !result.request ||
+    (result.providerId !== 'sarvam' &&
+      result.providerId !== 'bodhan' &&
+      result.providerId !== 'ming3-tts')
+  ) {
     return null;
   }
   return providerSignature({
@@ -97,7 +105,7 @@ export function VoiceComparisonPanel({ profile, providerId, text }: VoiceCompari
         setBodhanVoice((current) => current || body.comparison!.bodhanVoices[0]?.id || '');
         setBodhanStyle((current) => current || body.comparison!.bodhanStyles[0] || '');
         const restored: Partial<Record<ExternalPreviewProviderId, ResultState>> = {};
-        for (const id of ['sarvam', 'bodhan'] as const) {
+        for (const id of ['sarvam', 'bodhan', 'ming3-tts'] as const) {
           const saved = body.comparison.savedPreviews.find((preview) => preview.providerId === id);
           const signature = saved ? resultSignature(saved) : null;
           if (saved && signature) restored[id] = { result: saved, signature };
@@ -162,7 +170,7 @@ export function VoiceComparisonPanel({ profile, providerId, text }: VoiceCompari
         body: JSON.stringify({
           profileId: profile.id,
           providerId,
-          text: providerId === 'sarvam' ? text : text.trim(),
+          text: providerId === 'sarvam' || providerId === 'ming3-tts' ? text : text.trim(),
           language,
           bypassCache: options.bypassCache,
           ...(providerId === 'bodhan' ? { voice: bodhanVoice, style: bodhanStyle } : {}),
@@ -404,6 +412,16 @@ export function VoiceComparisonPanel({ profile, providerId, text }: VoiceCompari
               {result.cached && <span>Saved preview</span>}
               {result.processingMode === 'raw-provider-output' && (
                 <span>No Sahaya audio processing</span>
+              )}
+              {result.processingMode === 'model-native-output' && (
+                <>
+                  <span>Ming model preprocessing · No Sahaya output enhancement</span>
+                  <span>
+                    {result.referenceProvenance === 'original-upload'
+                      ? 'Retained original reference'
+                      : 'Prepared enrollment reference'}
+                  </span>
+                </>
               )}
             </div>
           </details>

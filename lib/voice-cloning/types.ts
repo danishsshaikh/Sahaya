@@ -290,7 +290,7 @@ export class TeachingVoiceProviderOperationError extends TeachingVoiceError {
     message: string,
     status: number,
     readonly metadata: {
-      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts';
+      provider: 'chatterbox' | 'indicf5' | 'qwen3-tts' | 'ming3-tts';
       endpoint: string;
       operation: TeachingVoiceProviderOperation;
       providerStatus?: number;

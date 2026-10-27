@@ -134,7 +134,7 @@ afterEach(() => {
 });
 
 describe('Teaching Voice customization previews', () => {
-  it('shows one four-engine workspace and keeps shared text without activating on selection', async () => {
+  it('shows one five-engine workspace and keeps shared text without activating Ming', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({
         success: true,
@@ -146,9 +146,16 @@ describe('Teaching Voice customization previews', () => {
 
     const host = await mountTeachingVoiceCard();
     await openCustomization(host);
-    for (const label of ['Chatterbox V3', 'Qwen3-TTS 1.7B', 'Sarvam AI', 'Bodhan Indic-Speak']) {
+    for (const label of [
+      'Chatterbox V3',
+      'Qwen3-TTS 1.7B',
+      'Sarvam AI',
+      'Bodhan Indic-Speak',
+      'Ming 3.0 TTS 0.5B',
+    ]) {
       expect(host.textContent).toContain(label);
     }
+    expect(host.textContent).toContain('Experimental · Preview only');
     expect(host.textContent).not.toContain('Compare Voices');
     const textarea = host.querySelector('textarea');
     if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('Preview text not found');
@@ -159,11 +166,11 @@ describe('Teaching Voice customization previews', () => {
       );
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    const sarvam = [...host.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes('Sarvam AI'),
+    const ming = [...host.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Ming 3.0 TTS 0.5B'),
     );
-    if (!(sarvam instanceof HTMLButtonElement)) throw new Error('Sarvam engine not found');
-    click(sarvam);
+    if (!(ming instanceof HTMLButtonElement)) throw new Error('Ming engine not found');
+    click(ming);
     await flush();
 
     expect((host.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
