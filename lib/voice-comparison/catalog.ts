@@ -121,6 +121,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: true,
     supportsPreview: true,
     experimental: false,
+    supportsCourseNarration: true,
   },
   {
     id: 'qwen3-tts',
@@ -134,6 +135,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: true,
     supportsPreview: true,
     experimental: false,
+    supportsCourseNarration: true,
   },
   {
     id: 'sarvam',
@@ -147,6 +149,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: false,
     supportsPreview: true,
     experimental: true,
+    supportsCourseNarration: true,
   },
   {
     id: 'bodhan',
@@ -160,6 +163,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: false,
     supportsPreview: true,
     experimental: true,
+    supportsCourseNarration: true,
   },
   {
     id: 'ming3-tts',
@@ -173,6 +177,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: false,
     supportsPreview: true,
     experimental: true,
+    supportsCourseNarration: true,
   },
   {
     id: 'indicf5',
@@ -186,6 +191,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     supportsClassroom: true,
     supportsPreview: true,
     experimental: false,
+    supportsCourseNarration: true,
   },
 ];
 

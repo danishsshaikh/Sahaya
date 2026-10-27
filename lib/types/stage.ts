@@ -22,6 +22,7 @@ import type { PBLProjectConfig } from '@/lib/pbl/legacy/read';
 import type { PBLProjectV2 } from '@/lib/pbl/v2/types';
 import type { NarrationSyncMetadata } from '@/lib/audio/narration-sync';
 import type { TeachingVoiceLanguage } from '@/lib/voice-cloning/language';
+import type { CourseNarrationState } from '@/lib/course-narration/types';
 
 export type {
   SceneType,
@@ -64,6 +65,8 @@ export type Stage = DslStage & {
    * Absence means the default configured TTS voice is used.
    */
   teacherVoiceProfileId?: string;
+  /** Saved, owner-scoped narration alternatives for this exact course transcript. */
+  narration?: CourseNarrationState;
 };
 
 /**

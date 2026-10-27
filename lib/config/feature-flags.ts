@@ -88,6 +88,21 @@ export function isMaicEditorEnabled(): boolean {
   return isProWorkbenchEnabled() || readBoolean(process.env.NEXT_PUBLIC_MAIC_EDITOR_ENABLED);
 }
 
+/** Course-level narration versioning UI. Kept independent from the editor gate for rollback. */
+export function isCourseNarrationSwitchingEnabled(): boolean {
+  return readBoolean(process.env.NEXT_PUBLIC_FEATURE_COURSE_NARRATION_SWITCHING);
+}
+
+/** Server-only permission for preview-only engines to synthesize course narration. */
+export function isExperimentalCourseNarrationEnabled(): boolean {
+  return readBoolean(process.env.OPENMAIC_ENABLE_EXPERIMENTAL_COURSE_NARRATION);
+}
+
+/** Server route gate paired with the public editor affordance gate. */
+export function isCourseNarrationServerEnabled(): boolean {
+  return readBoolean(process.env.OPENMAIC_ENABLE_COURSE_NARRATION_SWITCHING);
+}
+
 /**
  * Experimental playback canvas renderer. Default OFF so classroom playback uses
  * the legacy in-app renderer unless explicitly enabled in `.env.local`.

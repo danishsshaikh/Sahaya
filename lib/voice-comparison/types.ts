@@ -63,11 +63,15 @@ export interface VoiceComparisonProviderCapability {
   supportsClassroom: boolean;
   supportsPreview: boolean;
   experimental: boolean;
+  /** Explicit course-regeneration capability; independent of ordinary classroom activation. */
+  supportsCourseNarration?: boolean;
 }
 
 export interface VoiceComparisonProviderAvailability extends VoiceComparisonProviderCapability {
   configured: boolean;
   available: boolean;
+  /** Effective server gate for course-wide synthesis. */
+  courseNarrationEnabled?: boolean;
   unavailableReason?: string;
   requiresExternalConsent?: boolean;
   externalVoiceReady?: boolean;
@@ -116,6 +120,7 @@ export interface VoiceComparisonPreviewResult {
     language: VoiceComparisonLanguageCode;
     voice?: string;
     style?: string;
+    enhancementMode?: 'standard' | 'resemble-enhance';
   };
 }
 

@@ -9,7 +9,12 @@ import {
   VOICE_COMPARISON_LANGUAGES,
   VOICE_COMPARISON_PROVIDERS,
 } from '@/lib/voice-comparison/catalog';
-import { concatenatePcmWav, readWavMetadata, splitSpeechText } from '@/lib/voice-comparison/audio';
+import {
+  concatenatePcmWav,
+  readWavMetadata,
+  splitSpeechText,
+  splitSpeechTextPreservingText,
+} from '@/lib/voice-comparison/audio';
 import { BodhanIndicSpeakPreviewProvider } from '@/lib/voice-comparison/providers/bodhan';
 import { Ming3TtsPreviewProvider } from '@/lib/voice-comparison/providers/ming3';
 import {
@@ -60,6 +65,7 @@ import {
   type VoiceProfile,
 } from '@/lib/voice-cloning/types';
 import { createLogger } from '@/lib/logger';
+import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
 
 const SARVAM_CONSENT_VERSION = 'sarvam-external-voice-raw-v2';
 const SARVAM_RAW_PROCESSING_MODE = 'raw-provider-output-v1';
@@ -161,6 +167,9 @@ function voiceProviderAvailability(
     ...capability,
     configured,
     available,
+    courseNarrationEnabled:
+      capability.supportsCourseNarration &&
+      (!capability.experimental || isExperimentalCourseNarrationEnabled()),
     ...(unavailableReason ? { unavailableReason } : {}),
     ...(providerId === 'sarvam'
       ? {
@@ -475,6 +484,7 @@ async function generateProviderAudio(input: {
   request: VoiceComparisonPreviewRequest;
   sarvamRegistration?: SarvamVoiceRegistration;
   signal?: AbortSignal;
+  preserveTextChunks?: boolean;
 }): Promise<{
   audio: Uint8Array;
   durationSeconds?: number;
@@ -544,7 +554,15 @@ async function generateProviderAudio(input: {
       chunked: false,
     };
   }
-  const chunks = splitSpeechText(request.text, request.providerId === 'bodhan' ? 700 : 1000);
+  const limit = request.providerId === 'bodhan' ? 700 : 1000;
+  // Preserve short comparison/course transcripts byte-for-byte. Splitting is only a
+  // provider-limit compatibility path and remains explicit in the result metadata.
+  const chunks =
+    request.text.length <= limit
+      ? [request.text]
+      : input.preserveTextChunks
+        ? splitSpeechTextPreservingText(request.text, limit)
+        : splitSpeechText(request.text, limit);
   const audioParts: Uint8Array[] = [];
   let requestId: string | undefined;
   if (request.providerId === 'bodhan') {
@@ -610,14 +628,13 @@ export async function generateVoiceComparisonPreview(input: {
   ownerId: string;
   request: VoiceComparisonPreviewRequest;
   signal?: AbortSignal;
+  /** Course narration requires lossless character-preserving chunk boundaries. */
+  preserveTextChunks?: boolean;
 }): Promise<VoiceComparisonPreviewResult> {
   const profile = await requireOwnedReadyProfile(input.ownerId, input.request.profileId);
   validateRequest(profile, input.request);
   const capability = getVoiceComparisonProvider(input.request.providerId);
-  const synthesisText =
-    input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts'
-      ? input.request.text
-      : input.request.text.trim();
+  const synthesisText = input.request.text;
   if (input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts') {
     if (!synthesisText.trim()) throw new TeachingVoiceError('Enter text to compare.');
     if (synthesisText.length > 1000) {
@@ -628,7 +645,12 @@ export async function generateVoiceComparisonPreview(input: {
       );
     }
   } else {
-    splitSpeechText(synthesisText, input.request.providerId === 'bodhan' ? 700 : 1000);
+    if (!synthesisText.trim()) throw new TeachingVoiceError('Enter text to compare.');
+    if (synthesisText.length > (input.request.providerId === 'bodhan' ? 700 : 1000)) {
+      const limit = input.request.providerId === 'bodhan' ? 700 : 1000;
+      if (input.preserveTextChunks) splitSpeechTextPreservingText(synthesisText, limit);
+      else splitSpeechText(synthesisText, limit);
+    }
   }
   const sarvamRegistration =
     input.request.providerId === 'sarvam'
@@ -687,6 +709,7 @@ export async function generateVoiceComparisonPreview(input: {
         request: { ...input.request, text: synthesisText },
         sarvamRegistration,
         signal: input.signal,
+        preserveTextChunks: input.preserveTextChunks,
       });
       const metadata = readWavMetadata(generated.audio);
       const generatedAt = new Date().toISOString();
