@@ -28,6 +28,11 @@ function readyEnglishProfileResponse(
         enhancementMode: 'resemble-enhance',
         activeEngine,
         qwenEnhancementMode: 'standard',
+        previewText:
+          "Newton's first law states that an object remains at rest unless acted upon by an external force.",
+        previewTextLanguageId: 'en',
+        preview: original,
+        previewComparison: { original },
         ...(activeEngine === 'qwen3-tts'
           ? {
               qwenPreview: {
@@ -107,6 +112,13 @@ describe('Teaching Voice profile restoration', () => {
     expect(firstRender.textContent).toContain('Using Voice');
     expect(firstRender.textContent).toContain('Manage Voice');
     expect(firstRender.textContent).not.toContain('Create Voice');
+    const firstManage = [...firstRender.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
+    );
+    if (!(firstManage instanceof HTMLButtonElement))
+      throw new Error('Manage Voice button not found');
+    act(() => firstManage.click());
+    expect(firstRender.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
 
     const restoredSelection = JSON.parse(
       window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}',
@@ -126,6 +138,16 @@ describe('Teaching Voice profile restoration', () => {
     const refreshedRender = await mountTeachingVoiceCard();
     expect(refreshedRender.textContent).toContain('Using Voice');
     expect(refreshedRender.textContent).toContain('Manage Voice');
+    const refreshedManage = [...refreshedRender.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
+    );
+    if (!(refreshedManage instanceof HTMLButtonElement)) {
+      throw new Error('Manage Voice button not found after refresh');
+    }
+    act(() => refreshedManage.click());
+    expect(
+      refreshedRender.querySelector('[aria-label="Original Chatterbox preview"]'),
+    ).not.toBeNull();
     expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?language=en');
   });
 
@@ -139,15 +161,9 @@ describe('Teaching Voice profile restoration', () => {
     );
     if (!(manage instanceof HTMLButtonElement)) throw new Error('Manage Voice button not found');
     act(() => manage.click());
-    const customize = [...firstRender.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent?.trim() === 'Customize Voice',
-    );
-    if (!(customize instanceof HTMLButtonElement))
-      throw new Error('Customize Voice button not found');
-    act(() => customize.click());
 
-    const qwen = [...firstRender.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent?.trim() === 'Qwen3-TTS 1.7B',
+    const qwen = [...firstRender.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Qwen3-TTS 1.7B'),
     );
     expect(qwen?.getAttribute('aria-pressed')).toBe('true');
     expect(firstRender.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();

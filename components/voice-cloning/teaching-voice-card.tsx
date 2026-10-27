@@ -14,13 +14,15 @@ import {
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { VoiceComparisonPanel } from '@/components/voice-cloning/voice-comparison-panel';
+import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 import { cn } from '@/lib/utils';
 import {
   CHATTERBOX_LANGUAGE_LABELS,
   CHATTERBOX_SUPPORTED_LANGUAGE_IDS,
 } from '@/lib/audio/tts-language';
-import { getVoiceEnrollmentPhrases } from '@/lib/voice-cloning/phrases';
+import { getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
 import {
   isChatterboxFacultySynthesisLanguage,
   resolveTeachingVoiceLanguage,
@@ -76,6 +78,7 @@ type ApiProfileResponse = {
   modelPreview?: VoiceModelPreviewResult;
   qwenClassroomEnabled?: boolean;
   qwenClassroomEnhancementAvailable?: boolean;
+  chatterboxClassroomEnhancementAvailable?: boolean;
 };
 
 type VoiceEnrollmentResponse = ApiProfileResponse & {
@@ -94,6 +97,7 @@ type VoiceEnrollmentResponse = ApiProfileResponse & {
 
 type SetupStep = 'record' | 'preview' | 'review';
 type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
+type CustomizationEngine = 'chatterbox' | 'qwen3-tts' | 'sarvam' | 'bodhan';
 
 const BUSY_LABELS: Record<BusyPhase, string> = {
   checking: 'Checking your recording...',
@@ -237,6 +241,11 @@ export function TeachingVoiceCard({
   const [qwenEnhancementMode, setQwenEnhancementMode] = useState<VoiceEnhancementMode>('standard');
   const [qwenClassroomEnabled, setQwenClassroomEnabled] = useState(false);
   const [qwenClassroomEnhancementAvailable, setQwenClassroomEnhancementAvailable] = useState(false);
+  const [chatterboxClassroomEnhancementAvailable, setChatterboxClassroomEnhancementAvailable] =
+    useState(false);
+  const [customizationEngine, setCustomizationEngine] = useState<CustomizationEngine>('chatterbox');
+  const [externalPreviewEngine, setExternalPreviewEngine] = useState<'sarvam' | 'bodhan'>('sarvam');
+  const [previewText, setPreviewText] = useState(DEFAULT_VOICE_COMPARISON_TEXT);
   const [busy, setBusy] = useState(false);
   const [busyPhase, setBusyPhase] = useState<BusyPhase | null>(null);
   const [busyStartedAt, setBusyStartedAt] = useState<number | null>(null);
@@ -292,23 +301,36 @@ export function TeachingVoiceCard({
       ? 'Manual settings are active. Choose a style above to return to a preset.'
       : PRESET_DESCRIPTIONS[draftPreset];
   const acceptedConfiguration = readyProfile ? profileConfiguration(readyProfile) : null;
+  const legacyPreviewText = getVoicePreviewText('en', 'chatterbox');
   const draftMatchesAccepted =
     acceptedConfiguration && voiceConfigurationsEqual(draftConfiguration, acceptedConfiguration);
   const matchingDraftPreview =
     profile?.draftPreview &&
     voiceSynthesisConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
-    (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId
+    (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId &&
+    (profile.draftPreview.config.previewText ?? legacyPreviewText) === previewText
       ? profile.draftPreview
       : undefined;
   const acceptedPreviewMatches = Boolean(
     acceptedConfiguration &&
     voiceSynthesisConfigurationsEqual(draftConfiguration, acceptedConfiguration) &&
-    (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId,
+    (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId &&
+    (readyProfile?.previewText ?? legacyPreviewText) === previewText,
   );
-  const selectedComparison = isQwenPreview
-    ? qwenModelPreview?.comparison
+  const qwenPreviewMatches =
+    Boolean(qwenModelPreview) &&
+    (qwenModelPreview?.previewText ?? legacyPreviewText) === previewText;
+  const matchingComparison = isQwenPreview
+    ? qwenPreviewMatches
+      ? qwenModelPreview?.comparison
+      : undefined
     : (matchingDraftPreview?.comparison ??
       (acceptedPreviewMatches ? readyProfile?.previewComparison : undefined));
+  const selectedComparison =
+    matchingComparison ??
+    (isQwenPreview
+      ? qwenModelPreview?.comparison
+      : (profile?.draftPreview?.comparison ?? readyProfile?.previewComparison));
   const selectedPreview = isQwenPreview
     ? selectedComparison
       ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
@@ -319,25 +341,24 @@ export function TeachingVoiceCard({
       ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
         ? selectedComparison.enhanced
         : selectedComparison.original
-      : matchingDraftPreview &&
-          voiceConfigurationsEqual(matchingDraftPreview.config, draftConfiguration)
-        ? matchingDraftPreview.preview
-        : draftMatchesAccepted && acceptedPreviewMatches
-          ? readyProfile?.preview
-          : undefined;
+      : (matchingDraftPreview?.preview ??
+        (acceptedPreviewMatches ? readyProfile?.preview : undefined) ??
+        profile?.draftPreview?.preview ??
+        readyProfile?.preview);
   const previewOutdated = Boolean(
     isQwenPreview
-      ? !qwenModelPreview
+      ? !qwenPreviewMatches
       : isChatterboxProfile &&
           (profile?.draftPreview?.preview || readyProfile?.preview) &&
           !matchingDraftPreview &&
           !acceptedPreviewMatches,
   );
   const canApplyDraftConfiguration = Boolean(
+    customizationEngine === 'chatterbox' &&
     !isQwenPreview &&
     !draftMatchesAccepted &&
-    selectedPreview &&
-    (draftEnhancementMode === 'standard' || selectedComparison?.enhanced),
+    (matchingDraftPreview || acceptedPreviewMatches) &&
+    (draftEnhancementMode === 'standard' || matchingComparison?.enhanced),
   );
   const recordingReady = Boolean(recording.blob);
   const canSubmitRecording = recordingReady && !recordingRequiresRetry && !busy;
@@ -402,9 +423,22 @@ export function TeachingVoiceCard({
             ? 'qwen3-tts-1.7b-base'
             : 'chatterbox-v3';
         setDraftPreviewModel(restoredPreviewModel);
+        setCustomizationEngine(
+          restoredPreviewModel === 'qwen3-tts-1.7b-base' ? 'qwen3-tts' : 'chatterbox',
+        );
         setQwenEnhancementMode(next?.qwenEnhancementMode ?? 'standard');
         setQwenClassroomEnabled(data?.qwenClassroomEnabled === true);
         setQwenClassroomEnhancementAvailable(data?.qwenClassroomEnhancementAvailable === true);
+        setChatterboxClassroomEnhancementAvailable(
+          data?.chatterboxClassroomEnhancementAvailable === true,
+        );
+        setPreviewText(
+          restoredPreviewModel === 'qwen3-tts-1.7b-base'
+            ? (next?.qwenPreview?.previewText ?? DEFAULT_VOICE_COMPARISON_TEXT)
+            : (next?.draftPreview?.config.previewText ??
+                next?.previewText ??
+                DEFAULT_VOICE_COMPARISON_TEXT),
+        );
         setProfile(next);
         if (next?.status === 'preview-ready' || next?.status === 'ready') {
           setSetupStep('review');
@@ -546,6 +580,9 @@ export function TeachingVoiceCard({
     setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
     setDraftLanguageId(config.languageId);
     setPreviewTextLanguageId(next.draftPreview?.config.previewTextLanguageId ?? 'en');
+    setPreviewText(
+      next.draftPreview?.config.previewText ?? next.previewText ?? DEFAULT_VOICE_COMPARISON_TEXT,
+    );
     setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
     setDraftEnhancementMode(config.enhancementMode ?? 'standard');
   };
@@ -649,6 +686,9 @@ export function TeachingVoiceCard({
       setProfile(data.profile);
       setQwenClassroomEnabled(data.qwenClassroomEnabled === true);
       setQwenClassroomEnhancementAvailable(data.qwenClassroomEnhancementAvailable === true);
+      setChatterboxClassroomEnhancementAvailable(
+        data.chatterboxClassroomEnhancementAvailable === true,
+      );
       activateProfile(data.profile);
     } catch (err) {
       setPreviewError(
@@ -662,50 +702,10 @@ export function TeachingVoiceCard({
 
   const renderVoiceConfigurationControls = () => (
     <div className="space-y-4">
-      <div className="space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="text-sm font-semibold text-foreground">Customize Voice</div>
-          {draftPreset === 'custom' && (
-            <span className="rounded-full border border-border/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              Custom
-            </span>
-          )}
-        </div>
-      </div>
-
-      {availablePreviewModels.includes('qwen3-tts-1.7b-base') && (
-        <fieldset className="space-y-2">
-          <legend className="text-xs font-medium text-foreground">Voice Engine</legend>
-          <div className="inline-flex flex-wrap rounded-md border border-border/70 p-0.5">
-            {(
-              [
-                ['chatterbox-v3', 'Chatterbox V3'],
-                ['qwen3-tts-1.7b-base', 'Qwen3-TTS 1.7B'],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={draftPreviewModel === value}
-                onClick={() => {
-                  setDraftPreviewModel(value);
-                  setPreviewError(null);
-                }}
-                className={cn(
-                  'rounded px-3 py-1.5 text-xs font-medium transition-colors',
-                  draftPreviewModel === value
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Currently active: {activeEngine === 'qwen3-tts' ? 'Qwen3-TTS 1.7B' : 'Chatterbox V3'}
-          </p>
-        </fieldset>
+      {draftPreset === 'custom' && !isQwenPreview && (
+        <span className="inline-flex rounded-full border border-border/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+          Custom voice style
+        </span>
       )}
 
       {!isQwenPreview ? (
@@ -793,8 +793,8 @@ export function TeachingVoiceCard({
               const selected = selectedEnhancementMode === value;
               const unavailable =
                 value === 'resemble-enhance' &&
-                ((!!selectedComparison && !selectedComparison.enhanced) ||
-                  (isQwenPreview && !qwenClassroomEnhancementAvailable));
+                !!matchingComparison &&
+                !matchingComparison.enhanced;
               return (
                 <button
                   key={value}
@@ -818,12 +818,15 @@ export function TeachingVoiceCard({
           {selectedComparison?.enhancementError && (
             <p className="text-xs text-muted-foreground">{selectedComparison.enhancementError}</p>
           )}
-          {isQwenPreview && !qwenClassroomEnhancementAvailable && (
-            <p className="text-xs text-muted-foreground">
-              Enhanced audio can be previewed, but classroom enhancement is disabled for this
-              deployment.
-            </p>
-          )}
+          {selectedEnhancementMode === 'resemble-enhance' &&
+            !(isQwenPreview
+              ? qwenClassroomEnhancementAvailable
+              : chatterboxClassroomEnhancementAvailable) && (
+              <p className="text-xs text-muted-foreground">
+                Enhanced preview is available. Using Enhanced in class requires classroom
+                enhancement to be enabled on the server.
+              </p>
+            )}
         </fieldset>
       </div>
 
@@ -841,9 +844,14 @@ export function TeachingVoiceCard({
                 : 'Your saved Teaching Voice remains active until changes are applied.'}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
+            <Button
+              type="button"
+              size="sm"
+              onClick={generateModelPreview}
+              disabled={busy || !previewText.trim()}
+            >
               <Play className="size-4" />
-              Preview Changes
+              {selectedPreview ? 'Regenerate Preview' : 'Generate Preview'}
             </Button>
             {isQwenPreview && (
               <Button
@@ -874,7 +882,11 @@ export function TeachingVoiceCard({
                 size="sm"
                 variant="outline"
                 onClick={activateSelectedEngine}
-                disabled={busy}
+                disabled={
+                  busy ||
+                  (draftEnhancementMode === 'resemble-enhance' &&
+                    !chatterboxClassroomEnhancementAvailable)
+                }
               >
                 <Check className="size-4" />
                 Use Chatterbox V3
@@ -1048,12 +1060,16 @@ export function TeachingVoiceCard({
       const data = await readVoiceApiResponse<ApiProfileResponse>(response);
       if (!data.profile) throw new Error('Could not accept preview.');
       setProfile(data.profile);
+      setChatterboxClassroomEnhancementAvailable(
+        data.chatterboxClassroomEnhancementAvailable === true,
+      );
       setSetupStep('review');
       setCustomizeOpen(false);
       const config = profileConfiguration(data.profile);
       setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
       setDraftLanguageId(config.languageId);
       setPreviewTextLanguageId(data.profile.previewTextLanguageId ?? 'en');
+      setPreviewText(data.profile.previewText ?? previewText);
       setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
       setDraftEnhancementMode(config.enhancementMode ?? 'standard');
       activateProfile(data.profile);
@@ -1083,6 +1099,7 @@ export function TeachingVoiceCard({
           profileId: profile.id,
           action: 'preview-model',
           previewModel: draftPreviewModel,
+          previewText,
           ...(isQwenPreview
             ? { enhancementMode: qwenEnhancementMode }
             : { ...previewConfiguration, previewTextLanguageId }),
@@ -1100,16 +1117,23 @@ export function TeachingVoiceCard({
         setProfile(data.profile);
         setQwenClassroomEnabled(data.qwenClassroomEnabled === true);
         setQwenClassroomEnhancementAvailable(data.qwenClassroomEnhancementAvailable === true);
+        setChatterboxClassroomEnhancementAvailable(
+          data.chatterboxClassroomEnhancementAvailable === true,
+        );
         setSetupStep('review');
         return;
       }
       setProfile(data.profile);
+      setChatterboxClassroomEnhancementAvailable(
+        data.chatterboxClassroomEnhancementAvailable === true,
+      );
       setSetupStep('review');
       const generatedConfig = data.profile.draftPreview?.config;
       if (generatedConfig) {
         setDraftModelVariant(generatedConfig.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
         setDraftLanguageId(generatedConfig.languageId);
         setPreviewTextLanguageId(generatedConfig.previewTextLanguageId ?? 'en');
+        setPreviewText(generatedConfig.previewText ?? previewText);
         setDraftGenerationSettings(
           generatedConfig.generationSettings ?? cloneRecommendedSettings(),
         );
@@ -1284,6 +1308,106 @@ export function TeachingVoiceCard({
     );
   };
 
+  const renderCustomizationWorkspace = () => {
+    const engines: Array<{
+      id: CustomizationEngine;
+      label: string;
+      kind: 'Cloned voice' | 'Preset voice';
+      previewOnly: boolean;
+      disabled?: boolean;
+    }> = [
+      { id: 'chatterbox', label: 'Chatterbox V3', kind: 'Cloned voice', previewOnly: false },
+      {
+        id: 'qwen3-tts',
+        label: 'Qwen3-TTS 1.7B',
+        kind: 'Cloned voice',
+        previewOnly: false,
+        disabled: !availablePreviewModels.includes('qwen3-tts-1.7b-base'),
+      },
+      { id: 'sarvam', label: 'Sarvam AI', kind: 'Cloned voice', previewOnly: true },
+      { id: 'bodhan', label: 'Bodhan Indic-Speak', kind: 'Preset voice', previewOnly: true },
+    ];
+    const localEngine = customizationEngine === 'chatterbox' || customizationEngine === 'qwen3-tts';
+
+    return (
+      <section aria-labelledby="customize-voice-heading" className="space-y-4">
+        <div>
+          <h3 id="customize-voice-heading" className="text-sm font-semibold text-foreground">
+            Customize Voice
+          </h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Previewing an engine does not change your classroom voice.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2" aria-label="Voice engine">
+          {engines.map((engine) => {
+            const selected = customizationEngine === engine.id;
+            return (
+              <button
+                key={engine.id}
+                type="button"
+                aria-pressed={selected}
+                disabled={engine.disabled}
+                onClick={() => {
+                  setCustomizationEngine(engine.id);
+                  if (engine.id === 'chatterbox') setDraftPreviewModel('chatterbox-v3');
+                  if (engine.id === 'qwen3-tts') setDraftPreviewModel('qwen3-tts-1.7b-base');
+                  if (engine.id === 'sarvam' || engine.id === 'bodhan') {
+                    setExternalPreviewEngine(engine.id);
+                  }
+                  setPreviewError(null);
+                }}
+                className={cn(
+                  'min-w-0 rounded-md border px-3 py-2 text-left transition-colors',
+                  selected
+                    ? 'border-primary bg-primary/5 text-foreground'
+                    : 'border-border/70 text-muted-foreground hover:bg-muted/40',
+                  engine.disabled && 'cursor-not-allowed opacity-50',
+                )}
+              >
+                <span className="block truncate text-xs font-semibold">{engine.label}</span>
+                <span className="mt-0.5 block text-[11px]">
+                  {engine.kind}
+                  {engine.previewOnly ? ' · Preview only' : ''}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="block space-y-1 text-xs font-medium">
+          Preview text
+          <Textarea
+            value={previewText}
+            maxLength={1000}
+            onChange={(event) => setPreviewText(event.target.value)}
+            className="min-h-24 resize-y font-normal"
+          />
+          <span className="block text-right font-normal tabular-nums text-muted-foreground">
+            {previewText.length}/1000
+          </span>
+        </label>
+
+        {localEngine && (
+          <>
+            <div className="rounded-lg border border-border/70 p-3">
+              {renderVoiceConfigurationControls()}
+            </div>
+            {selectedPreview && renderVoicePreview()}
+          </>
+        )}
+        <div className={cn(localEngine && 'hidden')} aria-hidden={localEngine || undefined}>
+          <VoiceComparisonPanel
+            profile={readyProfile!}
+            providerId={externalPreviewEngine}
+            text={previewText}
+          />
+        </div>
+      </section>
+    );
+  };
+
   return (
     <div className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -1450,14 +1574,8 @@ export function TeachingVoiceCard({
           ) : readyProfile ? (
             <div className="space-y-3">
               {renderStepHeader('review', 'Use Voice')}
-              {selectedPreview && renderVoicePreview()}
-              {isChatterboxProfile && customizeOpen && (
-                <div className="rounded-lg border border-border/70 p-3">
-                  {renderVoiceConfigurationControls()}
-                </div>
-              )}
+              {renderCustomizationWorkspace()}
               {renderPreviewError()}
-              <VoiceComparisonPanel profile={readyProfile} />
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
@@ -1470,21 +1588,18 @@ export function TeachingVoiceCard({
                   {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use This Voice'}
                 </Button>
                 {canApplyDraftConfiguration && (
-                  <Button type="button" size="sm" onClick={acceptPreview} disabled={busy}>
-                    <Check className="size-4" />
-                    Use These Settings
-                  </Button>
-                )}
-                {isChatterboxProfile && (
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
-                    onClick={() => setCustomizeOpen((value) => !value)}
-                    disabled={busy}
+                    onClick={acceptPreview}
+                    disabled={
+                      busy ||
+                      (draftEnhancementMode === 'resemble-enhance' &&
+                        !chatterboxClassroomEnhancementAvailable)
+                    }
                   >
-                    <SlidersHorizontal className="size-4" />
-                    {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
+                    <Check className="size-4" />
+                    Use These Settings
                   </Button>
                 )}
                 <Button

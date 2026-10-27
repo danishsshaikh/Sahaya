@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
   if (!profileId) return apiError('MISSING_REQUIRED_FIELD', 400, 'profileId is required');
   try {
     const profile = await requireOwnedReadyProfile(user.id, profileId);
-    return apiSuccess({ comparison: getVoiceComparisonBootstrap(profile) });
+    return apiSuccess({ comparison: await getVoiceComparisonBootstrap(user.id, profile) });
   } catch (error) {
     return comparisonError(error);
   }
@@ -80,6 +80,7 @@ export async function POST(req: NextRequest) {
         ...(typeof body.style === 'string' ? { style: body.style } : {}),
         ...(body.sarvamExternalConsent === true ? { sarvamExternalConsent: true } : {}),
         ...(body.sarvamCreateRawVoice === true ? { sarvamCreateRawVoice: true } : {}),
+        ...(body.bypassCache === true ? { bypassCache: true } : {}),
       },
       signal: req.signal,
     });

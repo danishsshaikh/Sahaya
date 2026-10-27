@@ -59,6 +59,8 @@ function generatedProfile() {
         modelVariant: 'v3',
         languageId: 'hi',
         previewTextLanguageId: 'en',
+        previewText:
+          "Newton's first law states that an object remains at rest unless acted upon by an external force.",
         generationSettings: VOICE_SETTINGS_PRESETS.expressive,
         enhancementMode: 'resemble-enhance',
       },
@@ -113,7 +115,6 @@ function changeSelect(select: HTMLSelectElement, value: string) {
 
 async function openCustomization(host: HTMLElement) {
   click(button(host, 'Manage Voice'));
-  click(button(host, 'Customize Voice'));
   await flush();
 }
 
@@ -133,6 +134,44 @@ afterEach(() => {
 });
 
 describe('Teaching Voice customization previews', () => {
+  it('shows one four-engine workspace and keeps shared text without activating on selection', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        success: true,
+        profile: savedProfile,
+        previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mountTeachingVoiceCard();
+    await openCustomization(host);
+    for (const label of ['Chatterbox V3', 'Qwen3-TTS 1.7B', 'Sarvam AI', 'Bodhan Indic-Speak']) {
+      expect(host.textContent).toContain(label);
+    }
+    expect(host.textContent).not.toContain('Compare Voices');
+    const textarea = host.querySelector('textarea');
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('Preview text not found');
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
+        textarea,
+        'A shared pronunciation sample.',
+      );
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const sarvam = [...host.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Sarvam AI'),
+    );
+    if (!(sarvam instanceof HTMLButtonElement)) throw new Error('Sarvam engine not found');
+    click(sarvam);
+    await flush();
+
+    expect((host.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
+      'A shared pronunciation sample.',
+    );
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
+  });
+
   it('regenerates an enhanced V3 preview without changing the saved voice', async () => {
     let resolvePreview!: (response: Response) => void;
     const previewResponse = new Promise<Response>((resolve) => {
@@ -140,24 +179,30 @@ describe('Teaching Voice customization previews', () => {
     });
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PATCH') return previewResponse;
-      return Promise.resolve(jsonResponse({ success: true, profile: savedProfile }));
+      return Promise.resolve(
+        jsonResponse({
+          success: true,
+          profile: savedProfile,
+          chatterboxClassroomEnhancementAvailable: true,
+        }),
+      );
     });
     vi.stubGlobal('fetch', fetchMock);
 
     const host = await mountTeachingVoiceCard();
     expect(host.textContent).toContain('Using Voice');
     await openCustomization(host);
-    expect(button(host, 'Preview Changes').disabled).toBe(false);
+    expect(button(host, 'Regenerate Preview').disabled).toBe(false);
 
     const accent = host.querySelector('#voice-language-id');
     if (!(accent instanceof HTMLSelectElement)) throw new Error('Accent selector not found');
     changeSelect(accent, 'hi');
     click(button(host, 'Expressive'));
     expect(host.textContent).toContain('Preview required for the selected accent and style.');
-    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
 
     click(button(host, 'Enhanced'));
-    click(button(host, 'Preview Changes'));
+    click(button(host, 'Regenerate Preview'));
     expect(host.textContent).toContain('Generating your voice preview...');
 
     const previewRequest = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
@@ -170,6 +215,8 @@ describe('Teaching Voice customization previews', () => {
       previewTextLanguageId: 'en',
       generationSettings: VOICE_SETTINGS_PRESETS.expressive,
       enhancementMode: 'resemble-enhance',
+      previewText:
+        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
     });
 
     resolvePreview(jsonResponse({ success: true, profile: generatedProfile() }));
@@ -204,7 +251,7 @@ describe('Teaching Voice customization previews', () => {
     const accent = host.querySelector('#voice-language-id');
     if (!(accent instanceof HTMLSelectElement)) throw new Error('Accent selector not found');
     changeSelect(accent, 'hi');
-    click(button(host, 'Preview Changes'));
+    click(button(host, 'Regenerate Preview'));
     await flush();
 
     expect(host.textContent).toContain(
@@ -232,6 +279,8 @@ describe('Teaching Voice customization previews', () => {
       enhancementMode: 'standard',
       preview: original,
       comparison: { original, enhanced },
+      previewText:
+        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
     };
     let serverProfile: PublicVoiceProfile = { ...savedProfile };
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -271,14 +320,18 @@ describe('Teaching Voice customization previews', () => {
 
     const host = await mountTeachingVoiceCard();
     await openCustomization(host);
-    click(button(host, 'Qwen3-TTS 1.7B'));
+    const qwenEngine = [...host.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Qwen3-TTS 1.7B'),
+    );
+    if (!(qwenEngine instanceof HTMLButtonElement)) throw new Error('Qwen engine not found');
+    click(qwenEngine);
 
     expect(host.querySelector('#voice-language-id')).toBeNull();
     expect(host.textContent).toContain('Uses your saved recording with Qwen3-TTS');
     expect(host.textContent).not.toContain('Clone Method');
     expect(host.textContent).not.toContain('Full reference (ICL)');
     expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).toBeNull();
-    click(button(host, 'Preview Changes'));
+    click(button(host, 'Generate Preview'));
     await flush();
 
     const previewRequest = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
@@ -287,6 +340,8 @@ describe('Teaching Voice customization previews', () => {
       action: 'preview-model',
       previewModel: 'qwen3-tts-1.7b-base',
       enhancementMode: 'standard',
+      previewText:
+        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
     });
     expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Resemble Enhance preview"]')).not.toBeNull();
@@ -301,7 +356,7 @@ describe('Teaching Voice customization previews', () => {
       previewModel: 'qwen3-tts-1.7b-base',
       enhancementMode: 'resemble-enhance',
     });
-    expect(host.textContent).toContain('Currently active: Qwen3-TTS 1.7B');
+    expect(host.textContent).toContain('Qwen3-TTS is active for classroom narration.');
     expect(host.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
     expect(host.textContent).not.toContain('Use These Settings');
     expect(host.textContent).toContain('Using Voice');

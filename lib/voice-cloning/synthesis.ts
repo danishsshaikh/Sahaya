@@ -265,6 +265,18 @@ export async function synthesizeFacultyVoice(input: {
       503,
     );
   }
+  const chatterboxEnhancementRequested =
+    providerId === 'chatterbox' &&
+    resolveVoiceProfileEnhancementMode(profile) === 'resemble-enhance';
+  if (
+    chatterboxEnhancementRequested &&
+    !isVoiceEnhancementAllowed('chatterbox', language, 'classroom')
+  ) {
+    throw new TeachingVoiceError(
+      'Enhanced Chatterbox classroom narration is disabled for this deployment or language.',
+      503,
+    );
+  }
   const settings =
     providerId === 'chatterbox'
       ? {
@@ -297,22 +309,18 @@ export async function synthesizeFacultyVoice(input: {
     });
     let mastered: { audio: Uint8Array; format: string };
     if (providerId === 'chatterbox') {
-      const enhancementRequested =
-        resolveVoiceProfileEnhancementMode(profile) === 'resemble-enhance';
-      const enhancementAllowed =
-        enhancementRequested && isVoiceEnhancementAllowed(providerId, language, 'classroom');
       const variants = await processChatterboxAudioVariants(result, {
-        attemptEnhancement: enhancementRequested && enhancementAllowed,
+        attemptEnhancement: chatterboxEnhancementRequested,
         context: 'classroom',
         profileId: profile.id,
         languageId: language,
       });
       mastered = variants.enhanced ?? variants.original;
-      if (enhancementRequested && !enhancementAllowed) {
-        traceTeachingVoiceSynthesis('enhancement-bypassed', {
-          ...metadata,
-          reason: 'disabled-for-classroom-or-language',
-        });
+      if (chatterboxEnhancementRequested && !variants.enhanced) {
+        throw new TeachingVoiceError(
+          variants.enhancementError || 'Enhanced Chatterbox narration could not be generated.',
+          502,
+        );
       }
     } else if (providerId === 'qwen3-tts') {
       const variants = await processVoiceAudioVariants(result, {

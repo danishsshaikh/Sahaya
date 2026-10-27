@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceProfile } from '@/lib/voice-cloning/types';
+import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 
 let storageDir: string;
 
@@ -92,9 +93,15 @@ describe('voice comparison coordinator', () => {
         new Response(JSON.stringify({ audio_b64: Buffer.from(wav).toString('base64') }), {
           headers: { 'content-type': 'application/json' },
         }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ audio_b64: Buffer.from(wav).toString('base64') }), {
+          headers: { 'content-type': 'application/json' },
+        }),
       );
     vi.stubGlobal('fetch', fetchMock);
-    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+    const { generateVoiceComparisonPreview, getVoiceComparisonBootstrap } =
+      await import('@/lib/server/voice-comparison');
     const request = {
       profileId: original.id,
       providerId: 'sarvam' as const,
@@ -129,14 +136,34 @@ describe('voice comparison coordinator', () => {
     const cached = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
     expect(cached.cached).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const restoredBootstrap = await getVoiceComparisonBootstrap(
+      original.ownerId,
+      (await storage.readVoiceProfile(original.id, original.ownerId)) as VoiceProfile,
+    );
+    expect(restoredBootstrap.savedPreviews).toEqual([
+      expect.objectContaining({
+        profileId: original.id,
+        providerId: 'sarvam',
+        cached: true,
+        request: expect.objectContaining({ text: request.text, language: request.language }),
+      }),
+    ]);
+
+    const regenerated = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request: { ...request, bypassCache: true },
+    });
+    expect(regenerated.cached).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((fetchMock.mock.calls[2]?.[1]?.body as FormData).get('voice_id')).toBe('svc-12345678');
 
     await generateVoiceComparisonPreview({
       ownerId: original.ownerId,
       request: { ...request, text: 'Teach the second law of motion.' },
     });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect((fetchMock.mock.calls[2]?.[1]?.body as FormData).get('voice_id')).toBe('svc-12345678');
-    expect((fetchMock.mock.calls[2]?.[1]?.body as FormData).get('text')).toBe(
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect((fetchMock.mock.calls[3]?.[1]?.body as FormData).get('voice_id')).toBe('svc-12345678');
+    expect((fetchMock.mock.calls[3]?.[1]?.body as FormData).get('text')).toBe(
       'Teach the second law of motion.',
     );
   });
@@ -185,15 +212,94 @@ describe('voice comparison coordinator', () => {
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('voice_id')).toBe('svc-legacy1234');
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('text')).toBe(' Unchanged text. ');
     expect(result.referenceProvenance).toBe('processed-reference');
-    expect(
-      getVoiceComparisonBootstrap(
-        (await storage.readVoiceProfile(original.id, original.ownerId)) as VoiceProfile,
-      ).providers.find(({ id }) => id === 'sarvam'),
-    ).toMatchObject({
+    const bootstrap = await getVoiceComparisonBootstrap(
+      original.ownerId,
+      (await storage.readVoiceProfile(original.id, original.ownerId)) as VoiceProfile,
+    );
+    expect(bootstrap.providers.find(({ id }) => id === 'sarvam')).toMatchObject({
       externalVoiceReady: true,
       requiresExternalConsent: false,
       sarvamReferenceProvenance: 'processed-reference',
     });
+  });
+
+  it('restores the deployed pre-metadata Sarvam cache entry for the same owned profile', async () => {
+    const storage = await import('@/lib/voice-cloning/storage');
+    const cache = await import('@/lib/server/voice-comparison-cache');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({
+      ...original,
+      referenceAudioKey,
+      sarvamVoice: {
+        voiceId: 'svc-legacycache123',
+        consentTimestamp: '2026-10-26T00:00:00.000Z',
+        consentVersion: 'sarvam-external-voice-v1',
+        createdAt: '2026-10-26T00:00:00.000Z',
+        referenceAudioKey,
+        profileVersion: 1,
+        referenceLanguage: 'en',
+        referenceProvenance: 'processed-reference',
+      },
+    });
+    const cacheKey = cache.createVoiceComparisonCacheKey({
+      ownerId: original.ownerId,
+      profileId: original.id,
+      profileVersion: 1,
+      referenceAudioKey,
+      providerId: 'sarvam',
+      language: 'en',
+      text: DEFAULT_VOICE_COMPARISON_TEXT,
+      voice: null,
+      style: null,
+      sarvamVoiceId: 'svc-legacycache123',
+      modelVariant: null,
+      generationSettings: null,
+      qwenCloneMode: null,
+      processingMode: 'raw-provider-output-v1',
+      outputCodec: 'wav',
+      providerGenerationParameters: {
+        enableVad: false,
+        enableTextNormalization: false,
+        enableQc: false,
+      },
+    });
+    await cache.writeVoiceComparisonCache(original.ownerId, {
+      providerId: 'sarvam',
+      providerName: 'Sarvam AI',
+      voiceType: 'cloned',
+      language: 'en',
+      audio: { format: 'wav', base64: 'c2F2ZWQ=', createdAt: '2026-10-26T00:00:00.000Z' },
+      durationSeconds: 1,
+      generationLatencyMs: 10,
+      generatedAt: '2026-10-26T00:00:00.000Z',
+      cached: false,
+      cacheKey,
+      processingMode: 'raw-provider-output',
+      outputCodec: 'wav',
+      referenceProvenance: 'processed-reference',
+      chunked: false,
+    });
+
+    const { getVoiceComparisonBootstrap } = await import('@/lib/server/voice-comparison');
+    const savedProfile = (await storage.readVoiceProfile(
+      original.id,
+      original.ownerId,
+    )) as VoiceProfile;
+    const bootstrap = await getVoiceComparisonBootstrap(original.ownerId, savedProfile);
+
+    expect(bootstrap.savedPreviews).toEqual([
+      expect.objectContaining({
+        profileId: original.id,
+        providerId: 'sarvam',
+        cached: true,
+        request: { text: DEFAULT_VOICE_COMPARISON_TEXT, language: 'en' },
+      }),
+    ]);
   });
 
   it('does not create a new remote voice from a transformed legacy reference', async () => {
@@ -418,7 +524,7 @@ describe('voice comparison coordinator', () => {
   it('reports disabled metered providers without affecting local capabilities', async () => {
     vi.stubEnv('SARVAM_VOICE_CLONING_ENABLED', 'false');
     const { getVoiceComparisonBootstrap } = await import('@/lib/server/voice-comparison');
-    const bootstrap = getVoiceComparisonBootstrap({
+    const bootstrap = await getVoiceComparisonBootstrap('usr_owner', {
       ...profile(),
       referenceAudioKey: '/private/reference.wav',
     });

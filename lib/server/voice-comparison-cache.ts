@@ -55,6 +55,16 @@ export async function readVoiceComparisonCache(
   return result ? { ...result, cached: true } : null;
 }
 
+export async function readVoiceComparisonCacheEntries(
+  ownerId: string,
+  profileId: string,
+): Promise<VoiceComparisonPreviewResult[]> {
+  const cache = await readCache(ownerId);
+  return cache.entries
+    .filter((entry) => entry.profileId === profileId)
+    .map((entry) => ({ ...entry, cached: true }));
+}
+
 export async function writeVoiceComparisonCache(
   ownerId: string,
   result: VoiceComparisonPreviewResult,

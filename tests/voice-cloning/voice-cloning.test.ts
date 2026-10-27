@@ -561,7 +561,7 @@ describe('faculty voice setup UI contract', () => {
     expect(source).toContain('<option value="en">English</option>');
     expect(source).toContain('<option value="hi">Hindi-influenced</option>');
     expect(source).toContain('Voice Output');
-    expect(source).toContain('Preview Changes');
+    expect(source).toContain('Generate Preview');
     expect(source).not.toContain('Voice Model');
     expect(source).not.toContain('Advanced Voice Settings');
     expect(source).not.toContain('Expert Settings');

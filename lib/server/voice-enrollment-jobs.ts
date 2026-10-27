@@ -222,6 +222,7 @@ export async function generateVariantPreview(
     onPhase?: (phase: VoiceEnrollmentJobPhase) => void;
     attemptId?: string;
     previewTextLanguageId?: 'en' | 'hi';
+    previewText?: string;
   } = {},
 ): Promise<{
   providerReferenceId: string;
@@ -258,7 +259,9 @@ export async function generateVariantPreview(
   options.onPhase?.('preview_generation');
   const preview = await provider.generatePreview({
     providerReferenceId,
-    text: getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
+    text:
+      options.previewText ??
+      getVoicePreviewText(options.previewTextLanguageId ?? config.languageId, providerId),
     language: config.languageId,
     modelVariant: config.modelVariant,
     generationSettings: config.generationSettings,
@@ -790,6 +793,7 @@ export async function acceptVoiceProfilePreview(
     preview: profile.draftPreview?.preview,
     previewComparison: profile.draftPreview?.comparison,
     previewTextLanguageId: profile.draftPreview?.config.previewTextLanguageId,
+    previewText: profile.draftPreview?.config.previewText,
     draftPreview: undefined,
     updatedAt: new Date().toISOString(),
   };

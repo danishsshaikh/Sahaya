@@ -28,6 +28,7 @@ const profile: PublicVoiceProfile = {
 };
 
 const bootstrap: VoiceComparisonBootstrap = {
+  savedPreviews: [],
   languages: [
     { code: 'en', label: 'English' },
     { code: 'hi', label: 'Hindi' },
@@ -99,7 +100,7 @@ afterEach(() => {
 });
 
 describe('voice comparison UI', () => {
-  it('groups cloned and preset providers without making synthesis calls on render', async () => {
+  it('renders only the selected external engine without synthesis on mount', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ success: true, comparison: bootstrap }), {
         headers: { 'content-type': 'application/json' },
@@ -110,15 +111,20 @@ describe('voice comparison UI', () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     roots.push(root);
-    act(() => root.render(createElement(VoiceComparisonPanel, { profile })));
+    act(() =>
+      root.render(
+        createElement(VoiceComparisonPanel, {
+          profile,
+          providerId: 'sarvam',
+          text: "Newton's first law.",
+        }),
+      ),
+    );
     await flush();
 
-    expect(host.textContent).toContain('Voice cloning');
-    expect(host.textContent).toContain('Preset voices');
-    expect(host.textContent).toContain('Sarvam AI');
-    expect(host.textContent).toContain('Bodhan Indic-Speak');
-    expect(host.textContent).toContain('Not configured');
-    expect(host.textContent).toContain('reusable cloned voice may be stored');
+    expect(host.textContent).toContain('create a reusable clone');
+    expect(host.textContent).not.toContain('Compare Voices');
+    expect(host.textContent).not.toContain('Bodhan Indic-Speak');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[1]).not.toMatchObject({ method: 'POST' });
   });
@@ -154,11 +160,19 @@ describe('voice comparison UI', () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     roots.push(root);
-    act(() => root.render(createElement(VoiceComparisonPanel, { profile })));
+    act(() =>
+      root.render(
+        createElement(VoiceComparisonPanel, {
+          profile,
+          providerId: 'bodhan',
+          text: "Newton's first law.",
+        }),
+      ),
+    );
     await flush();
 
     const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
-      candidate.parentElement?.textContent?.includes('Bodhan Indic-Speak'),
+      candidate.textContent?.includes('Generate Preview'),
     );
     expect(button).not.toBeNull();
     act(() => button!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -168,6 +182,159 @@ describe('voice comparison UI', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
       providerId: 'bodhan',
+      bypassCache: false,
     });
+  });
+
+  it('restores a saved Sarvam preview and regenerates with the existing clone and cache bypass', async () => {
+    const saved = {
+      profileId: profile.id,
+      providerId: 'sarvam' as const,
+      providerName: 'Sarvam AI',
+      voiceType: 'cloned' as const,
+      language: 'en' as const,
+      audio: { format: 'wav', base64: 'c2F2ZWQ=', createdAt: '2026-10-26T00:00:00.000Z' },
+      durationSeconds: 1,
+      generationLatencyMs: 100,
+      generatedAt: '2026-10-26T00:00:00.000Z',
+      cached: true,
+      cacheKey: 'saved-key',
+      processingMode: 'raw-provider-output' as const,
+      outputCodec: 'wav',
+      chunked: false,
+      request: { text: "Newton's first law.", language: 'en' as const },
+    };
+    const available = {
+      ...bootstrap,
+      savedPreviews: [saved],
+      providers: bootstrap.providers.map((provider) =>
+        provider.id === 'sarvam'
+          ? {
+              ...provider,
+              requiresExternalConsent: false,
+              externalVoiceReady: true,
+              sarvamReferenceProvenance: 'processed-reference' as const,
+            }
+          : provider,
+      ),
+    };
+    const fresh = { ...saved, audio: { ...saved.audio, base64: 'ZnJlc2g=' }, cached: false };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, comparison: available }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, preview: fresh }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push(root);
+    act(() =>
+      root.render(
+        createElement(VoiceComparisonPanel, {
+          profile,
+          providerId: 'sarvam',
+          text: "Newton's first law.",
+        }),
+      ),
+    );
+    await flush();
+
+    expect(host.querySelector('audio')?.getAttribute('src')).toContain('c2F2ZWQ=');
+    const regenerate = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Regenerate Preview'),
+    );
+    expect(regenerate).not.toBeNull();
+    expect(regenerate?.hasAttribute('disabled')).toBe(false);
+    act(() => regenerate!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flush();
+
+    const request = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(request).toMatchObject({
+      providerId: 'sarvam',
+      bypassCache: true,
+      text: "Newton's first law.",
+    });
+    expect(request).not.toHaveProperty('sarvamCreateRawVoice');
+    expect(request).not.toHaveProperty('sarvamExternalConsent');
+    expect(host.querySelector('audio')?.getAttribute('src')).toContain('ZnJlc2g=');
+  });
+
+  it('keeps the saved Sarvam audio playable when regeneration fails', async () => {
+    const saved = {
+      profileId: profile.id,
+      providerId: 'sarvam' as const,
+      providerName: 'Sarvam AI',
+      voiceType: 'cloned' as const,
+      language: 'en' as const,
+      audio: { format: 'wav', base64: 'cHJldmlvdXM=', createdAt: '2026-10-26T00:00:00.000Z' },
+      durationSeconds: 1,
+      generationLatencyMs: 100,
+      generatedAt: '2026-10-26T00:00:00.000Z',
+      cached: true,
+      cacheKey: 'saved-key',
+      processingMode: 'raw-provider-output' as const,
+      outputCodec: 'wav',
+      chunked: false,
+      request: { text: "Newton's first law.", language: 'en' as const },
+    };
+    const available = {
+      ...bootstrap,
+      savedPreviews: [saved],
+      providers: bootstrap.providers.map((provider) =>
+        provider.id === 'sarvam'
+          ? {
+              ...provider,
+              requiresExternalConsent: false,
+              externalVoiceReady: true,
+              sarvamReferenceProvenance: 'processed-reference' as const,
+            }
+          : provider,
+      ),
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, comparison: available }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'Sarvam AI is temporarily unavailable.' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push(root);
+    act(() =>
+      root.render(
+        createElement(VoiceComparisonPanel, {
+          profile,
+          providerId: 'sarvam',
+          text: "Newton's first law.",
+        }),
+      ),
+    );
+    await flush();
+
+    const regenerate = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Regenerate Preview'),
+    );
+    act(() => regenerate!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await flush();
+
+    expect(host.textContent).toContain('temporarily unavailable');
+    expect(host.querySelector('audio')?.getAttribute('src')).toContain('cHJldmlvdXM=');
   });
 });

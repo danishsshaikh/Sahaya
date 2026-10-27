@@ -23,6 +23,7 @@ function voicePreview(audio: Uint8Array, format: string): VoicePreview {
 export async function generateQwen3TtsModelPreview(
   profile: VoiceProfile,
   enhancementMode: VoiceEnhancementMode,
+  previewText = getVoicePreviewText('en', 'chatterbox'),
 ): Promise<VoiceModelPreviewResult> {
   if (!profile.referenceAudioKey || !(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Teaching Voice reference audio was not found.', 404);
@@ -48,7 +49,7 @@ export async function generateQwen3TtsModelPreview(
   });
   const raw = await provider.generatePreview({
     providerReferenceId,
-    text: getVoicePreviewText('en', 'chatterbox'),
+    text: previewText,
     language: 'en',
   });
   const enhancementAllowed = isVoiceEnhancementAllowed('qwen3-tts', 'en', 'preview');
@@ -80,10 +81,15 @@ export async function generateQwen3TtsModelPreview(
     enhancementMode,
     preview: comparison.original,
     comparison,
+    previewText,
   };
 }
 
-export function createQwen3TtsPreviewCacheKey(profile: VoiceProfile): string {
+export function createQwen3TtsPreviewCacheKey(
+  profile: VoiceProfile,
+  previewText = profile.qwenPreviewCache?.result.previewText ??
+    getVoicePreviewText('en', 'chatterbox'),
+): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -91,7 +97,7 @@ export function createQwen3TtsPreviewCacheKey(profile: VoiceProfile): string {
         profileVersion: profile.profileVersion,
         referenceAudioKey: profile.referenceAudioKey ?? null,
         referenceText: profile.referenceText ?? null,
-        previewText: getVoicePreviewText('en', 'chatterbox'),
+        previewText,
         cloneMode: 'speaker-embedding',
       }),
     )

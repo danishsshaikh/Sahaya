@@ -18,11 +18,12 @@ const mocks = vi.hoisted(() => ({
   processAudio: vi.fn(),
   processQwenAudio: vi.fn(),
   masterAudio: vi.fn(),
+  enhancementAllowed: vi.fn(),
 }));
 vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceCloningServerEnabled: () => true,
   isQwen3TtsClassroomEnabled: () => true,
-  isVoiceEnhancementAllowed: () => true,
+  isVoiceEnhancementAllowed: mocks.enhancementAllowed,
 }));
 vi.mock('@/lib/voice-cloning/storage', () => ({
   readVoiceProfile: mocks.read,
@@ -46,6 +47,8 @@ beforeEach(() => {
   mocks.synthesize.mockReset();
   mocks.register.mockReset();
   mocks.masterAudio.mockReset();
+  mocks.enhancementAllowed.mockReset();
+  mocks.enhancementAllowed.mockReturnValue(true);
   profile = {
     id: 'vcp_example',
     ownerId: 'usr_example',
@@ -263,6 +266,17 @@ describe('profile-specific synthesis and recovery', () => {
       expect.objectContaining({ attemptEnhancement: true, languageId: 'en' }),
     );
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not silently substitute Original when Chatterbox Enhanced is disabled', async () => {
+    profile = { ...profile, enhancementMode: 'resemble-enhance' };
+    mocks.enhancementAllowed.mockReturnValue(false);
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toThrow(
+      'Enhanced Chatterbox classroom narration is disabled',
+    );
+    expect(mocks.synthesize).not.toHaveBeenCalled();
+    expect(mocks.processAudio).not.toHaveBeenCalled();
   });
 
   it('leaves serialization to the resource queue rather than direct synthesis', async () => {

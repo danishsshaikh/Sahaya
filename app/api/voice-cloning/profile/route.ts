@@ -78,6 +78,10 @@ function qwenClassroomEnhancementAvailable(): boolean {
   return isVoiceEnhancementAllowed('qwen3-tts', 'en', 'classroom');
 }
 
+function chatterboxClassroomEnhancementAvailable(languageId = 'en'): boolean {
+  return isVoiceEnhancementAllowed('chatterbox', languageId, 'classroom');
+}
+
 function publicVoiceProfile(profile: VoiceProfile | null) {
   const result = toPublicVoiceProfile(profile);
   if (result && profile && !currentQwen3TtsPreview(profile)) {
@@ -238,6 +242,9 @@ export async function GET(req: NextRequest) {
       previewModels: availablePreviewModels(),
       qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
       qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      chatterboxClassroomEnhancementAvailable: chatterboxClassroomEnhancementAvailable(
+        profile ? resolveVoiceProfileLanguageId(profile) : 'en',
+      ),
     });
   } catch (error) {
     return apiError(
@@ -278,6 +285,7 @@ export async function PATCH(req: NextRequest) {
     enhancementMode?: string;
     previewTextLanguageId?: string;
     previewModel?: string;
+    previewText?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -349,6 +357,9 @@ export async function PATCH(req: NextRequest) {
       previewModels: availablePreviewModels(),
       qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
       qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      chatterboxClassroomEnhancementAvailable: chatterboxClassroomEnhancementAvailable(
+        resolveVoiceProfileLanguageId(next),
+      ),
     });
   }
   if (previewModel === 'qwen3-tts-1.7b-base') {
@@ -378,11 +389,22 @@ export async function PATCH(req: NextRequest) {
       return apiError('INVALID_REQUEST', 400, 'Unsupported voice enhancement mode');
     }
     try {
-      const modelPreview = await generateQwen3TtsModelPreview(profile, enhancementMode);
+      const previewText = body.previewText ?? undefined;
+      if (previewText !== undefined && (!previewText.trim() || previewText.length > 1000)) {
+        return apiError(
+          'INVALID_REQUEST',
+          400,
+          'Preview text must be between 1 and 1000 characters',
+        );
+      }
+      const modelPreview =
+        previewText === undefined
+          ? await generateQwen3TtsModelPreview(profile, enhancementMode)
+          : await generateQwen3TtsModelPreview(profile, enhancementMode, previewText);
       const next: VoiceProfile = {
         ...profile,
         qwenPreviewCache: {
-          cacheKey: createQwen3TtsPreviewCacheKey(profile),
+          cacheKey: createQwen3TtsPreviewCacheKey(profile, modelPreview.previewText),
           result: modelPreview,
         },
         updatedAt: new Date().toISOString(),
@@ -394,6 +416,9 @@ export async function PATCH(req: NextRequest) {
         previewModels: availablePreviewModels(),
         qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
         qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+        chatterboxClassroomEnhancementAvailable: chatterboxClassroomEnhancementAvailable(
+          resolveVoiceProfileLanguageId(next),
+        ),
       });
     } catch (error) {
       return apiError(
@@ -432,7 +457,16 @@ export async function PATCH(req: NextRequest) {
         resolveVoiceProfileProvider(profile) === 'chatterbox'
           ? parsePreviewTextLanguageId(body.previewTextLanguageId, config.languageId)
           : undefined;
-      generated = await generateVariantPreview(profile, config, { previewTextLanguageId });
+      if (
+        body.previewText !== undefined &&
+        (!body.previewText.trim() || body.previewText.length > 1000)
+      ) {
+        throw new TeachingVoiceError('Preview text must be between 1 and 1000 characters.');
+      }
+      generated = await generateVariantPreview(profile, config, {
+        previewTextLanguageId,
+        ...(body.previewText !== undefined ? { previewText: body.previewText } : {}),
+      });
     } catch (error) {
       return apiError(
         'GENERATION_FAILED',
@@ -448,14 +482,23 @@ export async function PATCH(req: NextRequest) {
       preview: profile.provider === 'qwen3' ? undefined : profile.preview,
       previewVariants: profile.provider === 'qwen3' ? undefined : profile.previewVariants,
       draftPreview: {
-        config: { ...config, ...(previewTextLanguageId ? { previewTextLanguageId } : {}) },
+        config: {
+          ...config,
+          ...(previewTextLanguageId ? { previewTextLanguageId } : {}),
+          ...(body.previewText !== undefined ? { previewText: body.previewText } : {}),
+        },
         preview,
         ...(comparison ? { comparison } : {}),
       },
       updatedAt: new Date().toISOString(),
     };
     await writeVoiceProfile(next);
-    return apiSuccess({ profile: publicVoiceProfile(next) });
+    return apiSuccess({
+      profile: publicVoiceProfile(next),
+      chatterboxClassroomEnhancementAvailable: chatterboxClassroomEnhancementAvailable(
+        config.languageId,
+      ),
+    });
   }
 
   if (body.action !== 'accept-preview') {
@@ -503,7 +546,12 @@ export async function PATCH(req: NextRequest) {
     return apiError('INVALID_REQUEST', 400, 'Preview must be generated before accepting');
   }
   const next = await acceptVoiceProfilePreview(profileForAcceptance, config, user.id);
-  return apiSuccess({ profile: publicVoiceProfile(next) });
+  return apiSuccess({
+    profile: publicVoiceProfile(next),
+    chatterboxClassroomEnhancementAvailable: chatterboxClassroomEnhancementAvailable(
+      resolveVoiceProfileLanguageId(next),
+    ),
+  });
 }
 
 export async function DELETE(req: NextRequest) {

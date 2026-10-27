@@ -22,6 +22,7 @@ import type {
   VoiceComparisonProviderAvailability,
   VoiceComparisonProviderId,
 } from '@/lib/voice-comparison/types';
+import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 import {
   externalVoiceProviderConfigured,
   getBodhanTtsConfig,
@@ -30,6 +31,7 @@ import {
 import {
   createVoiceComparisonCacheKey,
   readVoiceComparisonCache,
+  readVoiceComparisonCacheEntries,
   writeVoiceComparisonCache,
 } from '@/lib/server/voice-comparison-cache';
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
@@ -151,13 +153,110 @@ function voiceProviderAvailability(
   };
 }
 
-export function getVoiceComparisonBootstrap(profile: VoiceProfile): VoiceComparisonBootstrap {
+export async function getVoiceComparisonBootstrap(
+  ownerId: string,
+  profile: VoiceProfile,
+): Promise<VoiceComparisonBootstrap> {
+  const savedPreviews = await readVoiceComparisonCacheEntries(ownerId, profile.id);
+  const referenceLanguage = resolveVoiceProfileReferenceLanguage(profile);
+  const defaultLanguage = VOICE_COMPARISON_LANGUAGES.some(({ code }) => code === referenceLanguage)
+    ? (referenceLanguage as VoiceComparisonLanguageCode)
+    : 'en';
+  const legacyCandidates: Array<{
+    request: VoiceComparisonPreviewRequest;
+    sarvamRegistration?: SarvamVoiceRegistration;
+  }> = [];
+  const sarvamRegistration = validSarvamRegistration(profile);
+  if (sarvamRegistration) {
+    legacyCandidates.push({
+      request: {
+        profileId: profile.id,
+        providerId: 'sarvam',
+        text: DEFAULT_VOICE_COMPARISON_TEXT,
+        language: defaultLanguage,
+      },
+      sarvamRegistration,
+    });
+  }
+  const defaultBodhanVoice =
+    BODHAN_VOICES.find(({ recordedLanguage }) => recordedLanguage === defaultLanguage) ??
+    BODHAN_VOICES[0];
+  if (defaultBodhanVoice) {
+    legacyCandidates.push({
+      request: {
+        profileId: profile.id,
+        providerId: 'bodhan',
+        text: DEFAULT_VOICE_COMPARISON_TEXT,
+        language: defaultLanguage,
+        voice: defaultBodhanVoice.id,
+        style: BODHAN_STYLES[0],
+      },
+    });
+  }
+  for (const candidate of legacyCandidates) {
+    const cacheKey = voiceComparisonCacheKey({
+      profile,
+      request: candidate.request,
+      synthesisText: candidate.request.text,
+      sarvamRegistration: candidate.sarvamRegistration,
+    });
+    if (savedPreviews.some((preview) => preview.cacheKey === cacheKey)) continue;
+    const legacy = await readVoiceComparisonCache(ownerId, cacheKey);
+    if (!legacy || legacy.profileId) continue;
+    savedPreviews.push({
+      ...legacy,
+      profileId: profile.id,
+      request: {
+        text: candidate.request.text,
+        language: candidate.request.language,
+        ...(candidate.request.voice ? { voice: candidate.request.voice } : {}),
+        ...(candidate.request.style ? { style: candidate.request.style } : {}),
+      },
+    });
+  }
   return {
     providers: VOICE_COMPARISON_PROVIDERS.map(({ id }) => voiceProviderAvailability(profile, id)),
     languages: VOICE_COMPARISON_LANGUAGES,
     bodhanVoices: BODHAN_VOICES,
     bodhanStyles: [...BODHAN_STYLES],
+    savedPreviews: savedPreviews.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt)),
   };
+}
+
+function voiceComparisonCacheKey(input: {
+  profile: VoiceProfile;
+  request: VoiceComparisonPreviewRequest;
+  synthesisText: string;
+  sarvamRegistration?: SarvamVoiceRegistration;
+}): string {
+  return createVoiceComparisonCacheKey({
+    ownerId: input.profile.ownerId,
+    profileId: input.profile.id,
+    profileVersion: input.profile.profileVersion,
+    referenceAudioKey: input.profile.referenceAudioKey ?? null,
+    providerId: input.request.providerId,
+    language: input.request.language,
+    text: input.synthesisText,
+    voice: input.request.voice ?? null,
+    style: input.request.style ?? null,
+    sarvamVoiceId: input.sarvamRegistration?.voiceId ?? null,
+    modelVariant:
+      input.request.providerId === 'chatterbox'
+        ? resolveVoiceProfileModelVariant(input.profile)
+        : null,
+    generationSettings:
+      input.request.providerId === 'chatterbox'
+        ? resolveVoiceProfileGenerationSettings(input.profile)
+        : null,
+    qwenCloneMode: input.request.providerId === 'qwen3-tts' ? 'speaker-embedding' : null,
+    processingMode:
+      input.request.providerId === 'sarvam' ? SARVAM_RAW_PROCESSING_MODE : 'standard-v1',
+    outputCodec: input.request.providerId === 'sarvam' ? 'wav' : null,
+    providerGenerationParameters:
+      input.request.providerId === 'sarvam'
+        ? { enableVad: false, enableTextNormalization: false, enableQc: false }
+        : null,
+  });
 }
 
 function validLegacySarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
@@ -431,33 +530,15 @@ export async function generateVoiceComparisonPreview(input: {
           signal: input.signal,
         })
       : undefined;
-  const cacheKey = createVoiceComparisonCacheKey({
-    ownerId: input.ownerId,
-    profileId: profile.id,
-    profileVersion: profile.profileVersion,
-    referenceAudioKey: profile.referenceAudioKey ?? null,
-    providerId: input.request.providerId,
-    language: input.request.language,
-    text: synthesisText,
-    voice: input.request.voice ?? null,
-    style: input.request.style ?? null,
-    sarvamVoiceId: sarvamRegistration?.voiceId ?? null,
-    modelVariant:
-      input.request.providerId === 'chatterbox' ? resolveVoiceProfileModelVariant(profile) : null,
-    generationSettings:
-      input.request.providerId === 'chatterbox'
-        ? resolveVoiceProfileGenerationSettings(profile)
-        : null,
-    qwenCloneMode: input.request.providerId === 'qwen3-tts' ? 'speaker-embedding' : null,
-    processingMode:
-      input.request.providerId === 'sarvam' ? SARVAM_RAW_PROCESSING_MODE : 'standard-v1',
-    outputCodec: input.request.providerId === 'sarvam' ? 'wav' : null,
-    providerGenerationParameters:
-      input.request.providerId === 'sarvam'
-        ? { enableVad: false, enableTextNormalization: false, enableQc: false }
-        : null,
+  const cacheKey = voiceComparisonCacheKey({
+    profile,
+    request: input.request,
+    synthesisText,
+    sarvamRegistration,
   });
-  const cached = await readVoiceComparisonCache(input.ownerId, cacheKey);
+  const cached = input.request.bypassCache
+    ? null
+    : await readVoiceComparisonCache(input.ownerId, cacheKey);
   if (cached) {
     log.info('voice comparison preview cache hit', {
       provider: input.request.providerId,
@@ -483,7 +564,9 @@ export async function generateVoiceComparisonPreview(input: {
     requestKey: `voice-preview:${input.ownerId}:${cacheKey}`,
     concurrency: externalConfig?.maxConcurrency ?? 1,
     task: async () => {
-      const secondCached = await readVoiceComparisonCache(input.ownerId, cacheKey);
+      const secondCached = input.request.bypassCache
+        ? null
+        : await readVoiceComparisonCache(input.ownerId, cacheKey);
       if (secondCached) return secondCached;
       const startedAt = Date.now();
       const generated = await generateProviderAudio({
@@ -495,6 +578,7 @@ export async function generateVoiceComparisonPreview(input: {
       const metadata = readWavMetadata(generated.audio);
       const generatedAt = new Date().toISOString();
       const result: VoiceComparisonPreviewResult = {
+        profileId: profile.id,
         providerId: input.request.providerId,
         providerName: capability.name,
         voiceType: capability.voiceType,
@@ -520,6 +604,12 @@ export async function generateVoiceComparisonPreview(input: {
             }
           : {}),
         chunked: generated.chunked,
+        request: {
+          text: synthesisText,
+          language: input.request.language,
+          ...(input.request.voice ? { voice: input.request.voice } : {}),
+          ...(input.request.style ? { style: input.request.style } : {}),
+        },
       };
       log.info('voice comparison preview generated', {
         provider: input.request.providerId,

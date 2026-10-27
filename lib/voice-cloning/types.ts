@@ -65,6 +65,7 @@ export type VoicePreviewTextLanguage = 'en' | 'hi';
 
 export interface VoicePreviewConfiguration extends VoiceConfiguration {
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
 }
 
 export interface VoicePreview {
@@ -85,6 +86,7 @@ export interface VoiceModelPreviewResult {
   enhancementMode: VoiceEnhancementMode;
   preview: VoicePreview;
   comparison: VoicePreviewComparison;
+  previewText?: string;
 }
 
 export interface Qwen3TtsPreviewCache {
@@ -157,6 +159,7 @@ export interface VoiceProfile {
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -193,6 +196,7 @@ export interface PublicVoiceProfile {
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
   previewTextLanguageId?: VoicePreviewTextLanguage;
+  previewText?: string;
   previewVariants?: Partial<Record<ChatterboxModelVariant, VoicePreview>>;
   draftPreview?: VoiceDraftPreview;
   enrollmentQuality?: VoiceEnrollmentQualitySummary;
@@ -440,6 +444,7 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(!legacyQwenProfile && profile.previewTextLanguageId
       ? { previewTextLanguageId: profile.previewTextLanguageId }
       : {}),
+    ...(!legacyQwenProfile && profile.previewText ? { previewText: profile.previewText } : {}),
     ...(!legacyQwenProfile && profile.previewVariants
       ? { previewVariants: profile.previewVariants }
       : {}),
