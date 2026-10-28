@@ -138,6 +138,8 @@ export class Ming3TtsPreviewProvider {
     durationSeconds: number;
     requestId?: string;
     referenceTransformation?: string;
+    conditioningMode?: string;
+    generationConfig?: string;
   }> {
     const response = await this.request(
       '/synthesize',
@@ -148,6 +150,7 @@ export class Ming3TtsPreviewProvider {
           profileId: input.profileId,
           text: input.text,
           language: input.language,
+          conditioningMode: this.config.conditioningMode,
         }),
       },
       'preview_generation',
@@ -156,6 +159,19 @@ export class Ming3TtsPreviewProvider {
     const audio = new Uint8Array(await response.arrayBuffer());
     try {
       const metadata = readWavMetadata(audio);
+      const returnedConditioningMode = response.headers.get('x-ming-conditioning-mode');
+      if (
+        this.config.conditioningMode === 'speaker-embedding-only' &&
+        returnedConditioningMode !== this.config.conditioningMode
+      ) {
+        throw providerError(
+          'Ming 3.0 TTS did not confirm speaker-only conditioning.',
+          502,
+          '/synthesize',
+          'preview_generation',
+          response,
+        );
+      }
       return {
         audio,
         durationSeconds: metadata.durationSeconds,
@@ -165,8 +181,13 @@ export class Ming3TtsPreviewProvider {
         ...(response.headers.get('x-reference-preparation')
           ? { referenceTransformation: response.headers.get('x-reference-preparation')! }
           : {}),
+        ...(returnedConditioningMode ? { conditioningMode: returnedConditioningMode } : {}),
+        ...(response.headers.get('x-ming-generation-config')
+          ? { generationConfig: response.headers.get('x-ming-generation-config')! }
+          : {}),
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof TeachingVoiceError) throw error;
       throw providerError(
         'Ming 3.0 TTS returned invalid WAV audio.',
         502,

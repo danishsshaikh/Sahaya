@@ -274,6 +274,10 @@ function voiceComparisonCacheKey(input: {
   synthesisText: string;
   sarvamRegistration?: SarvamVoiceRegistration;
 }): string {
+  const mingConditioningMode =
+    input.request.providerId === 'ming3-tts'
+      ? getMing3TtsPreviewServiceConfig().conditioningMode
+      : null;
   return createVoiceComparisonCacheKey({
     ownerId: input.profile.ownerId,
     profileId: input.profile.id,
@@ -301,7 +305,9 @@ function voiceComparisonCacheKey(input: {
       input.request.providerId === 'sarvam'
         ? SARVAM_RAW_PROCESSING_MODE
         : input.request.providerId === 'ming3-tts'
-          ? MING3_PROCESSING_MODE
+          ? mingConditioningMode === 'speaker-embedding-only'
+            ? `${MING3_PROCESSING_MODE}-speaker-embedding-only`
+            : MING3_PROCESSING_MODE
           : 'standard-v1',
     outputCodec:
       input.request.providerId === 'sarvam' || input.request.providerId === 'ming3-tts'
@@ -311,13 +317,23 @@ function voiceComparisonCacheKey(input: {
       input.request.providerId === 'sarvam'
         ? { enableVad: false, enableTextNormalization: false, enableQc: false }
         : input.request.providerId === 'ming3-tts'
-          ? {
-              task: 'TTS',
-              languageId: 'English',
-              useSpeakerEmbedding: true,
-              rawText: true,
-              modelDefaults: true,
-            }
+          ? mingConditioningMode === 'speaker-embedding-only'
+            ? {
+                task: 'TTS',
+                languageId: 'English',
+                useSpeakerEmbedding: true,
+                rawText: true,
+                modelDefaults: true,
+                conditioningMode: 'speaker-embedding-only',
+                acousticPrompt: false,
+              }
+            : {
+                task: 'TTS',
+                languageId: 'English',
+                useSpeakerEmbedding: true,
+                rawText: true,
+                modelDefaults: true,
+              }
           : null,
   });
 }
@@ -490,6 +506,8 @@ async function generateProviderAudio(input: {
   durationSeconds?: number;
   requestId?: string;
   referenceTransformation?: string;
+  conditioningMode?: 'acoustic-reference' | 'speaker-embedding-only';
+  generationConfig?: string;
   chunked: boolean;
 }> {
   const { profile, request } = input;
@@ -544,6 +562,11 @@ async function generateProviderAudio(input: {
       language: 'en',
       signal: input.signal,
     });
+    const conditioningMode =
+      result.conditioningMode === 'acoustic-reference' ||
+      result.conditioningMode === 'speaker-embedding-only'
+        ? result.conditioningMode
+        : undefined;
     return {
       audio: result.audio,
       durationSeconds: result.durationSeconds,
@@ -551,6 +574,8 @@ async function generateProviderAudio(input: {
       ...(result.referenceTransformation
         ? { referenceTransformation: result.referenceTransformation }
         : {}),
+      ...(conditioningMode ? { conditioningMode } : {}),
+      ...(result.generationConfig ? { generationConfig: result.generationConfig } : {}),
       chunked: false,
     };
   }
@@ -679,6 +704,8 @@ export async function generateVoiceComparisonPreview(input: {
       processingMode: cached.processingMode,
       referenceProvenance: cached.referenceProvenance,
       providerRequestId: cached.providerRequestId,
+      conditioningMode: cached.conditioningMode,
+      generationConfig: cached.generationConfig,
       cache: 'hit',
       sahayaAudioProcessingApplied:
         input.request.providerId !== 'sarvam' && input.request.providerId !== 'ming3-tts',
@@ -751,6 +778,8 @@ export async function generateVoiceComparisonPreview(input: {
         ...(generated.referenceTransformation
           ? { referenceTransformation: generated.referenceTransformation }
           : {}),
+        ...(generated.conditioningMode ? { conditioningMode: generated.conditioningMode } : {}),
+        ...(generated.generationConfig ? { generationConfig: generated.generationConfig } : {}),
         chunked: generated.chunked,
         request: {
           text: synthesisText,
@@ -768,6 +797,8 @@ export async function generateVoiceComparisonPreview(input: {
         durationMs: Math.round(result.durationSeconds * 1000),
         generationLatencyMs: result.generationLatencyMs,
         providerRequestId: result.providerRequestId,
+        conditioningMode: result.conditioningMode,
+        generationConfig: result.generationConfig,
         cache: 'miss',
         chunked: result.chunked,
         sahayaAudioProcessingApplied:

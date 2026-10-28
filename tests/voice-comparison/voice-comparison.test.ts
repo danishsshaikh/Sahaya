@@ -552,6 +552,8 @@ describe('voice comparison coordinator', () => {
           'content-type': 'audio/wav',
           'x-request-id': 'req-ming-owner',
           'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+          'x-ming-conditioning-mode': 'acoustic-reference',
+          'x-ming-generation-config': 'ming-0.5b-official-defaults-v1',
         },
       }),
     );
@@ -573,6 +575,8 @@ describe('voice comparison coordinator', () => {
       processingMode: 'model-native-output',
       referenceProvenance: 'original-upload',
       referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      conditioningMode: 'acoustic-reference',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
       chunked: false,
     });
     expect(duplicate.audio.base64).toBe(result.audio.base64);
@@ -586,7 +590,12 @@ describe('voice comparison coordinator', () => {
       referenceLanguage: 'en',
     });
     expect(registration.profileId).toMatch(/^ming_[a-f0-9]{32}$/);
-    expect(synthesis).toEqual({ profileId: registration.profileId, text, language: 'en' });
+    expect(synthesis).toEqual({
+      profileId: registration.profileId,
+      text,
+      language: 'en',
+      conditioningMode: 'acoustic-reference',
+    });
     expect((await storage.readVoiceProfile(original.id, original.ownerId))?.provider).toBe(
       'chatterbox',
     );
@@ -594,6 +603,134 @@ describe('voice comparison coordinator', () => {
     const cached = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
     expect(cached.cached).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('separates Ming speaker-only previews from existing acoustic-reference cache entries', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    vi.stubEnv('MING3_TTS_BASE_URL', 'http://ming.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const wav = pcmWav();
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { profileId: string };
+      if (url.endsWith('/profiles')) {
+        return new Response(JSON.stringify({ providerReferenceId: body.profileId }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(Buffer.from(wav), {
+        headers: {
+          'content-type': 'audio/wav',
+          'x-ming-conditioning-mode':
+            process.env.MING3_TTS_CONDITIONING_MODE ?? 'acoustic-reference',
+        },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+    const request = {
+      profileId: original.id,
+      providerId: 'ming3-tts' as const,
+      text: 'Exact unchanged comparison text.',
+      language: 'en' as const,
+    };
+
+    const acoustic = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
+    const restored = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
+    expect(restored.cacheKey).toBe(acoustic.cacheKey);
+    expect(restored.cached).toBe(true);
+
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'speaker-embedding-only');
+    const speakerOnly = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request,
+    });
+    expect(speakerOnly.cacheKey).not.toBe(acoustic.cacheKey);
+    expect(speakerOnly.cached).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+      conditioningMode: 'speaker-embedding-only',
+      text: request.text,
+    });
+  });
+
+  it('restores the existing acoustic Ming cache identity unchanged', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const cache = await import('@/lib/server/voice-comparison-cache');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const text = 'Restore the existing Ming preview.';
+    const existingKey = cache.createVoiceComparisonCacheKey({
+      ownerId: original.ownerId,
+      profileId: original.id,
+      profileVersion: original.profileVersion,
+      referenceAudioKey,
+      mingReferenceAudioKey: referenceAudioKey,
+      providerId: 'ming3-tts',
+      language: 'en',
+      text,
+      voice: null,
+      style: null,
+      sarvamVoiceId: null,
+      modelVariant: null,
+      generationSettings: null,
+      qwenCloneMode: null,
+      processingMode: 'official-model-runtime-v1',
+      outputCodec: 'wav',
+      providerGenerationParameters: {
+        task: 'TTS',
+        languageId: 'English',
+        useSpeakerEmbedding: true,
+        rawText: true,
+        modelDefaults: true,
+      },
+    });
+    await cache.writeVoiceComparisonCache(original.ownerId, {
+      profileId: original.id,
+      providerId: 'ming3-tts',
+      providerName: 'Ming 3.0 TTS 0.5B',
+      voiceType: 'cloned',
+      language: 'en',
+      audio: {
+        format: 'wav',
+        base64: Buffer.from(pcmWav()).toString('base64'),
+        createdAt: '2026-10-26T00:00:00.000Z',
+      },
+      durationSeconds: 1,
+      generationLatencyMs: 1,
+      generatedAt: '2026-10-26T00:00:00.000Z',
+      cached: false,
+      cacheKey: existingKey,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    const restored = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request: {
+        profileId: original.id,
+        providerId: 'ming3-tts',
+        text,
+        language: 'en',
+      },
+    });
+
+    expect(restored.cached).toBe(true);
+    expect(restored.cacheKey).toBe(existingKey);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not expose or use another owner profile', async () => {

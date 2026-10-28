@@ -125,6 +125,7 @@ describe('Ming 3.0 TTS preview provider', () => {
     baseUrl: 'http://127.0.0.1:8773',
     timeoutMs: 5000,
     maxConcurrency: 1,
+    conditioningMode: 'acoustic-reference' as const,
   };
 
   it('registers an English reference transcript and preserves synthesis text and WAV bytes', async () => {
@@ -146,6 +147,8 @@ describe('Ming 3.0 TTS preview provider', () => {
             'content-type': 'audio/wav',
             'x-request-id': 'req-ming',
             'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+            'x-ming-conditioning-mode': 'acoustic-reference',
+            'x-ming-generation-config': 'ming-0.5b-official-defaults-v1',
           },
         }),
       );
@@ -167,6 +170,8 @@ describe('Ming 3.0 TTS preview provider', () => {
     expect(result).toMatchObject({
       requestId: 'req-ming',
       referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      conditioningMode: 'acoustic-reference',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
     });
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
       profileId: 'ming_owner_profile',
@@ -178,7 +183,58 @@ describe('Ming 3.0 TTS preview provider', () => {
       profileId: 'ming_owner_profile',
       text,
       language: 'en',
+      conditioningMode: 'acoustic-reference',
     });
+  });
+
+  it('requests and requires confirmed speaker-embedding-only conditioning', async () => {
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(Buffer.from(wav), {
+        headers: {
+          'content-type': 'audio/wav',
+          'x-ming-conditioning-mode': 'speaker-embedding-only',
+          'x-reference-preparation': 'official-campplus-16khz-speaker-embedding-only',
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new Ming3TtsPreviewProvider({
+      ...config,
+      conditioningMode: 'speaker-embedding-only',
+    });
+
+    await expect(
+      provider.synthesize({ profileId: 'ming_owner_profile', text: 'Exact text.', language: 'en' }),
+    ).resolves.toMatchObject({
+      conditioningMode: 'speaker-embedding-only',
+      referenceTransformation: 'official-campplus-16khz-speaker-embedding-only',
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      profileId: 'ming_owner_profile',
+      text: 'Exact text.',
+      language: 'en',
+      conditioningMode: 'speaker-embedding-only',
+    });
+  });
+
+  it('rejects an old service that cannot confirm speaker-only conditioning', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(Buffer.from(pcmWav()), { headers: { 'content-type': 'audio/wav' } }),
+        ),
+    );
+    const provider = new Ming3TtsPreviewProvider({
+      ...config,
+      conditioningMode: 'speaker-embedding-only',
+    });
+
+    await expect(
+      provider.synthesize({ profileId: 'ming_owner_profile', text: 'Exact text.', language: 'en' }),
+    ).rejects.toThrow('did not confirm speaker-only conditioning');
   });
 
   it('reports a missing model service without falling back', async () => {

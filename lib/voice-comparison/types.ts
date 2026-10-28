@@ -113,6 +113,8 @@ export interface VoiceComparisonPreviewResult {
   providerRequestId?: string;
   referenceProvenance?: 'original-upload' | 'processed-reference' | 'unknown';
   referenceTransformation?: string;
+  conditioningMode?: 'acoustic-reference' | 'speaker-embedding-only';
+  generationConfig?: string;
   chunked?: boolean;
   /** Owner-scoped request metadata used to restore the matching saved preview. */
   request?: {

@@ -90,6 +90,44 @@ describe('course narration provider routing', () => {
     expect(Buffer.from(result.audio.base64, 'base64').toString()).toBe('provider-bytes');
   });
 
+  it('routes Ming course narration through the shared fixed adapter without enhancement', async () => {
+    mocks.generatePreview.mockResolvedValue({
+      profileId: 'profile-1',
+      providerId: 'ming3-tts',
+      providerName: 'Ming 3.0 TTS 0.5B',
+      audio: { format: 'wav', base64: Buffer.from('ming-wav').toString('base64') },
+      cacheKey: 'speaker-only-key',
+      conditioningMode: 'speaker-embedding-only',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
+    });
+
+    const result = await synthesizeCourseNarration({
+      ownerId: 'owner-1',
+      stageId: 'course-1',
+      profileId: 'profile-1',
+      providerId: 'ming3-tts',
+      text: 'Exact course narration text.',
+      language: 'en',
+      enhancementMode: 'standard',
+    });
+
+    expect(mocks.generatePreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: {
+          profileId: 'profile-1',
+          providerId: 'ming3-tts',
+          text: 'Exact course narration text.',
+          language: 'en',
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      conditioningMode: 'speaker-embedding-only',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
+    });
+    expect(mocks.enhance).not.toHaveBeenCalled();
+  });
+
   it('never applies enhancement to providers that do not support it', async () => {
     await expect(
       synthesizeCourseNarration({
