@@ -148,7 +148,7 @@ describe('Teaching Voice profile restoration', () => {
     expect(
       refreshedRender.querySelector('[aria-label="Original Chatterbox preview"]'),
     ).not.toBeNull();
-    expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?language=en');
+    expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?library=true&language=en');
   });
 
   it('restores the active Qwen engine and cached preview after refresh', async () => {

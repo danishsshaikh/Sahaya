@@ -18,6 +18,7 @@ import {
 import {
   deleteVoiceProfileAssets,
   findCurrentVoiceProfile,
+  listVoiceProfiles,
   readVoiceProfile,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
@@ -237,8 +238,13 @@ export async function GET(req: NextRequest) {
       getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
       validateTeachingVoiceLanguage(profile, requested ?? undefined);
     }
+    const profiles =
+      params.get('library') === 'true'
+        ? await listVoiceProfiles(user.id, { readyOnly: true })
+        : undefined;
     return apiSuccess({
       profile: publicVoiceProfile(profile),
+      ...(profiles ? { profiles: profiles.map(publicVoiceProfile).filter(Boolean) } : {}),
       previewModels: availablePreviewModels(),
       qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
       qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
@@ -286,6 +292,7 @@ export async function PATCH(req: NextRequest) {
     previewTextLanguageId?: string;
     previewModel?: string;
     previewText?: string;
+    displayName?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -293,6 +300,16 @@ export async function PATCH(req: NextRequest) {
   const profile = await readVoiceProfile(body.profileId, user.id);
   if (!profile || profile.ownerId !== user.id || profile.status === 'deleted') {
     return apiError('INVALID_REQUEST', 404, 'Voice profile not found');
+  }
+
+  if (body.action === 'rename') {
+    const displayName = body.displayName?.trim();
+    if (!displayName || displayName.length > 80) {
+      return apiError('INVALID_REQUEST', 400, 'Voice name must be between 1 and 80 characters');
+    }
+    const next = { ...profile, displayName, updatedAt: new Date().toISOString() };
+    await writeVoiceProfile(next);
+    return apiSuccess({ profile: publicVoiceProfile(next) });
   }
 
   const previewModel = body.previewModel ?? 'chatterbox-v3';

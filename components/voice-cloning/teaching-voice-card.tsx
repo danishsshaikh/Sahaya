@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   CircleAlert,
+  FileAudio,
   Loader2,
   Mic,
   Play,
@@ -16,6 +17,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { VoiceComparisonPanel } from '@/components/voice-cloning/voice-comparison-panel';
+import { SavedVoiceLibrary } from '@/components/voice-cloning/saved-voice-library';
 import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 import { cn } from '@/lib/utils';
 import {
@@ -28,6 +30,7 @@ import {
   resolveTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
 import {
+  MAX_RECORDING_SIZE_BYTES,
   MIN_RECORDING_SIZE_BYTES,
   VOICE_ENROLLMENT_TARGET_SECONDS,
 } from '@/lib/voice-cloning/limits';
@@ -72,6 +75,7 @@ type ClipState = {
 type ApiProfileResponse = {
   success?: boolean;
   profile?: PublicVoiceProfile | null;
+  profiles?: PublicVoiceProfile[];
   error?: string;
   details?: string;
   previewModels?: VoicePreviewModel[];
@@ -96,6 +100,7 @@ type VoiceEnrollmentResponse = ApiProfileResponse & {
 };
 
 type SetupStep = 'record' | 'preview' | 'review';
+type EnrollmentMode = 'microphone' | 'audio-import';
 type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
 type CustomizationEngine = 'chatterbox' | 'qwen3-tts' | 'sarvam' | 'bodhan' | 'ming3-tts';
 
@@ -217,9 +222,14 @@ export function TeachingVoiceCard({
   const enrollmentPhrase = getVoiceEnrollmentPhrases(enrollmentLanguage)[0];
   const enrollmentParagraph = enrollmentPhrase?.text;
   const [profile, setProfile] = useState<PublicVoiceProfile | null>(null);
+  const [profiles, setProfiles] = useState<PublicVoiceProfile[]>([]);
   const [profileLoading, setProfileLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [consented, setConsented] = useState(false);
+  const [enrollmentMode, setEnrollmentMode] = useState<EnrollmentMode>('microphone');
+  const [voiceName, setVoiceName] = useState('My Teaching Voice');
+  const [importTranscript, setImportTranscript] = useState('');
+  const [recordingFileName, setRecordingFileName] = useState('teaching-voice.webm');
   const [recording, setRecording] = useState<ClipState>({});
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [recordingPending, setRecordingPending] = useState(false);
@@ -409,13 +419,19 @@ export function TeachingVoiceCard({
   useEffect(() => {
     let cancelled = false;
     setProfileLoading(true);
-    fetch(`/api/voice-cloning/profile?language=${encodeURIComponent(enrollmentLanguage)}`)
+    fetch(
+      `/api/voice-cloning/profile?library=true&language=${encodeURIComponent(enrollmentLanguage)}`,
+    )
       .then(async (res) => {
         return readVoiceApiResponse<ApiProfileResponse>(res);
       })
       .then((data: ApiProfileResponse | null) => {
         if (cancelled) return;
-        const next = data?.profile ?? null;
+        const next =
+          data?.profiles?.find((candidate) => candidate.id === selectedProfileIdRef.current) ??
+          data?.profile ??
+          null;
+        setProfiles(data?.profiles ?? []);
         const previewModels = data?.previewModels?.length
           ? data.previewModels
           : (['chatterbox-v3'] as VoicePreviewModel[]);
@@ -575,6 +591,11 @@ export function TeachingVoiceCard({
 
   const applyEnrollmentProfile = (next: PublicVoiceProfile) => {
     setProfile(next);
+    setProfiles((current) =>
+      [next, ...current.filter((candidate) => candidate.id !== next.id)].sort((left, right) =>
+        right.createdAt.localeCompare(left.createdAt),
+      ),
+    );
     setSetupStep('review');
     setCustomizeOpen(false);
     setRecordingRequiresRetry(false);
@@ -587,6 +608,29 @@ export function TeachingVoiceCard({
     );
     setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
     setDraftEnhancementMode(config.enhancementMode ?? 'standard');
+  };
+
+  const renameSavedProfile = async (target: PublicVoiceProfile, displayName: string) => {
+    try {
+      const response = await fetch('/api/voice-cloning/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileId: target.id, action: 'rename', displayName }),
+      });
+      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
+      if (!data.profile) throw new Error('The voice could not be renamed.');
+      setProfiles((current) =>
+        current.map((candidate) => (candidate.id === data.profile!.id ? data.profile! : candidate)),
+      );
+      if (profile?.id === data.profile.id) setProfile(data.profile);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The voice could not be renamed.');
+    }
+  };
+
+  const selectSavedProfile = (target: PublicVoiceProfile) => {
+    applyEnrollmentProfile(target);
+    activateProfile(target);
   };
 
   const finishEnrollmentAttempt = (attemptId: string) => {
@@ -946,6 +990,9 @@ export function TeachingVoiceCard({
           });
           return;
         }
+        setRecordingFileName(
+          mimeType.includes('ogg') ? 'teaching-voice.ogg' : 'teaching-voice.webm',
+        );
         replaceRecording({
           blob,
           duration,
@@ -971,11 +1018,68 @@ export function TeachingVoiceCard({
     }
   };
 
+  const importAudioFile = (file: File | undefined) => {
+    if (!file) return;
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    const inferredType =
+      file.type ||
+      (
+        {
+          wav: 'audio/wav',
+          mp3: 'audio/mpeg',
+          m4a: 'audio/mp4',
+          mp4: 'audio/mp4',
+          ogg: 'audio/ogg',
+          opus: 'audio/ogg',
+          flac: 'audio/flac',
+          webm: 'audio/webm',
+        } as Record<string, string>
+      )[extension ?? ''];
+    const supported = new Set([
+      'audio/wav',
+      'audio/x-wav',
+      'audio/mpeg',
+      'audio/mp4',
+      'audio/ogg',
+      'audio/flac',
+      'audio/webm',
+    ]);
+    const baseType = inferredType?.toLowerCase().split(';', 1)[0];
+    if (!baseType || !supported.has(baseType)) {
+      replaceRecording({
+        error: 'Unsupported file. Choose WAV, MP3, M4A, OGG, FLAC, or WebM audio.',
+      });
+      return;
+    }
+    if (file.size < MIN_RECORDING_SIZE_BYTES || file.size > MAX_RECORDING_SIZE_BYTES) {
+      replaceRecording({
+        error: 'The selected audio file is empty or exceeds the enrollment size limit.',
+      });
+      return;
+    }
+    const preserved = file.type ? file : new File([file], file.name, { type: baseType });
+    const url = URL.createObjectURL(preserved);
+    setRecordingFileName(file.name);
+    replaceRecording({ blob: preserved, url });
+    const probe = new Audio(url);
+    probe.addEventListener(
+      'loadedmetadata',
+      () => setRecording((current) => ({ ...current, duration: probe.duration })),
+      { once: true },
+    );
+    probe.addEventListener(
+      'error',
+      () => replaceRecording({ error: 'The browser could not decode this audio file.' }),
+      { once: true },
+    );
+  };
+
   const submitEnrollment = async () => {
     if (
       !recordingReady ||
       !recording.blob ||
-      !enrollmentPhrase ||
+      (enrollmentMode === 'microphone' && !enrollmentPhrase) ||
+      (enrollmentMode === 'audio-import' && !importTranscript.trim()) ||
       recordingRequiresRetry ||
       enrollmentRequestInFlightRef.current
     ) {
@@ -998,12 +1102,17 @@ export function TeachingVoiceCard({
       const formData = new FormData();
       formData.set('attemptId', attemptId);
       formData.set('consent', 'true');
-      formData.set('displayName', 'My Teaching Voice');
+      formData.set('displayName', voiceName.trim() || 'My Teaching Voice');
       formData.set('language', enrollmentLanguage);
       formData.set('languageId', enrollmentLanguage);
-      formData.set('phraseId', enrollmentPhrase.id);
-      formData.set('referenceText', enrollmentPhrase.text);
-      formData.set('recording', recording.blob, 'teaching-voice.webm');
+      formData.set('enrollmentSource', enrollmentMode);
+      if (enrollmentMode === 'microphone') {
+        formData.set('phraseId', enrollmentPhrase!.id);
+        formData.set('referenceText', enrollmentPhrase!.text);
+      } else {
+        formData.set('referenceText', importTranscript.trim());
+      }
+      formData.set('recording', recording.blob, recordingFileName);
       const response = await fetch('/api/voice-cloning/enrollment', {
         method: 'POST',
         body: formData,
@@ -1165,6 +1274,7 @@ export function TeachingVoiceCard({
       );
       await readVoiceApiResponse(response);
       setProfile(null);
+      setProfiles((current) => current.filter((candidate) => candidate.id !== id));
       setSetupStep('record');
       setCustomizeOpen(false);
       setEnrollmentError(null);
@@ -1516,6 +1626,26 @@ export function TeachingVoiceCard({
             </div>
           )}
 
+          {profiles.length ? (
+            <section className="mb-4 space-y-2" aria-labelledby="saved-voice-library-heading">
+              <div>
+                <h3 id="saved-voice-library-heading" className="text-sm font-semibold">
+                  Saved Voice Library
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Voices are ordered by creation date. Selecting one never deletes another.
+                </p>
+              </div>
+              <SavedVoiceLibrary
+                profiles={profiles}
+                selectedProfileId={selectedProfileId}
+                disabled={busy}
+                onSelect={selectSavedProfile}
+                onRename={renameSavedProfile}
+              />
+            </section>
+          ) : null}
+
           {busy && setupStep === 'preview' ? (
             renderBusyPreview()
           ) : profile?.status === 'preview-ready' ? (
@@ -1628,8 +1758,8 @@ export function TeachingVoiceCard({
                   }}
                   disabled={busy}
                 >
-                  <RotateCcw className="size-4" />
-                  Replace Voice
+                  <FileAudio className="size-4" />
+                  Add Another Voice
                 </Button>
                 <Button
                   type="button"
@@ -1671,7 +1801,48 @@ export function TeachingVoiceCard({
             </div>
           ) : (
             <div className="space-y-4">
-              {renderStepHeader('record', 'Record')}
+              {renderStepHeader(
+                'record',
+                enrollmentMode === 'microphone' ? 'Record' : 'Import Voice',
+              )}
+              <div
+                className="inline-flex rounded-md border p-0.5"
+                aria-label="Voice enrollment method"
+              >
+                {(
+                  [
+                    ['microphone', 'Record with microphone'],
+                    ['audio-import', 'Import audio file'],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={enrollmentMode === mode}
+                    onClick={() => {
+                      clearCandidateRecording();
+                      setEnrollmentMode(mode);
+                    }}
+                    className={cn(
+                      'rounded px-3 py-1.5 text-xs font-medium',
+                      enrollmentMode === mode
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="block space-y-1 text-xs font-medium">
+                Voice name
+                <input
+                  value={voiceName}
+                  maxLength={80}
+                  onChange={(event) => setVoiceName(event.target.value)}
+                  className="h-9 w-full rounded-md border bg-background px-2 text-sm font-normal"
+                />
+              </label>
               <label className="flex items-start gap-3 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
@@ -1680,123 +1851,183 @@ export function TeachingVoiceCard({
                   className="mt-0.5"
                 />
                 <span>
-                  I am recording my own voice. These samples will be stored privately and used to
-                  generate course narration in my voice. I can delete my voice profile later.
+                  {enrollmentMode === 'microphone'
+                    ? 'I am recording my own voice and authorize Sahaya to use it for synthetic course narration.'
+                    : 'I own this recording or have explicit permission from the speaker to create a synthetic voice from it.'}{' '}
+                  The original audio will be stored privately and will not replace any saved voice.
                 </span>
               </label>
 
-              <div className="rounded-lg border border-border/70 p-3">
-                <div className="text-sm font-medium text-foreground">
-                  Record Your Teaching Voice
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Read this paragraph naturally. Most recordings take about 10 to 15 seconds, but do
-                  not rush.
-                </p>
-                <p className="mt-3 max-w-[70ch] text-sm leading-relaxed text-foreground">
-                  {enrollmentParagraph ||
-                    'New voice enrollment is available in English, Hindi and Marathi.'}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <span>Quiet room</span>
-                  <span aria-hidden="true">•</span>
-                  <span>Steady mic distance</span>
-                  <span aria-hidden="true">•</span>
-                  <span>Natural voice</span>
-                </div>
-                <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                  Your recording is used only to create your private teaching-voice reference. A
-                  quiet, natural recording usually produces the closest result.
-                </p>
-
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  {recordingStartedAt !== null ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={stopRecording}
-                      aria-label="Stop recording teaching voice"
-                    >
-                      <Mic className="size-4" />
-                      Stop Recording
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={
-                        !consented ||
-                        busy ||
-                        profileLoading ||
-                        recordingPending ||
-                        !enrollmentPhrase
-                      }
-                      onClick={startRecording}
-                      aria-label="Start recording teaching voice"
-                    >
-                      <Mic className="size-4" />
-                      Start Recording
-                    </Button>
-                  )}
-                  <span
-                    className={cn(
-                      'rounded-md border px-2 py-1 text-sm tabular-nums',
-                      recordingStartedAt !== null
-                        ? 'border-destructive/30 bg-destructive/5 text-destructive'
-                        : 'border-border text-muted-foreground',
-                    )}
-                    aria-live="polite"
-                  >
-                    {formatClock(
-                      recordingStartedAt !== null ? elapsedSeconds : (recording.duration ?? 0),
-                    )}
-                  </span>
-                  <span className="text-xs text-muted-foreground">{recordingGuidance}</span>
-                </div>
-
-                {recording.url && (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <audio
-                      controls
-                      ref={candidateAudioRef}
-                      className="h-9 min-w-[240px] max-w-full flex-1"
-                      src={recording.url}
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      {formatSeconds(recording.duration)}
-                    </span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={prepareForRerecord}
-                      disabled={!consented || busy}
-                    >
-                      <RotateCcw className="size-4" />
-                      Re-record
-                    </Button>
+              {enrollmentMode === 'microphone' ? (
+                <div className="rounded-lg border border-border/70 p-3">
+                  <div className="text-sm font-medium text-foreground">
+                    Record Your Teaching Voice
                   </div>
-                )}
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Read this paragraph naturally. Most recordings take about 10 to 15 seconds, but
+                    do not rush.
+                  </p>
+                  <p className="mt-3 max-w-[70ch] text-sm leading-relaxed text-foreground">
+                    {enrollmentParagraph ||
+                      'New voice enrollment is available in English, Hindi and Marathi.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span>Quiet room</span>
+                    <span aria-hidden="true">•</span>
+                    <span>Steady mic distance</span>
+                    <span aria-hidden="true">•</span>
+                    <span>Natural voice</span>
+                  </div>
+                  <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                    Your recording is used only to create your private teaching-voice reference. A
+                    quiet, natural recording usually produces the closest result.
+                  </p>
 
-                {recording.error && (
-                  <p className="mt-2 text-xs text-destructive" role="alert">
-                    {recording.error}
-                  </p>
-                )}
-                {enrollmentError && (
-                  <p className="mt-2 text-xs text-destructive" role="alert">
-                    {enrollmentError}
-                  </p>
-                )}
-              </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    {recordingStartedAt !== null ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={stopRecording}
+                        aria-label="Stop recording teaching voice"
+                      >
+                        <Mic className="size-4" />
+                        Stop Recording
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          !consented ||
+                          busy ||
+                          profileLoading ||
+                          recordingPending ||
+                          !enrollmentPhrase
+                        }
+                        onClick={startRecording}
+                        aria-label="Start recording teaching voice"
+                      >
+                        <Mic className="size-4" />
+                        Start Recording
+                      </Button>
+                    )}
+                    <span
+                      className={cn(
+                        'rounded-md border px-2 py-1 text-sm tabular-nums',
+                        recordingStartedAt !== null
+                          ? 'border-destructive/30 bg-destructive/5 text-destructive'
+                          : 'border-border text-muted-foreground',
+                      )}
+                      aria-live="polite"
+                    >
+                      {formatClock(
+                        recordingStartedAt !== null ? elapsedSeconds : (recording.duration ?? 0),
+                      )}
+                    </span>
+                    <span className="text-xs text-muted-foreground">{recordingGuidance}</span>
+                  </div>
+
+                  {recording.url && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <audio
+                        controls
+                        ref={candidateAudioRef}
+                        className="h-9 min-w-[240px] max-w-full flex-1"
+                        src={recording.url}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        {formatSeconds(recording.duration)}
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={prepareForRerecord}
+                        disabled={!consented || busy}
+                      >
+                        <RotateCcw className="size-4" />
+                        Re-record
+                      </Button>
+                    </div>
+                  )}
+
+                  {recording.error && (
+                    <p className="mt-2 text-xs text-destructive" role="alert">
+                      {recording.error}
+                    </p>
+                  )}
+                  {enrollmentError && (
+                    <p className="mt-2 text-xs text-destructive" role="alert">
+                      {enrollmentError}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3 rounded-lg border border-border/70 p-3">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">
+                      Import Voice from Audio
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      WAV, MP3, M4A, OGG, FLAC, and WebM are accepted. Sahaya retains the exact
+                      upload and creates a provider-ready reference separately when required.
+                    </p>
+                  </div>
+                  <label className="block space-y-1 text-xs font-medium">
+                    Audio file
+                    <input
+                      type="file"
+                      accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/ogg,audio/flac,audio/webm,.wav,.mp3,.m4a,.ogg,.opus,.flac,.webm"
+                      disabled={!consented || busy}
+                      onChange={(event) => importAudioFile(event.target.files?.[0])}
+                      className="block w-full text-xs font-normal file:mr-3 file:rounded-md file:border file:bg-background file:px-3 file:py-1.5"
+                    />
+                  </label>
+                  <label className="block space-y-1 text-xs font-medium">
+                    Exact reference transcript
+                    <Textarea
+                      value={importTranscript}
+                      maxLength={2000}
+                      placeholder="Enter exactly what is spoken in the selected recording."
+                      onChange={(event) => setImportTranscript(event.target.value)}
+                      className="min-h-20 resize-y font-normal"
+                    />
+                    <span className="block text-xs font-normal text-muted-foreground">
+                      Sahaya will not infer or rewrite this transcript.
+                    </span>
+                  </label>
+                  {recording.url ? (
+                    <div className="space-y-1">
+                      <p className="text-xs text-muted-foreground">Original file preview</p>
+                      <audio controls className="h-9 w-full" src={recording.url} />
+                    </div>
+                  ) : null}
+                  {recording.error ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {recording.error}
+                    </p>
+                  ) : null}
+                  {enrollmentError ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {enrollmentError}
+                    </p>
+                  ) : null}
+                </div>
+              )}
 
               <div className="flex flex-wrap justify-end gap-2">
                 <Button
                   type="button"
                   size="sm"
                   onClick={submitEnrollment}
-                  disabled={!canSubmitRecording}
+                  disabled={
+                    !canSubmitRecording ||
+                    !consented ||
+                    !voiceName.trim() ||
+                    (enrollmentMode === 'audio-import' && !importTranscript.trim())
+                  }
                 >
                   <Play className="size-4" />
                   Continue

@@ -5,6 +5,13 @@ export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
 export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
 export type Qwen3TtsCloneMode = 'speaker-embedding' | 'icl';
 export type TeachingVoiceEngine = 'chatterbox' | 'qwen3-tts' | 'indicf5';
+export type VoiceEnrollmentSource = 'microphone' | 'audio-import';
+export type VoiceLibraryProviderId =
+  | 'chatterbox'
+  | 'qwen3-tts'
+  | 'ming3-tts'
+  | 'sarvam'
+  | 'indicf5';
 
 export const VOICE_PREVIEW_MODELS = ['chatterbox-v3', 'qwen3-tts-1.7b-base'] as const;
 export const QWEN3_TTS_CLONE_MODES = ['speaker-embedding', 'icl'] as const;
@@ -155,6 +162,7 @@ export interface VoiceProfile {
   sarvamRawVoice?: SarvamVoiceRegistration;
   replacesProfileId?: string;
   enrollmentAttemptId?: string;
+  enrollmentSource?: VoiceEnrollmentSource;
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
@@ -192,6 +200,8 @@ export interface PublicVoiceProfile {
     referenceProvenance: 'original-upload' | 'processed-reference' | 'unknown';
   };
   originalRecordingRetained?: boolean;
+  enrollmentSource?: VoiceEnrollmentSource;
+  compatibleProviders?: VoiceLibraryProviderId[];
   profileVersion: number;
   preview?: VoicePreview;
   previewComparison?: VoicePreviewComparison;
@@ -437,6 +447,8 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     consentTimestamp: profile.consentTimestamp,
     consentVersion: profile.consentVersion,
     profileVersion: profile.profileVersion,
+    enrollmentSource: profile.enrollmentSource ?? 'microphone',
+    compatibleProviders: compatibleVoiceProviders(profile),
     ...(!legacyQwenProfile && profile.preview ? { preview: profile.preview } : {}),
     ...(!legacyQwenProfile && profile.previewComparison
       ? { previewComparison: profile.previewComparison }
@@ -467,4 +479,44 @@ export function toPublicVoiceProfile(profile: VoiceProfile | null): PublicVoiceP
     ...(profile.originalRecording ? { originalRecordingRetained: true } : {}),
     ...(profile.enrollmentQuality ? { enrollmentQuality: profile.enrollmentQuality } : {}),
   };
+}
+
+export function compatibleVoiceProviders(profile: VoiceProfile): VoiceLibraryProviderId[] {
+  const provider = resolveVoiceProfileProvider(profile);
+  const language = profile.language;
+  const referenceReady = profile.status === 'ready' && Boolean(profile.referenceAudioKey);
+  const compatible: VoiceLibraryProviderId[] = [];
+  if (referenceReady && provider === 'chatterbox' && profile.providerReferenceId) {
+    compatible.push('chatterbox');
+  }
+  if (referenceReady && provider === 'chatterbox' && language === 'en') {
+    compatible.push('qwen3-tts');
+  }
+  if (referenceReady && language === 'en' && profile.referenceText?.trim()) {
+    compatible.push('ming3-tts');
+  }
+  const sarvamReferenceMime = profile.originalRecording?.mimeType.trim().toLowerCase();
+  const sarvamReferenceSupported =
+    sarvamReferenceMime !== undefined &&
+    [
+      'audio/wav',
+      'audio/x-wav',
+      'audio/mpeg',
+      'audio/flac',
+      'audio/ogg',
+      'audio/ogg;codecs=opus',
+      'audio/aac',
+    ].includes(sarvamReferenceMime);
+  if (sarvamReferenceSupported || profile.sarvamRawVoice || profile.sarvamVoice) {
+    compatible.push('sarvam');
+  }
+  if (
+    referenceReady &&
+    provider === 'indicf5' &&
+    profile.providerReferenceId &&
+    (language === 'hi' || language === 'mr')
+  ) {
+    compatible.push('indicf5');
+  }
+  return compatible;
 }

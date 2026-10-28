@@ -258,6 +258,9 @@ export async function PUT(req: NextRequest) {
       profileId: requestedProfileId,
       language: lessonLanguage,
     });
+    if (requestedProfileId && !profile) {
+      return apiError('INVALID_REQUEST', 404, 'Selected Teaching Voice is not available.');
+    }
     await writeCourseNarrationSnapshot({
       schemaVersion: 1,
       ownerId: user.id,

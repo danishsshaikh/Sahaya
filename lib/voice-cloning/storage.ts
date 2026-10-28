@@ -124,6 +124,43 @@ export async function findCurrentVoiceProfile(
   return profiles[0] ?? null;
 }
 
+export async function listVoiceProfiles(
+  ownerId: string,
+  options: { language?: string; readyOnly?: boolean } = {},
+): Promise<VoiceProfile[]> {
+  const root = path.join(
+    getVoiceCloningStorageDir(),
+    'users',
+    safeOwnerId(ownerId),
+    'voice-profiles',
+  );
+  let entries: string[];
+  try {
+    entries = await fs.readdir(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const profiles = await Promise.all(
+    entries
+      .filter((entry) => entry.startsWith('vcp_'))
+      .map((entry) => readVoiceProfile(entry, ownerId).catch(() => null)),
+  );
+  return profiles
+    .filter((profile): profile is VoiceProfile => {
+      if (!profile || profile.ownerId !== ownerId || profile.status === 'deleted') return false;
+      if (options.readyOnly && profile.status !== 'ready') return false;
+      return (
+        options.language === undefined ||
+        resolveVoiceProfileReferenceLanguage(profile) === options.language
+      );
+    })
+    .sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+    );
+}
+
 export async function findVoiceProfileByEnrollmentAttempt(
   ownerId: string,
   attemptId: string,
@@ -173,6 +210,7 @@ function originalRecordingExtension(mimeType: string): string {
   if (normalized.includes('ogg')) return 'ogg';
   if (normalized.includes('mp4')) return 'm4a';
   if (normalized.includes('mpeg')) return 'mp3';
+  if (normalized.includes('flac')) return 'flac';
   return 'wav';
 }
 

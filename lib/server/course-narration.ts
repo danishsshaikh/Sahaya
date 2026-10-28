@@ -39,7 +39,7 @@ import {
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
 import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
 import { TeachingVoiceError, toPublicVoiceProfile } from '@/lib/voice-cloning/types';
-import { findCurrentVoiceProfile } from '@/lib/voice-cloning/storage';
+import { findCurrentVoiceProfile, listVoiceProfiles } from '@/lib/voice-cloning/storage';
 import { enhanceGeneratedVoiceAudio } from '@/lib/voice-cloning/resemble-enhance';
 import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
 
@@ -54,6 +54,10 @@ export async function getCourseNarrationBootstrap(input: {
     `course:${input.stageId}`,
   );
   const profile = await resolveCourseNarrationProfile(input);
+  const ownedProfiles = await listVoiceProfiles(input.ownerId, { readyOnly: true });
+  const profiles = ownedProfiles
+    .map(toPublicVoiceProfile)
+    .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
   if (profile) {
     const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
     const publicProfile = toPublicVoiceProfile(profile);
@@ -63,6 +67,18 @@ export async function getCourseNarrationBootstrap(input: {
         right.generatedAt.localeCompare(left.generatedAt),
       ),
       ...(publicProfile ? { profile: publicProfile } : {}),
+      profiles,
+    };
+  }
+  if (ownedProfiles[0]) {
+    const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, ownedProfiles[0]);
+    return {
+      ...bootstrap,
+      profile: undefined,
+      profiles,
+      savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
+        right.generatedAt.localeCompare(left.generatedAt),
+      ),
     };
   }
   const bodhanConfigured = externalVoiceProviderConfigured(getBodhanTtsConfig());
@@ -90,6 +106,7 @@ export async function getCourseNarrationBootstrap(input: {
     bodhanVoices: BODHAN_VOICES,
     bodhanStyles: [...BODHAN_STYLES],
     savedPreviews: coursePreviews,
+    profiles,
   };
 }
 
@@ -102,10 +119,11 @@ export async function resolveCourseNarrationProfile(input: {
     try {
       return await requireOwnedReadyProfile(input.ownerId, input.profileId);
     } catch (error) {
-      // Browser-only and older courses can retain a profile id that predates
-      // the account's current Teaching Voice. Fall through only for absence;
-      // provider/storage failures remain actionable.
+      // A course-bound profile must never silently resolve to a newer voice.
+      // Missing legacy pointers load without a selected profile so the owner
+      // can explicitly choose from the saved library.
       if (!(error instanceof TeachingVoiceError) || error.status !== 404) throw error;
+      return null;
     }
   }
   const languageProfile = input.language

@@ -134,4 +134,6 @@ export interface VoiceComparisonBootstrap {
   savedPreviews: VoiceComparisonPreviewResult[];
   /** Owner-safe profile summary; remote provider voice identifiers are omitted. */
   profile?: PublicVoiceProfile;
+  /** Ready owner-scoped profiles ordered by immutable creation time, newest first. */
+  profiles?: PublicVoiceProfile[];
 }

@@ -194,6 +194,47 @@ describe('course narration production route compatibility', () => {
     );
   });
 
+  it('persists an explicitly selected previous profile instead of resolving the latest voice', async () => {
+    mocks.resolveProfile.mockResolvedValueOnce({
+      id: 'vcp_previous',
+      ownerId: 'owner-1',
+      status: 'ready',
+    });
+    const response = await PUT(
+      request('PUT', {
+        stageId: 'course-1',
+        teacherVoiceProfileId: 'vcp_previous',
+        lessonLanguage: 'en',
+        scenes: [{ id: 'scene-1', speech: [{ id: 'speech-1', text: 'Existing text.' }] }],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.resolveProfile).toHaveBeenCalledWith({
+      ownerId: 'owner-1',
+      profileId: 'vcp_previous',
+      language: 'en',
+    });
+    expect(mocks.writeSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ teacherVoiceProfileId: 'vcp_previous' }),
+    );
+  });
+
+  it('rejects a selected profile outside the authenticated owner library', async () => {
+    mocks.resolveProfile.mockResolvedValueOnce(null);
+    const response = await PUT(
+      request('PUT', {
+        stageId: 'course-1',
+        teacherVoiceProfileId: 'vcp_other_owner',
+        lessonLanguage: 'en',
+        scenes: [{ id: 'scene-1', speech: [{ id: 'speech-1', text: 'Existing text.' }] }],
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(mocks.writeSnapshot).not.toHaveBeenCalled();
+  });
+
   it('previews the exact synchronized transcript and derives the profile server-side', async () => {
     mocks.readSnapshot.mockResolvedValue({
       schemaVersion: 1,

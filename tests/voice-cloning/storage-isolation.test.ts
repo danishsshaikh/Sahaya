@@ -116,4 +116,31 @@ describe('voice profile user isolation', () => {
     });
     await expect(findCurrentVoiceProfile('usr_a', 'hi', true)).resolves.toBeNull();
   });
+
+  it('lists every ready owner profile by creation time rather than modification time', async () => {
+    const { listVoiceProfiles, writeVoiceProfile } = await import('@/lib/voice-cloning/storage');
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_previous'),
+      displayName: 'Previous voice',
+      createdAt: '2026-08-10T00:00:00.000Z',
+      updatedAt: '2026-10-28T00:00:00.000Z',
+    });
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_newest'),
+      displayName: 'Newest voice',
+      createdAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:00:00.000Z',
+    });
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_failed'),
+      status: 'failed',
+      createdAt: '2026-08-30T00:00:00.000Z',
+    });
+    await writeVoiceProfile(profile('usr_b', 'vcp_other_owner'));
+
+    await expect(listVoiceProfiles('usr_a', { readyOnly: true })).resolves.toMatchObject([
+      { id: 'vcp_newest' },
+      { id: 'vcp_previous' },
+    ]);
+  });
 });

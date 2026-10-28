@@ -98,6 +98,8 @@ describe('voice profile privacy', () => {
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
       enhancementMode: 'standard',
       activeEngine: 'chatterbox',
+      enrollmentSource: 'microphone',
+      compatibleProviders: ['chatterbox', 'qwen3-tts'],
       qwenEnhancementMode: 'standard',
       createdAt: '2026-08-11T00:00:00.000Z',
       updatedAt: '2026-08-11T00:00:00.000Z',
@@ -722,6 +724,7 @@ describe('voice profile model preview API', () => {
   const readVoiceProfile = vi.fn();
   const findCurrentVoiceProfile = vi.fn();
   const findVoiceProfileByEnrollmentAttempt = vi.fn();
+  const listVoiceProfiles = vi.fn();
   const deleteVoiceProfileAssets = vi.fn();
   const writeReferenceAudio = vi.fn();
   const writeOriginalRecording = vi.fn();
@@ -745,6 +748,7 @@ describe('voice profile model preview API', () => {
     readVoiceProfile.mockReset();
     findCurrentVoiceProfile.mockReset();
     findVoiceProfileByEnrollmentAttempt.mockReset();
+    listVoiceProfiles.mockReset();
     deleteVoiceProfileAssets.mockReset();
     writeReferenceAudio.mockReset();
     writeOriginalRecording.mockReset();
@@ -765,6 +769,7 @@ describe('voice profile model preview API', () => {
     writeVoiceProfile.mockResolvedValue(undefined);
     findCurrentVoiceProfile.mockResolvedValue(null);
     findVoiceProfileByEnrollmentAttempt.mockResolvedValue(null);
+    listVoiceProfiles.mockResolvedValue([]);
     writeReferenceAudio.mockResolvedValue('/private/reference.wav');
     writeOriginalRecording.mockResolvedValue({
       key: '/private/original-recording.webm',
@@ -834,6 +839,7 @@ describe('voice profile model preview API', () => {
       deleteVoiceProfileAssets,
       findCurrentVoiceProfile,
       findVoiceProfileByEnrollmentAttempt,
+      listVoiceProfiles,
       readVoiceProfile,
       referenceAudioExists,
       writeReferenceAudio,
@@ -970,7 +976,7 @@ describe('voice profile model preview API', () => {
         referenceText: VOICE_ENROLLMENT_PARAGRAPH,
       }),
     );
-    expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', 'en', true);
+    expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
     expect(completed.profile.draftPreview.config).toEqual({
       languageId: 'en',
       modelVariant: 'v3',
@@ -1026,6 +1032,80 @@ describe('voice profile model preview API', () => {
         status: 'preview-ready',
       }),
     );
+  });
+
+  it('imports authorized audio with its exact transcript and preserves the original bytes', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const exactBytes = new Uint8Array([8, 6, 7, 5, 3, 0, 9]);
+    const form = new FormData();
+    form.set('attemptId', 'attempt-import-test');
+    form.set('consent', 'true');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('displayName', 'Previous seminar voice');
+    form.set('languageId', 'en');
+    form.set('referenceText', 'This is the exact sentence spoken in the imported recording.');
+    form.set('recording', new File([exactBytes], 'seminar.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-import-test');
+
+    expect(completed.profile).toMatchObject({
+      displayName: 'Previous seminar voice',
+      enrollmentSource: 'audio-import',
+    });
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({
+        bytes: exactBytes,
+        mimeType: 'audio/wav',
+        fileName: 'seminar.wav',
+      }),
+    );
+    expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledWith(
+      expect.objectContaining({ bytes: exactBytes, fileName: 'seminar.wav' }),
+      'provider-compatible',
+    );
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enrollmentSource: 'audio-import',
+        referenceText: 'This is the exact sentence spoken in the imported recording.',
+      }),
+    );
+    expect(createProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an imported recording without authorization or an exact transcript', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-import-rejected');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'en');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const noConsent = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(noConsent.status).toBe(400);
+    form.set('consent', 'true');
+    const noTranscript = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(noTranscript.status).toBe(400);
+    expect(nextServerMocks.afterCallbacks).toHaveLength(0);
   });
 
   it('rejects an enrollment transcript that differs from the displayed approved phrase', async () => {
@@ -1085,7 +1165,7 @@ describe('voice profile model preview API', () => {
           referenceText: phrase.text,
         }),
       );
-      expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', language, true);
+      expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
       expect(generatePreview).toHaveBeenCalledWith(
         expect.objectContaining({
           language,
@@ -1187,6 +1267,79 @@ describe('voice profile model preview API', () => {
       expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
     },
   );
+
+  it('returns the owner saved library and renames one profile without changing its creation time', async () => {
+    const newest = {
+      ...readyProfile('v3'),
+      id: 'vcp_newest',
+      displayName: 'Newest voice',
+      createdAt: '2026-08-20T00:00:00.000Z',
+    };
+    const previous = {
+      ...readyProfile('v3'),
+      id: 'vcp_previous',
+      displayName: 'Previous voice',
+      createdAt: '2026-08-10T00:00:00.000Z',
+    };
+    listVoiceProfiles.mockResolvedValue([newest, previous]);
+    findCurrentVoiceProfile.mockResolvedValue(newest);
+    const { GET, PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const libraryResponse = await GET(
+      new NextRequest('http://localhost/api/voice-cloning/profile?library=true'),
+    );
+    await expect(libraryResponse.json()).resolves.toMatchObject({
+      profiles: [
+        { id: 'vcp_newest', displayName: 'Newest voice' },
+        { id: 'vcp_previous', displayName: 'Previous voice' },
+      ],
+    });
+    expect(listVoiceProfiles).toHaveBeenCalledWith('local-faculty', { readyOnly: true });
+
+    readVoiceProfile.mockResolvedValue(previous);
+    const renamed = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_previous',
+          action: 'rename',
+          displayName: 'Earlier lecture voice',
+        }),
+      }) as never,
+    );
+    await expect(renamed.json()).resolves.toMatchObject({
+      profile: {
+        id: 'vcp_previous',
+        displayName: 'Earlier lecture voice',
+        createdAt: '2026-08-10T00:00:00.000Z',
+      },
+    });
+    expect(readVoiceProfile).toHaveBeenCalledWith('vcp_previous', 'local-faculty');
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'vcp_previous',
+        displayName: 'Earlier lecture voice',
+        createdAt: '2026-08-10T00:00:00.000Z',
+      }),
+    );
+  });
+
+  it('does not rename a profile that is absent from the authenticated owner scope', async () => {
+    readVoiceProfile.mockResolvedValue(null);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_other_owner',
+          action: 'rename',
+          displayName: 'Not allowed',
+        }),
+      }) as never,
+    );
+    expect(response.status).toBe(404);
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+  });
 
   it('persists an original-versus-enhanced preview from one Chatterbox synthesis', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));
@@ -1536,7 +1689,7 @@ describe('voice profile model preview API', () => {
     expect(createProfile).not.toHaveBeenCalled();
   });
 
-  it('keeps the existing accepted profile until a replacement preview is accepted', async () => {
+  it('creates a separate candidate without marking the existing profile for replacement', async () => {
     const existingProfile = readyProfile('v3');
     findCurrentVoiceProfile.mockResolvedValue(existingProfile);
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
@@ -1562,7 +1715,7 @@ describe('voice profile model preview API', () => {
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'vcp_new',
-        replacesProfileId: 'vcp_ready',
+        replacesProfileId: undefined,
         status: 'processing',
       }),
     );
@@ -2013,7 +2166,7 @@ describe('voice profile model preview API', () => {
     );
   });
 
-  it('persists accepted preview config while preserving the reference audio', async () => {
+  it('persists accepted preview config while preserving every older voice and reference', async () => {
     readVoiceProfile
       .mockResolvedValueOnce({
         ...readyProfile('v2'),
@@ -2055,17 +2208,11 @@ describe('voice profile model preview API', () => {
     expect(data.profile.languageId).toBe('hi');
     expect(data.profile.previewTextLanguageId).toBe('en');
     expect(data.profile.generationSettings).toEqual(VOICE_SETTINGS_PRESETS['accent-test']);
-    expect(writeVoiceProfile).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        id: 'vcp_old',
-        status: 'deleted',
-        referenceAudioKey: undefined,
-      }),
+    expect(writeVoiceProfile).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'vcp_old', status: 'deleted' }),
     );
-    expect(deleteVoiceProfileAssets).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'vcp_old' }),
-    );
-    expect(deleteProfile).toHaveBeenCalledWith({ providerReferenceId: 'ref-old' });
+    expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
+    expect(deleteProfile).not.toHaveBeenCalled();
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         modelVariant: 'v3',

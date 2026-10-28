@@ -42,4 +42,13 @@ describe('Teaching Voice faculty UI', () => {
     );
     expect(source).toContain('isTeachingVoiceExplicitlyDisabled(persisted, next.id)');
   });
+
+  it('offers a saved library and authorized audio import without inventing a transcript', () => {
+    expect(source).toContain('Saved Voice Library');
+    expect(source).toContain('Import audio file');
+    expect(source).toContain('Exact reference transcript');
+    expect(source).toContain("formData.set('enrollmentSource', enrollmentMode)");
+    expect(source).toContain("formData.set('referenceText', importTranscript.trim())");
+    expect(source).toContain('I own this recording or have explicit permission');
+  });
 });

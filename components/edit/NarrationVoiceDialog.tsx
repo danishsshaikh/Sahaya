@@ -69,6 +69,15 @@ function profileProviderName(profile: PublicVoiceProfile | null): string {
   return 'Chatterbox V3';
 }
 
+function profileSupportsProvider(
+  profile: PublicVoiceProfile | null,
+  providerId: CourseNarrationSelection['providerId'],
+): boolean {
+  if (providerId === 'bodhan') return true;
+  if (!profile?.compatibleProviders?.includes(providerId)) return false;
+  return providerId !== 'sarvam' || profile.sarvamVoice?.ready === true;
+}
+
 async function persistNarrationState(state: CourseNarrationState): Promise<boolean> {
   const current = useStageStore.getState();
   if (!current.stage) return false;
@@ -118,7 +127,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     ? {
         providerId,
         providerName: provider.name,
-        ...(profile ? { profileId: profile.id } : {}),
+        ...(profile && providerId !== 'bodhan' ? { profileId: profile.id } : {}),
         language,
         ...(providerId === 'bodhan' ? { voice, style } : {}),
         ...(provider.supportsEnhancement ? { enhancementMode } : {}),
@@ -197,9 +206,10 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       setLanguage(initialLanguage);
       const first = body.narration.providers.find(
         (candidate) =>
-          candidate.available &&
+          candidate.configured &&
           candidate.courseNarrationEnabled &&
-          candidate.supportedLanguages.includes(initialLanguage),
+          candidate.supportedLanguages.includes(initialLanguage) &&
+          profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
       );
       if (first) setProviderId(first.id);
       setVoice(body.narration.bodhanVoices[0]?.id ?? '');
@@ -214,6 +224,51 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     });
     return () => request.abort();
   }, [lessonLanguage, loadAttempt, open, stageId, teacherVoiceProfileId]);
+
+  const selectCourseProfile = async (profileId: string) => {
+    if (!stageId || loading) return;
+    const selected = bootstrap?.profiles?.find((candidate) => candidate.id === profileId);
+    if (!selected) return;
+    const current = useStageStore.getState();
+    if (!current.stage || current.stage.id !== stageId) {
+      setError('The current classroom changed. Reopen Narration Voice.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const nextStage = { ...current.stage, teacherVoiceProfileId: selected.id };
+      const response = await fetch('/api/course-narration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildBrowserCourseNarrationRegistration(nextStage, current.scenes)),
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok) {
+        throw new Error(responseMessage(body, 'The selected voice could not be saved.'));
+      }
+      useStageStore.setState({ stage: { ...nextStage, updatedAt: Date.now() } });
+      markStagePersistenceDirty([{ kind: 'stage' }]);
+      if (!(await useStageStore.getState().saveToStorage())) {
+        throw new Error('The selected voice could not be saved in this browser.');
+      }
+      setProfile(selected);
+      if (!profileSupportsProvider(selected, providerId)) {
+        const nextProvider = bootstrap?.providers.find(
+          (candidate) =>
+            candidate.configured &&
+            candidate.courseNarrationEnabled &&
+            candidate.supportedLanguages.includes(language) &&
+            profileSupportsProvider(selected, candidate.id),
+        );
+        if (nextProvider) setProviderId(nextProvider.id);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The selected voice could not be saved.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const registerBrowserCourse = async () => {
     if (registering) return;
@@ -522,10 +577,21 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     ? `data:audio/${preview.audio.format};base64,${preview.audio.base64}`
     : undefined;
   const compatible = Boolean(
-    provider?.available &&
+    provider?.configured &&
     provider.courseNarrationEnabled &&
     provider.supportedLanguages.includes(language) &&
+    profileSupportsProvider(profile, providerId) &&
     (providerId !== 'bodhan' || voice),
+  );
+  const eligibleProfiles = (bootstrap?.profiles ?? []).filter((candidate) =>
+    bootstrap?.providers.some(
+      (engine) =>
+        engine.configured &&
+        engine.courseNarrationEnabled &&
+        engine.supportedLanguages.includes(language) &&
+        engine.id !== 'bodhan' &&
+        profileSupportsProvider(candidate, engine.id),
+    ),
   );
 
   return (
@@ -588,9 +654,10 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                   {bootstrap.providers.map((candidate) => {
                     const disabled =
-                      !candidate.available ||
+                      !candidate.configured ||
                       !candidate.courseNarrationEnabled ||
-                      !candidate.supportedLanguages.includes(language);
+                      !candidate.supportedLanguages.includes(language) ||
+                      !profileSupportsProvider(profile, candidate.id);
                     return (
                       <button
                         key={candidate.id}
@@ -657,12 +724,33 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                     </select>
                   </label>
                 ) : (
-                  <div className="space-y-1 text-xs font-medium">
+                  <label className="space-y-1 text-xs font-medium">
                     Faculty voice
-                    <div className="flex h-9 items-center rounded-md border bg-background px-2 text-sm font-normal">
-                      {profile?.displayName ?? 'No compatible saved profile'}
-                    </div>
-                  </div>
+                    <select
+                      aria-label="Saved faculty voice"
+                      value={profile?.id ?? ''}
+                      disabled={loading || eligibleProfiles.length === 0}
+                      onChange={(event) => void selectCourseProfile(event.target.value)}
+                      className="h-9 w-full rounded-md border bg-background px-2 text-sm font-normal"
+                    >
+                      {!profile ? <option value="">Select a saved voice</option> : null}
+                      {profile &&
+                      !eligibleProfiles.some((candidate) => candidate.id === profile.id) ? (
+                        <option value={profile.id} disabled>
+                          {profile.displayName} · unavailable for {language.toUpperCase()}
+                        </option>
+                      ) : null}
+                      {eligibleProfiles.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.displayName} ·{' '}
+                          {new Date(candidate.createdAt).toLocaleDateString()}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="block font-normal text-muted-foreground">
+                      Saved for this course only. Your default Teaching Voice is unchanged.
+                    </span>
+                  </label>
                 )}
                 {providerId === 'bodhan' ? (
                   <label className="space-y-1 text-xs font-medium sm:col-span-2">

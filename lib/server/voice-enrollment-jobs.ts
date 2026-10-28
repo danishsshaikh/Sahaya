@@ -14,10 +14,7 @@ import {
 } from '@/lib/voice-cloning/language';
 import {
   createVoiceProfileId,
-  deleteVoiceProfileAssets,
-  findCurrentVoiceProfile,
   findVoiceProfileByEnrollmentAttempt,
-  readVoiceProfile,
   referenceAudioExists,
   resolveReferenceAudioPath,
   writeReferenceAudio,
@@ -99,6 +96,7 @@ interface VoiceEnrollmentInput {
   providerId: 'chatterbox' | 'indicf5';
   referenceText: string;
   recording: IncomingVoiceClip;
+  enrollmentSource: 'microphone' | 'audio-import';
 }
 
 const TERMINAL_JOB_TTL_MS = 30 * 60 * 1000;
@@ -426,9 +424,11 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       recordingBytes: input.recording.bytes.byteLength,
     });
     const normalizedReference =
-      input.providerId === 'indicf5'
-        ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
-        : await normalizeVoiceEnrollmentRecording(input.recording);
+      input.enrollmentSource === 'audio-import'
+        ? await normalizeVoiceEnrollmentRecording(input.recording, 'provider-compatible')
+        : input.providerId === 'indicf5'
+          ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
+          : await normalizeVoiceEnrollmentRecording(input.recording);
     log.info('voice enrollment quality check passed', {
       attemptId: input.attemptId,
       operation: 'enroll',
@@ -450,10 +450,6 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       input.ownerUserId,
       input.attemptId,
     );
-    const previousProfile =
-      existingAttemptProfile?.replacesProfileId !== undefined
-        ? await readVoiceProfile(existingAttemptProfile.replacesProfileId, input.ownerUserId)
-        : await findCurrentVoiceProfile(input.ownerUserId, input.languageId, true);
     const profileId = existingAttemptProfile?.id ?? createVoiceProfileId();
     const now = new Date().toISOString();
     profile = {
@@ -478,8 +474,9 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       consentTimestamp: existingAttemptProfile?.consentTimestamp ?? now,
       consentVersion: VOICE_CLONING_CONSENT_VERSION,
       profileVersion: 1,
-      replacesProfileId: existingAttemptProfile?.replacesProfileId ?? previousProfile?.id,
+      replacesProfileId: undefined,
       enrollmentAttemptId: input.attemptId,
+      enrollmentSource: input.enrollmentSource,
       providerReferenceId: undefined,
       preview: undefined,
       previewComparison: undefined,
@@ -709,13 +706,29 @@ export async function parseVoiceEnrollmentForm(
     throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
   }
   const providerId = newTeachingVoiceProvider(languageId);
-  const phrase = getVoiceEnrollmentPhrases(languageId).find(
-    (item) => item.id === formData.get('phraseId'),
-  );
-  if (!phrase || formData.get('referenceText') !== phrase.text) {
-    throw new TeachingVoiceError(
-      'The enrollment paragraph has changed. Reload and record the displayed paragraph again.',
+  const enrollmentSource =
+    formData.get('enrollmentSource') === 'audio-import' ? 'audio-import' : 'microphone';
+  let referenceText: string;
+  if (enrollmentSource === 'audio-import') {
+    referenceText =
+      typeof formData.get('referenceText') === 'string'
+        ? String(formData.get('referenceText')).trim()
+        : '';
+    if (!referenceText || referenceText.length > 2000) {
+      throw new TeachingVoiceError(
+        'Enter the exact words spoken in the imported recording (up to 2000 characters).',
+      );
+    }
+  } else {
+    const phrase = getVoiceEnrollmentPhrases(languageId).find(
+      (item) => item.id === formData.get('phraseId'),
     );
+    if (!phrase || formData.get('referenceText') !== phrase.text) {
+      throw new TeachingVoiceError(
+        'The enrollment paragraph has changed. Reload and record the displayed paragraph again.',
+      );
+    }
+    referenceText = phrase.text;
   }
   return {
     attemptId,
@@ -723,8 +736,9 @@ export async function parseVoiceEnrollmentForm(
     displayName,
     languageId,
     providerId,
-    referenceText: phrase.text,
+    referenceText,
     recording: await readEnrollmentRecording(formData),
+    enrollmentSource,
   };
 }
 
@@ -799,38 +813,6 @@ export async function acceptVoiceProfilePreview(
   };
   await writeVoiceProfile(next);
   await markVoiceConfigured(ownerId);
-  if (profile.replacesProfileId) {
-    const previousProfile = await readVoiceProfile(profile.replacesProfileId, ownerId);
-    if (
-      previousProfile &&
-      previousProfile.ownerId === ownerId &&
-      resolveVoiceProfileReferenceLanguage(previousProfile) ===
-        resolveVoiceProfileReferenceLanguage(profile) &&
-      previousProfile.status !== 'deleted'
-    ) {
-      if (previousProfile.providerReferenceId) {
-        await getVoiceCloningProvider(resolveVoiceProfileProvider(previousProfile))
-          .deleteProfile({ providerReferenceId: previousProfile.providerReferenceId })
-          .catch(() => log.warn('Could not remove replaced Teaching Voice service registration'));
-      }
-      await deleteVoiceProfileAssets(previousProfile);
-      await writeVoiceProfile({
-        ...previousProfile,
-        status: 'deleted',
-        referenceAudioKey: undefined,
-        originalRecording: undefined,
-        referenceText: undefined,
-        providerReferenceId: undefined,
-        preview: undefined,
-        previewComparison: undefined,
-        previewTextLanguageId: undefined,
-        previewVariants: undefined,
-        draftPreview: undefined,
-        qwenPreviewCache: undefined,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-  }
   return next;
 }
 
