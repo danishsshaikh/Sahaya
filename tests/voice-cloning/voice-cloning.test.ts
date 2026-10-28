@@ -99,7 +99,7 @@ describe('voice profile privacy', () => {
       enhancementMode: 'standard',
       activeEngine: 'chatterbox',
       enrollmentSource: 'microphone',
-      compatibleProviders: ['chatterbox', 'qwen3-tts'],
+      compatibleProviders: ['chatterbox'],
       qwenEnhancementMode: 'standard',
       createdAt: '2026-08-11T00:00:00.000Z',
       updatedAt: '2026-08-11T00:00:00.000Z',
@@ -1082,7 +1082,7 @@ describe('voice profile model preview API', () => {
     expect(createProfile).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects an imported recording without authorization or an exact transcript', async () => {
+  it('requires import authorization but permits providers that do not need a transcript', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
     const form = new FormData();
     form.set('attemptId', 'attempt-import-rejected');
@@ -1104,7 +1104,35 @@ describe('voice profile model preview API', () => {
         body: form,
       }) as never,
     );
-    expect(noTranscript.status).toBe(400);
+    expect(noTranscript.status).toBe(202);
+    expect(nextServerMocks.afterCallbacks).toHaveLength(1);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-import-rejected');
+    expect(completed.profile.referenceText).toBeUndefined();
+    expect(createProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceText: undefined }),
+    );
+  });
+
+  it('explains the transcript requirement before scheduling an IndicF5 import', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-indic-import');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'hi');
+    form.set('consent', 'true');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining('IndicF5 requires the exact words'),
+    });
     expect(nextServerMocks.afterCallbacks).toHaveLength(0);
   });
 

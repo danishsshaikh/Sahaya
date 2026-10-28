@@ -489,7 +489,12 @@ export function compatibleVoiceProviders(profile: VoiceProfile): VoiceLibraryPro
   if (referenceReady && provider === 'chatterbox' && profile.providerReferenceId) {
     compatible.push('chatterbox');
   }
-  if (referenceReady && provider === 'chatterbox' && language === 'en') {
+  if (
+    referenceReady &&
+    provider === 'chatterbox' &&
+    language === 'en' &&
+    profile.referenceText?.trim()
+  ) {
     compatible.push('qwen3-tts');
   }
   if (referenceReady && language === 'en' && profile.referenceText?.trim()) {
@@ -514,6 +519,7 @@ export function compatibleVoiceProviders(profile: VoiceProfile): VoiceLibraryPro
     referenceReady &&
     provider === 'indicf5' &&
     profile.providerReferenceId &&
+    profile.referenceText?.trim() &&
     (language === 'hi' || language === 'mr')
   ) {
     compatible.push('indicf5');

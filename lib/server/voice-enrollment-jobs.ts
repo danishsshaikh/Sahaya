@@ -94,7 +94,7 @@ interface VoiceEnrollmentInput {
   displayName: string;
   languageId: string;
   providerId: 'chatterbox' | 'indicf5';
-  referenceText: string;
+  referenceText?: string;
   recording: IncomingVoiceClip;
   enrollmentSource: 'microphone' | 'audio-import';
 }
@@ -708,15 +708,21 @@ export async function parseVoiceEnrollmentForm(
   const providerId = newTeachingVoiceProvider(languageId);
   const enrollmentSource =
     formData.get('enrollmentSource') === 'audio-import' ? 'audio-import' : 'microphone';
-  let referenceText: string;
+  let referenceText: string | undefined;
   if (enrollmentSource === 'audio-import') {
     referenceText =
       typeof formData.get('referenceText') === 'string'
         ? String(formData.get('referenceText')).trim()
         : '';
-    if (!referenceText || referenceText.length > 2000) {
+    if (referenceText.length > 2000) {
       throw new TeachingVoiceError(
-        'Enter the exact words spoken in the imported recording (up to 2000 characters).',
+        'The imported recording transcript must be 2000 characters or fewer.',
+      );
+    }
+    referenceText ||= undefined;
+    if (providerId === 'indicf5' && !referenceText) {
+      throw new TeachingVoiceError(
+        'IndicF5 requires the exact words spoken in the imported recording. Use configured transcription or enter and verify the transcript.',
       );
     }
   } else {

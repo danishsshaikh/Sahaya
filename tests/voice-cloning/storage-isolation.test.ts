@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -142,5 +142,114 @@ describe('voice profile user isolation', () => {
       { id: 'vcp_newest' },
       { id: 'vcp_previous' },
     ]);
+  });
+
+  it('activates an existing ready profile without rewriting its creation or modification time', async () => {
+    const {
+      activateVoiceProfile,
+      findCurrentVoiceProfile,
+      readVoiceProfile,
+      writeReferenceAudio,
+      writeVoiceProfile,
+    } = await import('@/lib/voice-cloning/storage');
+    const previousReference = await writeReferenceAudio(
+      'vcp_previous',
+      'usr_a',
+      new Uint8Array([1, 2, 3]),
+    );
+    const newestReference = await writeReferenceAudio(
+      'vcp_newest',
+      'usr_a',
+      new Uint8Array([4, 5, 6]),
+    );
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_previous'),
+      referenceAudioKey: previousReference,
+      createdAt: '2026-10-26T00:00:00.000Z',
+      updatedAt: '2026-10-26T00:00:00.000Z',
+    });
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_newest'),
+      referenceAudioKey: newestReference,
+      createdAt: '2026-10-28T00:00:00.000Z',
+      updatedAt: '2026-10-28T00:00:00.000Z',
+    });
+
+    await activateVoiceProfile('usr_a', 'vcp_previous');
+
+    await expect(findCurrentVoiceProfile('usr_a', 'en', true)).resolves.toMatchObject({
+      id: 'vcp_previous',
+    });
+    await expect(readVoiceProfile('vcp_previous', 'usr_a')).resolves.toMatchObject({
+      createdAt: '2026-10-26T00:00:00.000Z',
+      updatedAt: '2026-10-26T00:00:00.000Z',
+    });
+    await expect(activateVoiceProfile('usr_b', 'vcp_previous')).rejects.toThrow(
+      'not found for owner',
+    );
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_failed'),
+      status: 'failed',
+      referenceAudioKey: previousReference,
+    });
+    await expect(activateVoiceProfile('usr_a', 'vcp_failed')).rejects.toThrow('not ready');
+  });
+
+  it('never resolves an empty Ming key to the process directory and falls back to the owner WAV', async () => {
+    const {
+      resolveAuthorizedProfileReference,
+      resolveReferenceAudioPath,
+      writeReferenceAudio,
+      writeVoiceProfile,
+    } = await import('@/lib/voice-cloning/storage');
+    expect(() => resolveReferenceAudioPath('')).toThrow('Reference audio key is required');
+    const referenceAudioKey = await writeReferenceAudio(
+      'vcp_legacy',
+      'usr_a',
+      new Uint8Array([1, 2, 3]),
+    );
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_legacy'),
+      referenceAudioKey,
+      originalRecording: {
+        key: '',
+        mimeType: 'audio/wav',
+        byteLength: 0,
+        createdAt: '2026-10-26T00:00:00.000Z',
+      },
+    });
+
+    await expect(
+      resolveAuthorizedProfileReference({
+        ownerId: 'usr_a',
+        profileId: 'vcp_legacy',
+        preferOriginalMimeTypes: ['audio/wav'],
+      }),
+    ).resolves.toEqual({
+      path: await realpath(referenceAudioKey),
+      provenance: 'processed-reference',
+    });
+  });
+
+  it('rejects directories, empty files, paths outside the owner profile and cross-owner lookup', async () => {
+    const { resolveAuthorizedProfileReference, writeVoiceProfile } =
+      await import('@/lib/voice-cloning/storage');
+    await writeVoiceProfile({
+      ...profile('usr_a', 'vcp_invalid'),
+      referenceAudioKey: '/',
+      originalRecording: {
+        key: '/',
+        mimeType: 'audio/wav',
+        byteLength: 0,
+        createdAt: '2026-10-26T00:00:00.000Z',
+      },
+    });
+
+    await expect(
+      resolveAuthorizedProfileReference({ ownerId: 'usr_a', profileId: 'vcp_invalid' }),
+    ).rejects.toThrow('missing, empty, or outside authorized storage');
+    await expect(
+      resolveAuthorizedProfileReference({ ownerId: 'usr_b', profileId: 'vcp_invalid' }),
+    ).rejects.toThrow('does not belong to this owner');
   });
 });

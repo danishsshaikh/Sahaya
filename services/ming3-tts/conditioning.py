@@ -29,6 +29,10 @@ def parse_conditioning_mode(value: str | None) -> ConditioningMode:
     return cast(ConditioningMode, normalized)
 
 
+def requires_speaker_embedding(mode: ConditioningMode) -> bool:
+    return mode == SPEAKER_EMBEDDING_ONLY
+
+
 def speaker_embedding_path(root: Path, profile_id: str, reference: Path) -> Path:
     stat = reference.stat()
     fingerprint = hashlib.sha256(
@@ -51,6 +55,8 @@ def prepare_speaker_embedding(
     """
     if destination.is_file() and destination.stat().st_size > 0:
         return False
+    if not reference.is_file() or reference.stat().st_size == 0:
+        raise ValueError("Ming speaker extraction requires a non-empty reference audio file")
     if not hasattr(model, "_load_prompt"):
         raise RuntimeError("installed Ming runtime does not support speaker extraction")
     _waveform, embeddings = model._load_prompt(str(reference))
@@ -78,7 +84,7 @@ def synthesis_kwargs(
     output_path: Path,
     reference_audio: Path,
     reference_text: str,
-    speaker_embedding: Path,
+    speaker_embedding: Path | None,
 ) -> dict[str, Any]:
     request: dict[str, Any] = {
         "task": "TTS",
@@ -92,6 +98,8 @@ def synthesis_kwargs(
     if mode == SPEAKER_EMBEDDING_ONLY:
         # In upstream Ming this branch loads only ``spk_emb``. Because no
         # prompt WAV/text is passed, ``prompt_latent`` remains None.
+        if speaker_embedding is None or not speaker_embedding.is_file():
+            raise ValueError("Ming speaker-only conditioning requires a prepared embedding")
         request["spk_emb_path"] = str(speaker_embedding)
     else:
         request["prompt_wav_path"] = str(reference_audio)

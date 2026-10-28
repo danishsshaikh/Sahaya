@@ -109,6 +109,7 @@ export class Ming3TtsPreviewProvider {
           referenceAudioPath: input.referenceAudioPath,
           referenceText: input.referenceText,
           referenceLanguage: 'en',
+          conditioningMode: this.config.conditioningMode,
         }),
       },
       'provider_registration',

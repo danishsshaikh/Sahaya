@@ -17,7 +17,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { VoiceComparisonPanel } from '@/components/voice-cloning/voice-comparison-panel';
-import { SavedVoiceLibrary } from '@/components/voice-cloning/saved-voice-library';
 import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 import { cn } from '@/lib/utils';
 import {
@@ -27,6 +26,7 @@ import {
 import { getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
 import {
   isChatterboxFacultySynthesisLanguage,
+  newTeachingVoiceProvider,
   resolveTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
 import {
@@ -75,7 +75,6 @@ type ClipState = {
 type ApiProfileResponse = {
   success?: boolean;
   profile?: PublicVoiceProfile | null;
-  profiles?: PublicVoiceProfile[];
   error?: string;
   details?: string;
   previewModels?: VoicePreviewModel[];
@@ -220,15 +219,16 @@ export function TeachingVoiceCard({
 }: TeachingVoiceCardProps) {
   const [enrollmentLanguage, setEnrollmentLanguage] = useState('en');
   const enrollmentPhrase = getVoiceEnrollmentPhrases(enrollmentLanguage)[0];
+  const importTranscriptRequired = newTeachingVoiceProvider(enrollmentLanguage) === 'indicf5';
   const enrollmentParagraph = enrollmentPhrase?.text;
   const [profile, setProfile] = useState<PublicVoiceProfile | null>(null);
-  const [profiles, setProfiles] = useState<PublicVoiceProfile[]>([]);
   const [profileLoading, setProfileLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [consented, setConsented] = useState(false);
   const [enrollmentMode, setEnrollmentMode] = useState<EnrollmentMode>('microphone');
   const [voiceName, setVoiceName] = useState('My Teaching Voice');
   const [importTranscript, setImportTranscript] = useState('');
+  const [transcribingImport, setTranscribingImport] = useState(false);
   const [recordingFileName, setRecordingFileName] = useState('teaching-voice.webm');
   const [recording, setRecording] = useState<ClipState>({});
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
@@ -419,19 +419,15 @@ export function TeachingVoiceCard({
   useEffect(() => {
     let cancelled = false;
     setProfileLoading(true);
-    fetch(
-      `/api/voice-cloning/profile?library=true&language=${encodeURIComponent(enrollmentLanguage)}`,
-    )
+    const query = new URLSearchParams({ language: enrollmentLanguage });
+    if (selectedProfileIdRef.current) query.set('profileId', selectedProfileIdRef.current);
+    fetch(`/api/voice-cloning/profile?${query}`)
       .then(async (res) => {
         return readVoiceApiResponse<ApiProfileResponse>(res);
       })
       .then((data: ApiProfileResponse | null) => {
         if (cancelled) return;
-        const next =
-          data?.profiles?.find((candidate) => candidate.id === selectedProfileIdRef.current) ??
-          data?.profile ??
-          null;
-        setProfiles(data?.profiles ?? []);
+        const next = data?.profile ?? null;
         const previewModels = data?.previewModels?.length
           ? data.previewModels
           : (['chatterbox-v3'] as VoicePreviewModel[]);
@@ -591,11 +587,6 @@ export function TeachingVoiceCard({
 
   const applyEnrollmentProfile = (next: PublicVoiceProfile) => {
     setProfile(next);
-    setProfiles((current) =>
-      [next, ...current.filter((candidate) => candidate.id !== next.id)].sort((left, right) =>
-        right.createdAt.localeCompare(left.createdAt),
-      ),
-    );
     setSetupStep('review');
     setCustomizeOpen(false);
     setRecordingRequiresRetry(false);
@@ -608,29 +599,6 @@ export function TeachingVoiceCard({
     );
     setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
     setDraftEnhancementMode(config.enhancementMode ?? 'standard');
-  };
-
-  const renameSavedProfile = async (target: PublicVoiceProfile, displayName: string) => {
-    try {
-      const response = await fetch('/api/voice-cloning/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId: target.id, action: 'rename', displayName }),
-      });
-      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
-      if (!data.profile) throw new Error('The voice could not be renamed.');
-      setProfiles((current) =>
-        current.map((candidate) => (candidate.id === data.profile!.id ? data.profile! : candidate)),
-      );
-      if (profile?.id === data.profile.id) setProfile(data.profile);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The voice could not be renamed.');
-    }
-  };
-
-  const selectSavedProfile = (target: PublicVoiceProfile) => {
-    applyEnrollmentProfile(target);
-    activateProfile(target);
   };
 
   const finishEnrollmentAttempt = (attemptId: string) => {
@@ -1074,12 +1042,36 @@ export function TeachingVoiceCard({
     );
   };
 
+  const transcribeImportedAudio = async () => {
+    if (!recording.blob || transcribingImport) return;
+    setTranscribingImport(true);
+    setEnrollmentError(null);
+    try {
+      const formData = new FormData();
+      formData.set('audio', recording.blob, recordingFileName);
+      formData.set('language', enrollmentLanguage);
+      const response = await fetch('/api/transcription', { method: 'POST', body: formData });
+      const data = await readVoiceApiResponse<{ text?: string }>(response);
+      const transcript = data.text?.trim();
+      if (!transcript) throw new Error('The configured transcription service returned no text.');
+      setImportTranscript(transcript);
+    } catch (caught) {
+      setEnrollmentError(
+        caught instanceof Error
+          ? caught.message
+          : 'Transcription is not available. You can still use providers that do not require text.',
+      );
+    } finally {
+      setTranscribingImport(false);
+    }
+  };
+
   const submitEnrollment = async () => {
     if (
       !recordingReady ||
       !recording.blob ||
       (enrollmentMode === 'microphone' && !enrollmentPhrase) ||
-      (enrollmentMode === 'audio-import' && !importTranscript.trim()) ||
+      (enrollmentMode === 'audio-import' && importTranscriptRequired && !importTranscript.trim()) ||
       recordingRequiresRetry ||
       enrollmentRequestInFlightRef.current
     ) {
@@ -1110,7 +1102,7 @@ export function TeachingVoiceCard({
         formData.set('phraseId', enrollmentPhrase!.id);
         formData.set('referenceText', enrollmentPhrase!.text);
       } else {
-        formData.set('referenceText', importTranscript.trim());
+        if (importTranscript.trim()) formData.set('referenceText', importTranscript.trim());
       }
       formData.set('recording', recording.blob, recordingFileName);
       const response = await fetch('/api/voice-cloning/enrollment', {
@@ -1274,7 +1266,6 @@ export function TeachingVoiceCard({
       );
       await readVoiceApiResponse(response);
       setProfile(null);
-      setProfiles((current) => current.filter((candidate) => candidate.id !== id));
       setSetupStep('record');
       setCustomizeOpen(false);
       setEnrollmentError(null);
@@ -1626,26 +1617,6 @@ export function TeachingVoiceCard({
             </div>
           )}
 
-          {profiles.length ? (
-            <section className="mb-4 space-y-2" aria-labelledby="saved-voice-library-heading">
-              <div>
-                <h3 id="saved-voice-library-heading" className="text-sm font-semibold">
-                  Saved Voice Library
-                </h3>
-                <p className="text-xs text-muted-foreground">
-                  Voices are ordered by creation date. Selecting one never deletes another.
-                </p>
-              </div>
-              <SavedVoiceLibrary
-                profiles={profiles}
-                selectedProfileId={selectedProfileId}
-                disabled={busy}
-                onSelect={selectSavedProfile}
-                onRename={renameSavedProfile}
-              />
-            </section>
-          ) : null}
-
           {busy && setupStep === 'preview' ? (
             renderBusyPreview()
           ) : profile?.status === 'preview-ready' ? (
@@ -1812,7 +1783,7 @@ export function TeachingVoiceCard({
                 {(
                   [
                     ['microphone', 'Record with microphone'],
-                    ['audio-import', 'Import audio file'],
+                    ['audio-import', 'Upload Audio'],
                   ] as const
                 ).map(([mode, label]) => (
                   <button
@@ -1967,9 +1938,7 @@ export function TeachingVoiceCard({
               ) : (
                 <div className="space-y-3 rounded-lg border border-border/70 p-3">
                   <div>
-                    <div className="text-sm font-medium text-foreground">
-                      Import Voice from Audio
-                    </div>
+                    <div className="text-sm font-medium text-foreground">Upload Audio</div>
                     <p className="mt-1 text-xs text-muted-foreground">
                       WAV, MP3, M4A, OGG, FLAC, and WebM are accepted. Sahaya retains the exact
                       upload and creates a provider-ready reference separately when required.
@@ -1986,18 +1955,36 @@ export function TeachingVoiceCard({
                     />
                   </label>
                   <label className="block space-y-1 text-xs font-medium">
-                    Exact reference transcript
+                    {importTranscriptRequired
+                      ? 'Reference transcript (required for IndicF5)'
+                      : 'Reference transcript (optional)'}
                     <Textarea
                       value={importTranscript}
                       maxLength={2000}
-                      placeholder="Enter exactly what is spoken in the selected recording."
+                      placeholder="If provided, enter or correct the exact words spoken."
                       onChange={(event) => setImportTranscript(event.target.value)}
                       className="min-h-20 resize-y font-normal"
                     />
                     <span className="block text-xs font-normal text-muted-foreground">
-                      Sahaya will not infer or rewrite this transcript.
+                      {importTranscriptRequired
+                        ? 'IndicF5 requires accurate reference text. Transcribe it below or enter it exactly; Sahaya will never invent one.'
+                        : 'Chatterbox does not require this. Qwen and Ming compatibility requires accurate reference text; Sahaya will never invent one.'}
                     </span>
                   </label>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!recording.blob || busy || transcribingImport}
+                    onClick={transcribeImportedAudio}
+                  >
+                    {transcribingImport ? <Loader2 className="size-4 animate-spin" /> : null}
+                    {transcribingImport ? 'Transcribing...' : 'Transcribe Audio'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    This explicitly uses the configured transcription provider and may incur its
+                    normal usage cost. Review and correct the result before continuing.
+                  </p>
                   {recording.url ? (
                     <div className="space-y-1">
                       <p className="text-xs text-muted-foreground">Original file preview</p>
@@ -2026,7 +2013,8 @@ export function TeachingVoiceCard({
                     !canSubmitRecording ||
                     !consented ||
                     !voiceName.trim() ||
-                    (enrollmentMode === 'audio-import' && !importTranscript.trim())
+                    transcribingImport ||
+                    (importTranscriptRequired && !importTranscript.trim())
                   }
                 >
                   <Play className="size-4" />

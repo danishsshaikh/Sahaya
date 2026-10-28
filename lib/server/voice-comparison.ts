@@ -53,6 +53,7 @@ import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen
 import {
   readVoiceProfile,
   referenceAudioExists,
+  resolveAuthorizedProfileReference,
   resolveReferenceAudioPath,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
@@ -79,12 +80,13 @@ function mingReference(profile: VoiceProfile): {
   const originalMime = profile.originalRecording?.mimeType.toLowerCase().split(';', 1)[0];
   if (
     profile.originalRecording &&
+    profile.originalRecording.key?.trim() &&
     originalMime &&
     ['audio/wav', 'audio/x-wav', 'audio/flac', 'audio/ogg', 'audio/opus'].includes(originalMime)
   ) {
     return { key: profile.originalRecording.key, provenance: 'original-upload' };
   }
-  return profile.referenceAudioKey
+  return profile.referenceAudioKey?.trim()
     ? { key: profile.referenceAudioKey, provenance: 'processed-reference' }
     : null;
 }
@@ -508,6 +510,7 @@ async function generateProviderAudio(input: {
   referenceTransformation?: string;
   conditioningMode?: 'acoustic-reference' | 'speaker-embedding-only';
   generationConfig?: string;
+  referenceProvenance?: 'original-upload' | 'processed-reference';
   chunked: boolean;
 }> {
   const { profile, request } = input;
@@ -540,10 +543,27 @@ async function generateProviderAudio(input: {
         'Ming 3.0 TTS preview is limited to 1000 characters for one direct model request.',
       );
     }
-    const reference = mingReference(profile);
-    if (!reference || !profile.referenceText?.trim()) {
+    if (!profile.referenceText?.trim()) {
       throw new TeachingVoiceError(
         'Ming 3.0 TTS requires the saved English reference audio and transcript.',
+      );
+    }
+    let reference: Awaited<ReturnType<typeof resolveAuthorizedProfileReference>>;
+    try {
+      reference = await resolveAuthorizedProfileReference({
+        ownerId: profile.ownerId,
+        profileId: profile.id,
+        preferOriginalMimeTypes: [
+          'audio/wav',
+          'audio/x-wav',
+          'audio/flac',
+          'audio/ogg',
+          'audio/opus',
+        ],
+      });
+    } catch {
+      throw new TeachingVoiceError(
+        'Ming 3.0 TTS requires a readable voice reference in your authorized profile storage.',
       );
     }
     const provider = new Ming3TtsPreviewProvider();
@@ -551,7 +571,7 @@ async function generateProviderAudio(input: {
     await provider.registerProfile(
       {
         profileId: serviceProfileId,
-        referenceAudioPath: resolveReferenceAudioPath(reference.key),
+        referenceAudioPath: reference.path,
         referenceText: profile.referenceText,
       },
       input.signal,
@@ -576,6 +596,7 @@ async function generateProviderAudio(input: {
         : {}),
       ...(conditioningMode ? { conditioningMode } : {}),
       ...(result.generationConfig ? { generationConfig: result.generationConfig } : {}),
+      referenceProvenance: reference.provenance,
       chunked: false,
     };
   }
@@ -772,7 +793,7 @@ export async function generateVoiceComparisonPreview(input: {
             }
           : input.request.providerId === 'ming3-tts'
             ? {
-                referenceProvenance: mingReference(profile)?.provenance ?? ('unknown' as const),
+                referenceProvenance: generated.referenceProvenance ?? ('unknown' as const),
               }
             : {}),
         ...(generated.referenceTransformation

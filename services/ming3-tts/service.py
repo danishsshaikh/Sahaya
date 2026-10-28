@@ -26,6 +26,7 @@ from conditioning import (
     parse_conditioning_mode,
     prepare_speaker_embedding,
     reference_preparation,
+    requires_speaker_embedding,
     speaker_embedding_path,
     synthesis_kwargs,
 )
@@ -77,7 +78,7 @@ model_error: str | None = None
 class VoicePrompt:
     reference_audio: Path
     reference_text: str
-    speaker_embedding: Path
+    speaker_embedding: Path | None
 
 
 profiles: dict[str, VoicePrompt] = {}
@@ -88,6 +89,7 @@ class ProfileCreateRequest(BaseModel):
     referenceAudioPath: str = Field(min_length=1)
     referenceText: str = Field(min_length=1)
     referenceLanguage: str = "en"
+    conditioningMode: str = DEFAULT_CONDITIONING_MODE
 
     @field_validator("profileId")
     @classmethod
@@ -109,6 +111,11 @@ class ProfileCreateRequest(BaseModel):
         if value.strip().lower() not in {"en", "english"}:
             raise ValueError("Ming 3.0 TTS preview requires an English reference")
         return "en"
+
+    @field_validator("conditioningMode")
+    @classmethod
+    def validate_conditioning_mode(cls, value: str) -> str:
+        return parse_conditioning_mode(value)
 
 
 class SynthesizeRequest(BaseModel):
@@ -227,19 +234,22 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/profiles")
-def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
-    active_model = require_model()
+def create_profile(req: ProfileCreateRequest) -> dict[str, Any]:
     reference = validate_reference(req.referenceAudioPath)
-    if EMBEDDING_ROOT is None:
-        raise HTTPException(status_code=503, detail="Ming embedding root is not configured")
-    EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(EMBEDDING_ROOT, 0o700)
-    embedding = speaker_embedding_path(EMBEDDING_ROOT, req.profileId, reference)
-    if not embedding.is_file() or embedding.stat().st_size == 0:
+    conditioning_mode = parse_conditioning_mode(req.conditioningMode)
+    embedding: Path | None = None
+    embedding_prepared = False
+    if requires_speaker_embedding(conditioning_mode):
+        active_model = require_model()
+        if EMBEDDING_ROOT is None:
+            raise HTTPException(status_code=503, detail="Ming embedding root is not configured")
+        EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(EMBEDDING_ROOT, 0o700)
+        embedding = speaker_embedding_path(EMBEDDING_ROOT, req.profileId, reference)
         if not generation_lock.acquire(blocking=False):
             raise HTTPException(status_code=429, detail="Ming 3.0 TTS preview service is busy")
         try:
-            prepare_speaker_embedding(
+            embedding_prepared = prepare_speaker_embedding(
                 active_model,
                 reference,
                 embedding,
@@ -255,13 +265,17 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
     with state_lock:
         profiles[req.profileId] = prompt
     log.info(
-        "Ming voice prompt registered profileId=%s speakerEmbeddingPrepared=true",
+        "Ming voice prompt registered profileId=%s conditioningMode=%s "
+        "speakerEmbeddingPrepared=%s",
         req.profileId,
+        req.conditioningMode,
+        embedding_prepared,
     )
     return {
         "providerReferenceId": req.profileId,
-        "referencePreparation": reference_preparation(DEFAULT_CONDITIONING_MODE),
+        "referencePreparation": reference_preparation(conditioning_mode),
         "defaultConditioningMode": DEFAULT_CONDITIONING_MODE,
+        "speakerEmbeddingPrepared": embedding_prepared,
         "generationConfig": GENERATION_CONFIG_ID,
     }
 
@@ -271,7 +285,8 @@ def delete_profile(profile_id: str) -> dict[str, bool]:
     with state_lock:
         removed = profiles.pop(profile_id, None)
     if removed is not None:
-        shutil.rmtree(removed.speaker_embedding.parent, ignore_errors=True)
+        if removed.speaker_embedding is not None:
+            shutil.rmtree(removed.speaker_embedding.parent, ignore_errors=True)
     return {"deleted": removed is not None}
 
 
@@ -290,6 +305,28 @@ def synthesize(req: SynthesizeRequest) -> Response:
     conditioning_mode = parse_conditioning_mode(req.conditioningMode)
     output_path: Path | None = None
     try:
+        embedding = prompt.speaker_embedding
+        if requires_speaker_embedding(conditioning_mode) and (
+            embedding is None or not embedding.is_file() or embedding.stat().st_size == 0
+        ):
+            if EMBEDDING_ROOT is None:
+                raise HTTPException(status_code=503, detail="Ming embedding root is not configured")
+            EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(EMBEDDING_ROOT, 0o700)
+            embedding = speaker_embedding_path(EMBEDDING_ROOT, req.profileId, prompt.reference_audio)
+            prepare_speaker_embedding(
+                active_model,
+                prompt.reference_audio,
+                embedding,
+                save_speaker_embedding,
+            )
+            prompt = VoicePrompt(
+                reference_audio=prompt.reference_audio,
+                reference_text=prompt.reference_text,
+                speaker_embedding=embedding,
+            )
+            with state_lock:
+                profiles[req.profileId] = prompt
         with tempfile.NamedTemporaryFile(
             prefix="sahaya-ming-", suffix=".wav", delete=False
         ) as out:
@@ -301,7 +338,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
                 output_path=output_path,
                 reference_audio=prompt.reference_audio,
                 reference_text=prompt.reference_text,
-                speaker_embedding=prompt.speaker_embedding,
+                speaker_embedding=embedding,
             )
         )
         audio = output_path.read_bytes()

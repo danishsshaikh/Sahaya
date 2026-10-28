@@ -46,6 +46,32 @@ second language check before cleanup. Other language profiles remain intact.
 Old JSON files without `referenceText` remain valid for Chatterbox. IndicF5
 profiles without it fail explicitly and need re-enrollment.
 
+## Selecting An Existing Profile
+
+Use the owner-scoped terminal utility when an older ready profile should become
+the account's default Teaching Voice. Run it in the same application environment
+as Sahaya so `OPENMAIC_AUTH_DATA_DIR` and `VOICE_CLONING_STORAGE_DIR` resolve to
+the deployed private data stores.
+
+List the account's profiles, including their immutable creation time and provider
+compatibility:
+
+```sh
+pnpm voice-profile list --user <faculty-email-or-user-id>
+```
+
+After confirming that the intended profile is owned by that account and marked
+ready, activate it by ID:
+
+```sh
+pnpm voice-profile activate --user <faculty-email-or-user-id> --profile vcp_RYn-oAtrY3ptceg6
+```
+
+Activation validates the account, profile ownership, readiness, and readable
+owner-scoped reference audio. It updates only the account-level Teaching Voice
+pointer. It does not alter profile timestamps, delete or recreate audio, or
+change any existing course-specific profile binding.
+
 ## HTTP Boundary
 
 Model logic stays in the existing independent Python services. Reference paths

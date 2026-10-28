@@ -27,6 +27,7 @@
     "test:package-tarballs": "node scripts/smoke-test-package-tarballs.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "voice-profile": "tsx scripts/teaching-voice-profile.ts",
     "eval:pbl-v2-planner": "tsx eval/pbl-v2-planner/runner.ts",
     "eval:whiteboard": "tsx eval/whiteboard-layout/runner.ts",
     "eval:outline-language": "tsx eval/outline-language/runner.ts",

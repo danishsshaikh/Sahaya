@@ -43,12 +43,18 @@ describe('Teaching Voice faculty UI', () => {
     expect(source).toContain('isTeachingVoiceExplicitlyDisabled(persisted, next.id)');
   });
 
-  it('offers a saved library and authorized audio import without inventing a transcript', () => {
-    expect(source).toContain('Saved Voice Library');
-    expect(source).toContain('Import audio file');
-    expect(source).toContain('Exact reference transcript');
+  it('keeps upload simple and transcription optional and explicit', () => {
+    expect(source).not.toContain('Saved Voice Library');
+    expect(source).not.toContain('Rename');
+    expect(source).toContain('Upload Audio');
+    expect(source).toContain('Reference transcript (optional)');
+    expect(source).toContain('Transcribe Audio');
+    expect(source).toContain('IndicF5 requires accurate reference text');
+    expect(source).toContain("fetch('/api/transcription'");
     expect(source).toContain("formData.set('enrollmentSource', enrollmentMode)");
-    expect(source).toContain("formData.set('referenceText', importTranscript.trim())");
+    expect(source).toContain(
+      "if (importTranscript.trim()) formData.set('referenceText', importTranscript.trim())",
+    );
     expect(source).toContain('I own this recording or have explicit permission');
   });
 });

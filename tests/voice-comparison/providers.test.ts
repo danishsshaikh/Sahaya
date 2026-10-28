@@ -178,6 +178,7 @@ describe('Ming 3.0 TTS preview provider', () => {
       referenceAudioPath: '/private/owner/reference.wav',
       referenceText: ' Exact authorized transcript. ',
       referenceLanguage: 'en',
+      conditioningMode: 'acoustic-reference',
     });
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       profileId: 'ming_owner_profile',
