@@ -22,6 +22,7 @@ import {
 } from '@/lib/server/course-narration-snapshot';
 import {
   getCourseNarrationBootstrap,
+  resolveCourseNarrationProfile,
   synthesizeCourseNarration,
 } from '@/lib/server/course-narration';
 import type { SpeechAction } from '@/lib/types/action';
@@ -205,25 +206,19 @@ export async function GET(req: NextRequest) {
   const user = await requireSessionUser(req);
   if (user instanceof Response) return user;
   const stageId = req.nextUrl.searchParams.get('stageId')?.trim();
-  const profileId = req.nextUrl.searchParams.get('profileId')?.trim() || undefined;
   if (!stageId) return apiError('MISSING_REQUIRED_FIELD', 400, 'stageId is required');
   try {
     const source = await resolveOwnedCourseNarrationSource(user.id, stageId);
     if (!source) return apiError('INVALID_REQUEST', 404, 'Course was not found.');
     const snapshot = await readCourseNarrationSnapshot(user.id, stageId);
     const selectedProfileId = snapshot?.teacherVoiceProfileId ?? source.stage.teacherVoiceProfileId;
-    if (profileId && profileId !== selectedProfileId) {
-      return apiError(
-        'INVALID_REQUEST',
-        409,
-        'The course Teaching Voice changed. Reload the course.',
-      );
-    }
+    const language = snapshot?.lessonLanguage ?? source.stage.lessonLanguage;
     return apiSuccess({
       narration: await getCourseNarrationBootstrap({
         ownerId: user.id,
         stageId,
         profileId: selectedProfileId,
+        ...(language ? { language } : {}),
       }),
       source: source.source,
     });
@@ -243,11 +238,7 @@ export async function PUT(req: NextRequest) {
     }
     const access = await resolveCourseNarrationAccess(user.id, body.stageId);
     if (access.status === 'unregistered') {
-      return apiError(
-        'COURSE_REGISTRATION_REQUIRED',
-        409,
-        'Save this browser-only course to your account before using Narration Voice.',
-      );
+      return apiSuccess({ synchronized: false, registrationRequired: true });
     }
     if (access.status === 'forbidden') {
       return apiError('INVALID_REQUEST', 404, 'Course was not found.');
@@ -255,18 +246,23 @@ export async function PUT(req: NextRequest) {
     const source = access.course;
     const scenes = parseSnapshotScenes(body.scenes);
     if (!scenes) return apiError('INVALID_REQUEST', 400, 'Invalid course narration snapshot');
-    const teacherVoiceProfileId =
+    const requestedProfileId =
       typeof body.teacherVoiceProfileId === 'string' && body.teacherVoiceProfileId.trim()
         ? body.teacherVoiceProfileId.trim()
         : undefined;
     const lessonLanguage = isVoiceComparisonLanguageCode(body.lessonLanguage)
       ? body.lessonLanguage
       : undefined;
+    const profile = await resolveCourseNarrationProfile({
+      ownerId: user.id,
+      profileId: requestedProfileId,
+      language: lessonLanguage,
+    });
     await writeCourseNarrationSnapshot({
       schemaVersion: 1,
       ownerId: user.id,
       stageId: body.stageId,
-      ...(teacherVoiceProfileId ? { teacherVoiceProfileId } : {}),
+      ...(profile ? { teacherVoiceProfileId: profile.id } : {}),
       ...(lessonLanguage ? { lessonLanguage } : {}),
       scenes,
       updatedAt: new Date().toISOString(),
@@ -298,6 +294,17 @@ export async function PATCH(req: NextRequest) {
       return apiError('INVALID_REQUEST', 404, 'Course was not found.');
     }
 
+    const profile = await resolveCourseNarrationProfile({
+      ownerId: user.id,
+      profileId: stage.teacherVoiceProfileId,
+      language: stage.lessonLanguage,
+    });
+    const registeredStage = {
+      ...stage,
+      ...(profile ? { teacherVoiceProfileId: profile.id } : {}),
+    };
+    if (!profile) delete registeredStage.teacherVoiceProfileId;
+
     const now = new Date().toISOString();
     let registration: 'created' | 'already-owned' = 'already-owned';
     if (access.status === 'unregistered') {
@@ -305,7 +312,7 @@ export async function PATCH(req: NextRequest) {
         schemaVersion: 1,
         ownerId: user.id,
         stageId: body.stageId,
-        stage,
+        stage: registeredStage,
         scenes,
         claimedAt: now,
       });
@@ -320,7 +327,13 @@ export async function PATCH(req: NextRequest) {
     }
 
     await writeCourseNarrationSnapshot(
-      snapshotFor({ ownerId: user.id, stageId: body.stageId, stage, scenes, updatedAt: now }),
+      snapshotFor({
+        ownerId: user.id,
+        stageId: body.stageId,
+        stage: registeredStage,
+        scenes,
+        updatedAt: now,
+      }),
     );
     return apiSuccess({
       registered: true,
@@ -367,7 +380,12 @@ export async function POST(req: NextRequest) {
         'Narration text changed. Reload the course before generating audio.',
       );
     }
-    const profileId = snapshot?.teacherVoiceProfileId ?? source.stage.teacherVoiceProfileId;
+    const profile = await resolveCourseNarrationProfile({
+      ownerId: user.id,
+      profileId: snapshot?.teacherVoiceProfileId ?? source.stage.teacherVoiceProfileId,
+      language: body.language,
+    });
+    const profileId = profile?.id;
     if (typeof body.profileId === 'string' && body.profileId !== profileId) {
       return apiError(
         'INVALID_REQUEST',

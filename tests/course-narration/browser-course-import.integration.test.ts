@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   ownerId: 'owner-1',
   authenticated: true,
   bootstrap: vi.fn(),
+  resolveProfile: vi.fn(),
   synthesize: vi.fn(),
 }));
 
@@ -29,6 +30,7 @@ vi.mock('@/lib/config/feature-flags', async (importOriginal) => {
 });
 vi.mock('@/lib/server/course-narration', () => ({
   getCourseNarrationBootstrap: mocks.bootstrap,
+  resolveCourseNarrationProfile: mocks.resolveProfile,
   synthesizeCourseNarration: mocks.synthesize,
 }));
 
@@ -101,6 +103,18 @@ describe('browser-only StageStorage course import', () => {
       savedPreviews: [],
       profile: { id: 'profile-qwen', activeEngine: 'qwen3-tts' },
     });
+    mocks.resolveProfile
+      .mockReset()
+      .mockImplementation(async ({ profileId }: { profileId?: string }) =>
+        profileId
+          ? {
+              id: profileId,
+              ownerId: mocks.ownerId,
+              status: 'ready',
+              language: 'en',
+            }
+          : null,
+      );
     mocks.synthesize.mockReset().mockResolvedValue({
       providerId: 'bodhan',
       audio: { format: 'wav', base64: 'AA==' },
@@ -112,9 +126,10 @@ describe('browser-only StageStorage course import', () => {
     const payload = browserCourse(stageId);
 
     const before = await PUT(request('PUT', payload));
-    expect(before.status).toBe(409);
+    expect(before.status).toBe(200);
     await expect(before.json()).resolves.toMatchObject({
-      errorCode: 'COURSE_REGISTRATION_REQUIRED',
+      synchronized: false,
+      registrationRequired: true,
     });
 
     const imported = await PATCH(request('PATCH', payload));

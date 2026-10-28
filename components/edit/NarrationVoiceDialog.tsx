@@ -50,10 +50,9 @@ function responseMessage(body: unknown, fallback: string): string {
       : fallback;
 }
 
-function responseErrorCode(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const errorCode = (body as { errorCode?: unknown }).errorCode;
-  return typeof errorCode === 'string' ? errorCode : undefined;
+function responseRegistrationRequired(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  return (body as { registrationRequired?: unknown }).registrationRequired === true;
 }
 
 function speechActions(actions: readonly unknown[] | undefined): SpeechAction[] {
@@ -114,14 +113,12 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     [scenes],
   );
   const provider = bootstrap?.providers.find((candidate) => candidate.id === providerId);
-  const matchingVoices = (bootstrap?.bodhanVoices ?? []).filter(
-    (candidate) => candidate.recordedLanguage === language,
-  );
+  const matchingVoices = useMemo(() => bootstrap?.bodhanVoices ?? [], [bootstrap?.bodhanVoices]);
   const selection: CourseNarrationSelection | null = provider
     ? {
         providerId,
         providerName: provider.name,
-        ...(teacherVoiceProfileId ? { profileId: teacherVoiceProfileId } : {}),
+        ...(profile ? { profileId: profile.id } : {}),
         language,
         ...(providerId === 'bodhan' ? { voice, style } : {}),
         ...(provider.supportsEnhancement ? { enhancementMode } : {}),
@@ -161,21 +158,18 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         ),
       });
       const synchronizedBody = (await synchronized.json().catch(() => null)) as unknown;
-      if (!synchronized.ok) {
-        if (
-          synchronized.status === 409 &&
-          responseErrorCode(synchronizedBody) === 'COURSE_REGISTRATION_REQUIRED'
-        ) {
-          const hasNarration = current.scenes.some(
-            (scene) => speechActions(scene.actions).length > 0,
-          );
-          if (!hasNarration) {
-            setLoadError('This classroom has no narration segments to preview or regenerate.');
-            return;
-          }
-          setRegistrationRequired(true);
+      if (synchronized.ok && responseRegistrationRequired(synchronizedBody)) {
+        const hasNarration = current.scenes.some(
+          (scene) => speechActions(scene.actions).length > 0,
+        );
+        if (!hasNarration) {
+          setLoadError('This classroom has no narration segments to preview or regenerate.');
           return;
         }
+        setRegistrationRequired(true);
+        return;
+      }
+      if (!synchronized.ok) {
         throw new Error(
           responseMessage(synchronizedBody, 'The classroom narration could not be synchronized.'),
         );
@@ -191,13 +185,16 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       }
       setBootstrap(body.narration);
       setProfile(body.narration.profile ?? null);
-      if (
-        lessonLanguage &&
-        body.narration.languages.some((candidate) => candidate.code === lessonLanguage)
-      ) {
-        setLanguage(lessonLanguage);
-      }
-      const initialLanguage = lessonLanguage ?? 'en';
+      const initialLanguage = body.narration.languages.some(
+        (candidate) => candidate.code === lessonLanguage,
+      )
+        ? lessonLanguage!
+        : body.narration.languages.some(
+              (candidate) => candidate.code === body.narration?.profile?.language,
+            )
+          ? (body.narration.profile!.language as VoiceComparisonLanguageCode)
+          : 'en';
+      setLanguage(initialLanguage);
       const first = body.narration.providers.find(
         (candidate) =>
           candidate.available &&
@@ -205,13 +202,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
           candidate.supportedLanguages.includes(initialLanguage),
       );
       if (first) setProviderId(first.id);
-      setVoice(
-        body.narration.bodhanVoices.find(
-          (candidate) => candidate.recordedLanguage === initialLanguage,
-        )?.id ??
-          body.narration.bodhanVoices[0]?.id ??
-          '',
-      );
+      setVoice(body.narration.bodhanVoices[0]?.id ?? '');
       setStyle(body.narration.bodhanStyles[0] ?? 'educational lecture');
     };
     void load().catch((caught: unknown) => {
@@ -660,7 +651,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                     >
                       {matchingVoices.map((item) => (
                         <option key={item.id} value={item.id}>
-                          {item.name}
+                          {item.name} ({item.recordedLanguageLabel})
                         </option>
                       ))}
                     </select>

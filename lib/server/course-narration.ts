@@ -39,6 +39,7 @@ import {
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
 import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
 import { TeachingVoiceError, toPublicVoiceProfile } from '@/lib/voice-cloning/types';
+import { findCurrentVoiceProfile } from '@/lib/voice-cloning/storage';
 import { enhanceGeneratedVoiceAudio } from '@/lib/voice-cloning/resemble-enhance';
 import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
 
@@ -46,28 +47,23 @@ export async function getCourseNarrationBootstrap(input: {
   ownerId: string;
   stageId: string;
   profileId?: string;
+  language?: VoiceComparisonLanguageCode;
 }): Promise<VoiceComparisonBootstrap> {
   const coursePreviews = await readVoiceComparisonCacheEntries(
     input.ownerId,
     `course:${input.stageId}`,
   );
-  if (input.profileId) {
-    try {
-      const profile = await requireOwnedReadyProfile(input.ownerId, input.profileId);
-      const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
-      const publicProfile = toPublicVoiceProfile(profile);
-      return {
-        ...bootstrap,
-        savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
-          right.generatedAt.localeCompare(left.generatedAt),
-        ),
-        ...(publicProfile ? { profile: publicProfile } : {}),
-      };
-    } catch (error) {
-      // A legacy course may retain a profile id whose private profile was
-      // removed. The course still exists and preset Bodhan remains usable.
-      if (!(error instanceof TeachingVoiceError) || error.status !== 404) throw error;
-    }
+  const profile = await resolveCourseNarrationProfile(input);
+  if (profile) {
+    const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
+    const publicProfile = toPublicVoiceProfile(profile);
+    return {
+      ...bootstrap,
+      savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
+        right.generatedAt.localeCompare(left.generatedAt),
+      ),
+      ...(publicProfile ? { profile: publicProfile } : {}),
+    };
   }
   const bodhanConfigured = externalVoiceProviderConfigured(getBodhanTtsConfig());
   return {
@@ -95,6 +91,27 @@ export async function getCourseNarrationBootstrap(input: {
     bodhanStyles: [...BODHAN_STYLES],
     savedPreviews: coursePreviews,
   };
+}
+
+export async function resolveCourseNarrationProfile(input: {
+  ownerId: string;
+  profileId?: string;
+  language?: VoiceComparisonLanguageCode;
+}) {
+  if (input.profileId) {
+    try {
+      return await requireOwnedReadyProfile(input.ownerId, input.profileId);
+    } catch (error) {
+      // Browser-only and older courses can retain a profile id that predates
+      // the account's current Teaching Voice. Fall through only for absence;
+      // provider/storage failures remain actionable.
+      if (!(error instanceof TeachingVoiceError) || error.status !== 404) throw error;
+    }
+  }
+  const languageProfile = input.language
+    ? await findCurrentVoiceProfile(input.ownerId, input.language, true)
+    : null;
+  return languageProfile ?? findCurrentVoiceProfile(input.ownerId, undefined, true);
 }
 
 async function generateBodhanCourseAudio(input: {

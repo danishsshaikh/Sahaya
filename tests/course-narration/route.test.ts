@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   readSnapshot: vi.fn(),
   writeSnapshot: vi.fn(),
   bootstrap: vi.fn(),
+  resolveProfile: vi.fn(),
   synthesize: vi.fn(),
 }));
 
@@ -28,6 +29,7 @@ vi.mock('@/lib/server/course-narration-snapshot', () => ({
 }));
 vi.mock('@/lib/server/course-narration', () => ({
   getCourseNarrationBootstrap: mocks.bootstrap,
+  resolveCourseNarrationProfile: mocks.resolveProfile,
   synthesizeCourseNarration: mocks.synthesize,
 }));
 
@@ -86,6 +88,11 @@ describe('course narration production route compatibility', () => {
       savedPreviews: [],
       profile: { id: 'vcp_qwen', activeEngine: 'qwen3-tts' },
     });
+    mocks.resolveProfile
+      .mockReset()
+      .mockImplementation(async ({ profileId }: { profileId?: string }) =>
+        profileId ? { id: profileId, ownerId: 'owner-1', status: 'ready' } : null,
+      );
     mocks.synthesize.mockReset().mockResolvedValue({
       providerId: 'bodhan',
       audio: { format: 'wav', base64: 'AA==' },
@@ -159,6 +166,32 @@ describe('course narration production route compatibility', () => {
     );
     expect(course.scenes[0].actions[0].text).toBe('  Exact persisted text.  ');
     expect(course.scenes[0].actions[0].audioId).toBe('original-audio');
+  });
+
+  it('binds a browser course without a profile pointer to the owner current ready profile', async () => {
+    mocks.resolveProfile.mockResolvedValueOnce({
+      id: 'vcp_current',
+      ownerId: 'owner-1',
+      status: 'ready',
+    });
+
+    const response = await PUT(
+      request('PUT', {
+        stageId: 'course-1',
+        lessonLanguage: 'en',
+        scenes: [{ id: 'scene-1', speech: [{ id: 'speech-1', text: 'Existing text.' }] }],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.resolveProfile).toHaveBeenCalledWith({
+      ownerId: 'owner-1',
+      profileId: undefined,
+      language: 'en',
+    });
+    expect(mocks.writeSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ teacherVoiceProfileId: 'vcp_current' }),
+    );
   });
 
   it('previews the exact synchronized transcript and derives the profile server-side', async () => {

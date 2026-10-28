@@ -8,9 +8,12 @@ import {
 } from '@/lib/server/course-narration-snapshot';
 import { resolveStageAccess } from '@/lib/server/stage-access';
 import type { Scene, Stage } from '@/lib/types/stage';
+import type { VoiceComparisonLanguageCode } from '@/lib/voice-comparison/types';
 
 export interface OwnedCourseNarrationSource {
-  stage: Pick<Stage, 'id' | 'teacherVoiceProfileId'>;
+  stage: Pick<Stage, 'id' | 'teacherVoiceProfileId'> & {
+    lessonLanguage?: VoiceComparisonLanguageCode;
+  };
   scenes: Scene[];
   registeredScenes?: CourseNarrationSceneSnapshot[];
   sceneIds: string[];
@@ -77,6 +80,9 @@ export async function resolveCourseNarrationAccess(
         id: stageId,
         ...(registration.stage.teacherVoiceProfileId
           ? { teacherVoiceProfileId: registration.stage.teacherVoiceProfileId }
+          : {}),
+        ...(registration.stage.lessonLanguage
+          ? { lessonLanguage: registration.stage.lessonLanguage }
           : {}),
       },
       scenes: [],

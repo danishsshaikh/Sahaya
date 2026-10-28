@@ -26,7 +26,7 @@ describe('Narration Voice modal integration', () => {
 
   it('requires an explicit authenticated save action for browser-only courses', () => {
     expect(source).toContain("method: 'PATCH'");
-    expect(source).toContain('COURSE_REGISTRATION_REQUIRED');
+    expect(source).toContain('responseRegistrationRequired');
     expect(source).toContain('Save to My Account');
     expect(source).toContain('window.confirm');
   });

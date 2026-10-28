@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   generatePreview: vi.fn(),
   getBootstrap: vi.fn(),
   requireProfile: vi.fn(),
+  findCurrentProfile: vi.fn(),
   enhance: vi.fn(),
   readEntries: vi.fn(),
   writeCache: vi.fn(),
@@ -21,6 +22,10 @@ vi.mock('@/lib/server/voice-comparison', async (importOriginal) => {
 vi.mock('@/lib/voice-cloning/resemble-enhance', () => ({
   enhanceGeneratedVoiceAudio: mocks.enhance,
 }));
+vi.mock('@/lib/voice-cloning/storage', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/voice-cloning/storage')>();
+  return { ...original, findCurrentVoiceProfile: mocks.findCurrentProfile };
+});
 vi.mock('@/lib/server/voice-comparison-cache', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/server/voice-comparison-cache')>();
   return {
@@ -54,6 +59,7 @@ describe('course narration provider routing', () => {
     mocks.enhance.mockReset();
     mocks.getBootstrap.mockReset();
     mocks.requireProfile.mockReset();
+    mocks.findCurrentProfile.mockReset().mockResolvedValue(null);
     mocks.readEntries.mockReset().mockResolvedValue([]);
     mocks.writeCache.mockReset().mockResolvedValue(undefined);
   });
@@ -140,6 +146,43 @@ describe('course narration provider routing', () => {
 
     expect(bootstrap.profile).toBeUndefined();
     expect(bootstrap.providers.map((provider) => provider.id)).toContain('bodhan');
+  });
+
+  it('uses the same current ready profile lookup as Customize Voice for an older course', async () => {
+    const currentProfile = {
+      id: 'profile-current',
+      ownerId: 'owner-1',
+      displayName: 'Current Teaching Voice',
+      provider: 'chatterbox',
+      language: 'hi',
+      status: 'ready',
+      activeEngine: 'chatterbox',
+      referenceAudioKey: '/private/reference.wav',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      consentTimestamp: '2026-01-01T00:00:00.000Z',
+      consentVersion: 'v1',
+      profileVersion: 1,
+    };
+    mocks.findCurrentProfile.mockResolvedValue(currentProfile);
+    mocks.getBootstrap.mockResolvedValue({
+      providers: [{ id: 'chatterbox', available: true }],
+      languages: [],
+      bodhanVoices: [],
+      bodhanStyles: [],
+      savedPreviews: [],
+    });
+
+    const bootstrap = await getCourseNarrationBootstrap({
+      ownerId: 'owner-1',
+      stageId: 'browser-course',
+      language: 'hi',
+    });
+
+    expect(mocks.findCurrentProfile).toHaveBeenNthCalledWith(1, 'owner-1', 'hi', true);
+    expect(mocks.getBootstrap).toHaveBeenCalledWith('owner-1', currentProfile);
+    expect(bootstrap.profile).toMatchObject({ id: 'profile-current', language: 'hi' });
+    expect(bootstrap.profile).not.toHaveProperty('referenceAudioKey');
   });
 
   it('returns the authenticated profile active engine without exposing private provider ids', async () => {
