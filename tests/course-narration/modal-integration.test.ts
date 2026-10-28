@@ -23,4 +23,11 @@ describe('Narration Voice modal integration', () => {
     expect(source).toContain('This classroom has no narration segments');
     expect(source).toContain('role="alert"');
   });
+
+  it('requires an explicit authenticated save action for browser-only courses', () => {
+    expect(source).toContain("method: 'PATCH'");
+    expect(source).toContain('COURSE_REGISTRATION_REQUIRED');
+    expect(source).toContain('Save to My Account');
+    expect(source).toContain('window.confirm');
+  });
 });

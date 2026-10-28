@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { activateCourseNarrationVersion } from '@/lib/course-narration/activation';
 import { storeCourseNarrationAudio } from '@/lib/course-narration/audio-storage';
+import { buildBrowserCourseNarrationRegistration } from '@/lib/course-narration/browser-registration';
 import type {
   CourseNarrationSelection,
   CourseNarrationState,
@@ -47,6 +48,12 @@ function responseMessage(body: unknown, fallback: string): string {
     : typeof value.error === 'string'
       ? value.error
       : fallback;
+}
+
+function responseErrorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const errorCode = (body as { errorCode?: unknown }).errorCode;
+  return typeof errorCode === 'string' ? errorCode : undefined;
 }
 
 function speechActions(actions: readonly unknown[] | undefined): SpeechAction[] {
@@ -91,6 +98,9 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     'standard',
   );
   const [loading, setLoading] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [registrationRequired, setRegistrationRequired] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<VoiceComparisonPreviewResult | null>(null);
@@ -136,6 +146,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     setBootstrap(null);
     setProfile(null);
     setLoadError(null);
+    setRegistrationRequired(false);
     const load = async () => {
       const current = useStageStore.getState();
       if (!current.stage || current.stage.id !== stageId) {
@@ -145,22 +156,26 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         signal: request.signal,
-        body: JSON.stringify({
-          stageId,
-          teacherVoiceProfileId: current.stage.teacherVoiceProfileId,
-          lessonLanguage: current.stage.lessonLanguage,
-          scenes: current.scenes.map((scene) => ({
-            id: scene.id,
-            speech: speechActions(scene.actions).map((action) => ({
-              id: action.id,
-              text: action.text,
-              ...(action.audioId ? { audioId: action.audioId } : {}),
-            })),
-          })),
-        }),
+        body: JSON.stringify(
+          buildBrowserCourseNarrationRegistration(current.stage, current.scenes),
+        ),
       });
       const synchronizedBody = (await synchronized.json().catch(() => null)) as unknown;
       if (!synchronized.ok) {
+        if (
+          synchronized.status === 409 &&
+          responseErrorCode(synchronizedBody) === 'COURSE_REGISTRATION_REQUIRED'
+        ) {
+          const hasNarration = current.scenes.some(
+            (scene) => speechActions(scene.actions).length > 0,
+          );
+          if (!hasNarration) {
+            setLoadError('This classroom has no narration segments to preview or regenerate.');
+            return;
+          }
+          setRegistrationRequired(true);
+          return;
+        }
         throw new Error(
           responseMessage(synchronizedBody, 'The classroom narration could not be synchronized.'),
         );
@@ -207,7 +222,47 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       }
     });
     return () => request.abort();
-  }, [lessonLanguage, open, stageId, teacherVoiceProfileId]);
+  }, [lessonLanguage, loadAttempt, open, stageId, teacherVoiceProfileId]);
+
+  const registerBrowserCourse = async () => {
+    if (registering) return;
+    const current = useStageStore.getState();
+    if (!current.stage || current.stage.id !== stageId) {
+      setLoadError('The current classroom changed. Reopen Narration Voice.');
+      return;
+    }
+    if (segments.length === 0) {
+      setLoadError('This classroom has no narration segments to save.');
+      return;
+    }
+    const confirmed = window.confirm(
+      'This course currently exists only in this browser. Save its narration identity to your authenticated account so Narration Voice can use it? This does not regenerate or modify course content, visuals, audio, or Teaching Voice profiles.',
+    );
+    if (!confirmed) return;
+    setRegistering(true);
+    setLoadError(null);
+    try {
+      const response = await fetch('/api/course-narration', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          buildBrowserCourseNarrationRegistration(current.stage, current.scenes),
+        ),
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok) {
+        throw new Error(responseMessage(body, 'The browser course could not be saved.'));
+      }
+      setRegistrationRequired(false);
+      setLoadAttempt((attempt) => attempt + 1);
+    } catch (caught) {
+      setLoadError(
+        caught instanceof Error ? caught.message : 'The browser course could not be saved.',
+      );
+    } finally {
+      setRegistering(false);
+    }
+  };
 
   useEffect(() => {
     const preferred = matchingVoices[0]?.id;
@@ -509,10 +564,28 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
               {loadError}
             </p>
           ) : null}
-          {!bootstrap && !loadError ? (
+          {!bootstrap && !loadError && !registrationRequired ? (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" /> Loading narration providers…
             </p>
+          ) : null}
+
+          {registrationRequired ? (
+            <section className="space-y-3 rounded-lg border p-4">
+              <div>
+                <h3 className="text-sm font-medium">Save this browser course to your account</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  This older course is stored only in this browser. Narration Voice needs an
+                  authenticated owner binding and its existing narration transcript before it can
+                  call a voice engine. Your slides, visuals, original audio, and course structure
+                  stay unchanged.
+                </p>
+              </div>
+              <Button size="sm" disabled={registering} onClick={() => void registerBrowserCourse()}>
+                {registering ? <Loader2 className="animate-spin" /> : null}
+                Save to My Account
+              </Button>
+            </section>
           ) : null}
 
           {bootstrap ? (

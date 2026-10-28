@@ -3,6 +3,8 @@ import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
   resolveCourse: vi.fn(),
+  resolveAccess: vi.fn(),
+  claimRegistration: vi.fn(),
   readSnapshot: vi.fn(),
   writeSnapshot: vi.fn(),
   bootstrap: vi.fn(),
@@ -17,8 +19,10 @@ vi.mock('@/lib/config/feature-flags', () => ({
 }));
 vi.mock('@/lib/server/course-narration-course', () => ({
   resolveOwnedCourseNarrationSource: mocks.resolveCourse,
+  resolveCourseNarrationAccess: mocks.resolveAccess,
 }));
 vi.mock('@/lib/server/course-narration-snapshot', () => ({
+  claimBrowserCourseNarrationRegistration: mocks.claimRegistration,
   readCourseNarrationSnapshot: mocks.readSnapshot,
   writeCourseNarrationSnapshot: mocks.writeSnapshot,
 }));
@@ -64,11 +68,14 @@ const course = {
     },
   ],
   source: 'legacy-classroom' as const,
+  sceneIds: ['scene-1'],
 };
 
 describe('course narration production route compatibility', () => {
   beforeEach(() => {
     mocks.resolveCourse.mockReset().mockResolvedValue(course);
+    mocks.resolveAccess.mockReset().mockResolvedValue({ status: 'owned', course });
+    mocks.claimRegistration.mockReset().mockResolvedValue('created');
     mocks.readSnapshot.mockReset().mockResolvedValue(null);
     mocks.writeSnapshot.mockReset().mockResolvedValue(undefined);
     mocks.bootstrap.mockReset().mockResolvedValue({
@@ -208,6 +215,7 @@ describe('course narration production route compatibility', () => {
 
   it('rejects unauthorized course IDs without revealing or synchronizing them', async () => {
     mocks.resolveCourse.mockResolvedValue(null);
+    mocks.resolveAccess.mockResolvedValue({ status: 'forbidden' });
     const getResponse = await GET(
       new NextRequest('http://localhost/api/course-narration?stageId=foreign-course'),
     );

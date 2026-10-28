@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   resolveAccess: vi.fn(),
   loadDocument: vi.fn(),
   readClassroom: vi.fn(),
+  readRegistration: vi.fn(),
 }));
 
 vi.mock('@/lib/config/feature-flags', () => ({
@@ -18,8 +19,14 @@ vi.mock('@/lib/server/agent-runtime/owner-scoped-documents', () => ({
 vi.mock('@/lib/server/classroom-storage', () => ({
   readClassroom: mocks.readClassroom,
 }));
+vi.mock('@/lib/server/course-narration-snapshot', () => ({
+  readBrowserCourseNarrationRegistration: mocks.readRegistration,
+}));
 
-import { resolveOwnedCourseNarrationSource } from '@/lib/server/course-narration-course';
+import {
+  resolveCourseNarrationAccess,
+  resolveOwnedCourseNarrationSource,
+} from '@/lib/server/course-narration-course';
 
 const stage = { id: 'stage-1', name: 'Existing', createdAt: 1, updatedAt: 1 };
 const scene = {
@@ -37,6 +44,7 @@ describe('existing classroom narration source resolution', () => {
     mocks.resolveAccess.mockReset().mockResolvedValue(null);
     mocks.loadDocument.mockReset().mockResolvedValue(null);
     mocks.readClassroom.mockReset().mockResolvedValue(null);
+    mocks.readRegistration.mockReset().mockResolvedValue(null);
   });
 
   it('uses the current owner-checked document store when the stage is there', async () => {
@@ -81,5 +89,41 @@ describe('existing classroom narration source resolution', () => {
 
     await expect(resolveOwnedCourseNarrationSource('owner-1', 'stage-1')).resolves.toBeNull();
     await expect(resolveOwnedCourseNarrationSource('owner-1', '../stage-1')).resolves.toBeNull();
+  });
+
+  it('resolves an explicitly claimed browser-only StageStorage course', async () => {
+    mocks.readRegistration.mockResolvedValue({
+      schemaVersion: 1,
+      ownerId: 'owner-1',
+      stageId: 'stage-1',
+      stage: { name: 'Browser course', createdAt: 1, updatedAt: 2 },
+      scenes: [{ id: 'scene-1', speech: [{ id: 'speech-1', text: 'Exact browser transcript' }] }],
+      claimedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    await expect(resolveOwnedCourseNarrationSource('owner-1', 'stage-1')).resolves.toMatchObject({
+      source: 'browser-registration',
+      sceneIds: ['scene-1'],
+      registeredScenes: [
+        { id: 'scene-1', speech: [{ id: 'speech-1', text: 'Exact browser transcript' }] },
+      ],
+    });
+  });
+
+  it('distinguishes unregistered browser stages from foreign claims without exposing either', async () => {
+    await expect(resolveCourseNarrationAccess('owner-1', 'stage-1')).resolves.toEqual({
+      status: 'unregistered',
+    });
+    mocks.readRegistration.mockResolvedValue({
+      schemaVersion: 1,
+      ownerId: 'owner-2',
+      stageId: 'stage-1',
+      stage: { name: 'Other', createdAt: 1, updatedAt: 1 },
+      scenes: [],
+      claimedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await expect(resolveCourseNarrationAccess('owner-1', 'stage-1')).resolves.toEqual({
+      status: 'forbidden',
+    });
   });
 });
