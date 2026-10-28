@@ -136,55 +136,70 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     setBootstrap(null);
     setProfile(null);
     setLoadError(null);
-    const profileQuery = teacherVoiceProfileId
-      ? `&profileId=${encodeURIComponent(teacherVoiceProfileId)}`
-      : '';
-    const profilePromise = teacherVoiceProfileId
-      ? fetch(`/api/voice-cloning/profile?profileId=${encodeURIComponent(teacherVoiceProfileId)}`, {
-          signal: request.signal,
-        }).then(async (response) => {
-          const body = (await response.json().catch(() => null)) as {
-            profile?: PublicVoiceProfile;
-          } | null;
-          if (response.ok && body?.profile) setProfile(body.profile);
-        })
-      : Promise.resolve();
-    void Promise.all([
-      fetch(`/api/course-narration?stageId=${encodeURIComponent(stageId)}${profileQuery}`, {
+    const load = async () => {
+      const current = useStageStore.getState();
+      if (!current.stage || current.stage.id !== stageId) {
+        throw new Error('The current classroom changed. Reopen Narration Voice.');
+      }
+      const synchronized = await fetch('/api/course-narration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         signal: request.signal,
-      }).then(async (response) => {
-        const body = (await response.json().catch(() => null)) as {
-          narration?: VoiceComparisonBootstrap;
-        } | null;
-        if (!response.ok || !body?.narration) {
-          throw new Error(responseMessage(body, 'Narration providers are unavailable.'));
-        }
-        setBootstrap(body.narration);
-        if (
-          lessonLanguage &&
-          body.narration.languages.some((candidate) => candidate.code === lessonLanguage)
-        ) {
-          setLanguage(lessonLanguage);
-        }
-        const initialLanguage = lessonLanguage ?? 'en';
-        const first = body.narration.providers.find(
-          (candidate) =>
-            candidate.available &&
-            candidate.courseNarrationEnabled &&
-            candidate.supportedLanguages.includes(initialLanguage),
+        body: JSON.stringify({
+          stageId,
+          teacherVoiceProfileId: current.stage.teacherVoiceProfileId,
+          lessonLanguage: current.stage.lessonLanguage,
+          scenes: current.scenes.map((scene) => ({
+            id: scene.id,
+            speech: speechActions(scene.actions).map((action) => ({
+              id: action.id,
+              text: action.text,
+              ...(action.audioId ? { audioId: action.audioId } : {}),
+            })),
+          })),
+        }),
+      });
+      const synchronizedBody = (await synchronized.json().catch(() => null)) as unknown;
+      if (!synchronized.ok) {
+        throw new Error(
+          responseMessage(synchronizedBody, 'The classroom narration could not be synchronized.'),
         );
-        if (first) setProviderId(first.id);
-        setVoice(
-          body.narration.bodhanVoices.find(
-            (candidate) => candidate.recordedLanguage === initialLanguage,
-          )?.id ??
-            body.narration.bodhanVoices[0]?.id ??
-            '',
-        );
-        setStyle(body.narration.bodhanStyles[0] ?? 'educational lecture');
-      }),
-      profilePromise,
-    ]).catch((caught: unknown) => {
+      }
+      const response = await fetch(`/api/course-narration?stageId=${encodeURIComponent(stageId)}`, {
+        signal: request.signal,
+      });
+      const body = (await response.json().catch(() => null)) as {
+        narration?: VoiceComparisonBootstrap;
+      } | null;
+      if (!response.ok || !body?.narration) {
+        throw new Error(responseMessage(body, 'Narration providers are unavailable.'));
+      }
+      setBootstrap(body.narration);
+      setProfile(body.narration.profile ?? null);
+      if (
+        lessonLanguage &&
+        body.narration.languages.some((candidate) => candidate.code === lessonLanguage)
+      ) {
+        setLanguage(lessonLanguage);
+      }
+      const initialLanguage = lessonLanguage ?? 'en';
+      const first = body.narration.providers.find(
+        (candidate) =>
+          candidate.available &&
+          candidate.courseNarrationEnabled &&
+          candidate.supportedLanguages.includes(initialLanguage),
+      );
+      if (first) setProviderId(first.id);
+      setVoice(
+        body.narration.bodhanVoices.find(
+          (candidate) => candidate.recordedLanguage === initialLanguage,
+        )?.id ??
+          body.narration.bodhanVoices[0]?.id ??
+          '',
+      );
+      setStyle(body.narration.bodhanStyles[0] ?? 'educational lecture');
+    };
+    void load().catch((caught: unknown) => {
       if ((caught as { name?: string }).name !== 'AbortError') {
         setLoadError(
           caught instanceof Error ? caught.message : 'Narration providers are unavailable.',
@@ -667,6 +682,12 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                   )}
                 </div>
               </section>
+
+              {segments.length === 0 ? (
+                <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+                  This classroom has no narration segments to preview or regenerate.
+                </p>
+              ) : null}
 
               {previewUrl ? (
                 <audio

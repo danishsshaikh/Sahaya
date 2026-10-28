@@ -149,4 +149,18 @@ describe('course narration versions', () => {
       ),
     ).toEqual(['sarvam', 'bodhan', 'ming3-tts']);
   });
+
+  it('round-trips legacy-compatible narration metadata through persisted stage JSON', () => {
+    const scenes = [scene('one', 1, 'Persisted transcript')];
+    const original = captureOriginalNarration(scenes, 'en', 'Qwen3-TTS 1.7B');
+    const stage = {
+      id: 'course-1',
+      name: 'Course',
+      createdAt: 1,
+      updatedAt: 1,
+      narration: { schemaVersion: 1 as const, activeVersionId: 'original', versions: [original] },
+    };
+
+    expect(JSON.parse(JSON.stringify(stage))).toEqual(stage);
+  });
 });

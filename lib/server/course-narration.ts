@@ -38,7 +38,7 @@ import {
 } from '@/lib/server/voice-comparison-config';
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
 import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
-import { TeachingVoiceError } from '@/lib/voice-cloning/types';
+import { TeachingVoiceError, toPublicVoiceProfile } from '@/lib/voice-cloning/types';
 import { enhanceGeneratedVoiceAudio } from '@/lib/voice-cloning/resemble-enhance';
 import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
 
@@ -52,14 +52,22 @@ export async function getCourseNarrationBootstrap(input: {
     `course:${input.stageId}`,
   );
   if (input.profileId) {
-    const profile = await requireOwnedReadyProfile(input.ownerId, input.profileId);
-    const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
-    return {
-      ...bootstrap,
-      savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
-        right.generatedAt.localeCompare(left.generatedAt),
-      ),
-    };
+    try {
+      const profile = await requireOwnedReadyProfile(input.ownerId, input.profileId);
+      const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
+      const publicProfile = toPublicVoiceProfile(profile);
+      return {
+        ...bootstrap,
+        savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
+          right.generatedAt.localeCompare(left.generatedAt),
+        ),
+        ...(publicProfile ? { profile: publicProfile } : {}),
+      };
+    } catch (error) {
+      // A legacy course may retain a profile id whose private profile was
+      // removed. The course still exists and preset Bodhan remains usable.
+      if (!(error instanceof TeachingVoiceError) || error.status !== 404) throw error;
+    }
   }
   const bodhanConfigured = externalVoiceProviderConfigured(getBodhanTtsConfig());
   return {

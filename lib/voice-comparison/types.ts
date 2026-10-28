@@ -1,4 +1,4 @@
-import type { VoicePreview } from '@/lib/voice-cloning/types';
+import type { PublicVoiceProfile, VoicePreview } from '@/lib/voice-cloning/types';
 
 export const DEFAULT_VOICE_COMPARISON_TEXT =
   "Newton's first law states that an object remains at rest unless acted upon by an external force.";
@@ -130,4 +130,6 @@ export interface VoiceComparisonBootstrap {
   bodhanVoices: VoiceComparisonPresetVoice[];
   bodhanStyles: string[];
   savedPreviews: VoiceComparisonPreviewResult[];
+  /** Owner-safe profile summary; remote provider voice identifiers are omitted. */
+  profile?: PublicVoiceProfile;
 }
