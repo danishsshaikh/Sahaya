@@ -4,12 +4,7 @@ import { act, createElement, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TeachingVoiceCard } from '@/components/voice-cloning/teaching-voice-card';
-import {
-  RECOMMENDED_VOICE_GENERATION_SETTINGS,
-  VOICE_SETTINGS_PRESETS,
-  type PublicVoiceProfile,
-  type VoiceModelPreviewResult,
-} from '@/lib/voice-cloning/types';
+import type { PublicVoiceProfile } from '@/lib/voice-cloning/types';
 
 const PROFILE_ID = 'vcp_existing_english';
 const roots: Root[] = [];
@@ -17,57 +12,45 @@ const roots: Root[] = [];
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-const savedProfile = {
-  id: PROFILE_ID,
-  displayName: 'My Teaching Voice',
-  provider: 'chatterbox',
-  language: 'en',
-  languageId: 'en',
-  status: 'ready',
-  modelVariant: 'v3',
-  generationSettings: RECOMMENDED_VOICE_GENERATION_SETTINGS,
-  enhancementMode: 'standard',
-  activeEngine: 'chatterbox',
-  qwenEnhancementMode: 'standard',
-  createdAt: '2026-10-16T07:00:00.000Z',
-  updatedAt: '2026-10-16T07:10:00.000Z',
-  consentTimestamp: '2026-10-16T07:00:00.000Z',
-  consentVersion: '1',
-  profileVersion: 1,
-  previewTextLanguageId: 'en',
-  preview: { format: 'wav', base64: 'b2xk', createdAt: '2026-10-16T07:10:00.000Z' },
-  previewComparison: {
-    original: { format: 'wav', base64: 'b2xk', createdAt: '2026-10-16T07:10:00.000Z' },
-    enhancementError: 'Enhanced preview is disabled for this language or deployment.',
-  },
-} as const;
+const original = { format: 'wav', base64: 'b3JpZ2luYWw=', createdAt: '2026-10-29T00:00:00Z' };
+const enhanced = { format: 'wav', base64: 'ZW5oYW5jZA==', createdAt: '2026-10-29T00:00:01Z' };
 
-function jsonResponse(body: unknown, status = 200): Response {
+function profile(ready = false): PublicVoiceProfile {
+  return {
+    id: PROFILE_ID,
+    displayName: 'My Teaching Voice',
+    provider: 'chatterbox',
+    language: 'en',
+    languageId: 'en',
+    status: 'ready',
+    activeEngine: ready ? 'qwen3-tts' : 'chatterbox',
+    enhancementMode: 'standard',
+    qwenEnhancementMode: ready ? 'resemble-enhance' : 'standard',
+    ...(ready
+      ? {
+          qwenPreview: {
+            previewModel: 'qwen3-tts-1.7b-base',
+            qwenCloneMode: 'speaker-embedding',
+            enhancementMode: 'resemble-enhance',
+            preview: original,
+            comparison: { original, enhanced },
+            previewText: 'Welcome to the course.',
+          },
+        }
+      : {}),
+    createdAt: '2026-10-26T00:00:00Z',
+    updatedAt: '2026-10-29T00:00:00Z',
+    consentTimestamp: '2026-10-26T00:00:00Z',
+    consentVersion: 'faculty-self-voice-v1',
+    profileVersion: 1,
+  };
+}
+
+function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json' },
   });
-}
-
-function generatedProfile() {
-  const original = { format: 'wav', base64: 'b3JpZ2luYWw=', createdAt: '2026-10-19T07:00:00.000Z' };
-  const enhanced = { format: 'wav', base64: 'ZW5oYW5jZWQ=', createdAt: '2026-10-19T07:00:01.000Z' };
-  return {
-    ...savedProfile,
-    draftPreview: {
-      config: {
-        modelVariant: 'v3',
-        languageId: 'hi',
-        previewTextLanguageId: 'en',
-        previewText:
-          "Newton's first law states that an object remains at rest unless acted upon by an external force.",
-        generationSettings: VOICE_SETTINGS_PRESETS.expressive,
-        enhancementMode: 'resemble-enhance',
-      },
-      preview: enhanced,
-      comparison: { original, enhanced },
-    },
-  };
 }
 
 function Harness() {
@@ -84,7 +67,7 @@ async function flush() {
   });
 }
 
-async function mountTeachingVoiceCard(): Promise<HTMLElement> {
+async function mount(): Promise<HTMLElement> {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -95,35 +78,24 @@ async function mountTeachingVoiceCard(): Promise<HTMLElement> {
 }
 
 function button(host: HTMLElement, label: string): HTMLButtonElement {
-  const match = [...host.querySelectorAll('button')].find(
+  const result = [...host.querySelectorAll('button')].find(
     (candidate) => candidate.textContent?.trim() === label,
   );
-  if (!(match instanceof HTMLButtonElement)) throw new Error(`Button not found: ${label}`);
-  return match;
+  if (!(result instanceof HTMLButtonElement)) throw new Error(`Missing button: ${label}`);
+  return result;
 }
 
-function click(target: HTMLElement) {
-  act(() => target.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-}
-
-function changeSelect(select: HTMLSelectElement, value: string) {
-  act(() => {
-    select.value = value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
-}
-
-async function openCustomization(host: HTMLElement) {
-  click(button(host, 'Manage Voice'));
-  await flush();
+function click(element: HTMLElement) {
+  act(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
 }
 
 beforeEach(() => {
   window.localStorage.clear();
-  window.localStorage.setItem(
-    'sahaya.teachingVoice.selection.v1.en',
-    JSON.stringify({ enabled: true, profileId: PROFILE_ID, enhancementMode: 'standard' }),
-  );
+  vi.stubGlobal('URL', {
+    ...URL,
+    createObjectURL: vi.fn(() => 'blob:voice'),
+    revokeObjectURL: vi.fn(),
+  });
 });
 
 afterEach(() => {
@@ -131,244 +103,163 @@ afterEach(() => {
   document.body.replaceChildren();
   window.localStorage.clear();
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(navigator, 'mediaDevices');
 });
 
-describe('Teaching Voice customization previews', () => {
-  it('shows one five-engine workspace and keeps shared text without activating Ming', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({
-        success: true,
-        profile: savedProfile,
-        previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
-      }),
+describe('simplified Teaching Voice journey', () => {
+  it('records once and submits the approved paragraph through the enhanced workflow', async () => {
+    class FakeMediaRecorder {
+      static isTypeSupported = vi.fn(() => true);
+      state: RecordingState = 'inactive';
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onstop: (() => void) | null = null;
+
+      start() {
+        this.state = 'recording';
+      }
+
+      stop() {
+        this.state = 'inactive';
+        this.ondataavailable?.({
+          data: new Blob([new Uint8Array(1024)], { type: 'audio/webm;codecs=opus' }),
+        } as BlobEvent);
+        this.onstop?.();
+      }
+    }
+    const stopTrack = vi.fn();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) },
+    });
+    vi.stubGlobal('MediaRecorder', FakeMediaRecorder);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) =>
+      String(input) === '/api/voice-cloning/enrollment'
+        ? response({ success: true, status: 'completed', profile: profile(true) })
+        : response({ success: true, profile: null }),
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const host = await mountTeachingVoiceCard();
-    await openCustomization(host);
-    for (const label of [
-      'Chatterbox V3',
-      'Qwen3-TTS 1.7B',
-      'Sarvam AI',
-      'Bodhan Indic-Speak',
-      'Ming 3.0 TTS 0.5B',
-    ]) {
-      expect(host.textContent).toContain(label);
-    }
-    expect(host.textContent).toContain('Experimental · Preview only');
-    expect(host.textContent).not.toContain('Compare Voices');
-    const textarea = host.querySelector('textarea');
-    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('Preview text not found');
+    const host = await mount();
+    const consent = host.querySelector('input[type="checkbox"]');
+    if (!(consent instanceof HTMLInputElement)) throw new Error('Missing consent');
+    act(() => consent.click());
+    click(button(host, 'Start Recording'));
+    await flush();
+    click(button(host, 'Stop Recording'));
+    await flush();
+    expect(host.querySelector('[aria-label="Selected recording"]')).not.toBeNull();
+    click(button(host, 'Generate Voice'));
+    await flush();
+
+    const enrollment = fetchMock.mock.calls.find(
+      ([input]) => String(input) === '/api/voice-cloning/enrollment',
+    );
+    const body = enrollment?.[1]?.body as FormData;
+    expect(body.get('workflow')).toBe('enhanced-qwen');
+    expect(body.get('enrollmentSource')).toBe('microphone');
+    expect(body.get('phraseId')).toBe('teaching-paragraph');
+    expect(String(body.get('referenceText'))).toContain('Today we will take a simple idea');
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(host.textContent).toContain('Voice ready');
+  });
+
+  it('upgrades an existing authorized profile with one Generate Voice action', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === 'PATCH'
+        ? response({ success: true, profile: profile(true) })
+        : response({ success: true, profile: profile(false) }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    expect(host.textContent).toContain('Your saved recording can be used');
+    expect(host.textContent).not.toContain('Customize Voice');
+    click(button(host, 'Generate Voice'));
+    await flush();
+
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(patch?.[1]?.body))).toEqual({
+      profileId: PROFILE_ID,
+      action: 'activate-enhanced-qwen',
+    });
+    expect(host.textContent).toContain('Voice ready');
+    expect(host.querySelector('[aria-label="Teaching Voice sample"]')).not.toBeNull();
+    expect(
+      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
+    ).toMatchObject({
+      enabled: true,
+      profileId: PROFILE_ID,
+      enhancementMode: 'resemble-enhance',
+    });
+  });
+
+  it('keeps the existing profile unchanged when enhanced generation fails', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === 'PATCH'
+        ? response({ success: false, error: 'Voice enhancement failed.' }, 502)
+        : response({ success: true, profile: profile(false) }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    click(button(host, 'Generate Voice'));
+    await flush();
+
+    expect(host.textContent).toContain('Voice enhancement failed. Your saved voice is unchanged.');
+    expect(host.querySelector('[aria-label="Teaching Voice sample"]')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('uploads, explicitly transcribes, permits correction, and submits one enhanced workflow', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input) === '/api/transcription') {
+        return response({ success: true, text: 'Automatic transcript' });
+      }
+      if (String(input) === '/api/voice-cloning/enrollment') {
+        return response({ success: true, status: 'completed', profile: profile(true) });
+      }
+      return response({ success: true, profile: null });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    click(button(host, 'Upload Audio'));
+    const consent = host.querySelector('input[type="checkbox"]');
+    if (!(consent instanceof HTMLInputElement)) throw new Error('Missing consent');
+    act(() => consent.click());
+    const fileInput = host.querySelector('input[type="file"]');
+    if (!(fileInput instanceof HTMLInputElement)) throw new Error('Missing file input');
+    const file = new File([new Uint8Array(1024)], 'authorized.wav', { type: 'audio/wav' });
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] });
+    act(() => fileInput.dispatchEvent(new Event('change', { bubbles: true })));
+    await flush();
+
+    click(button(host, 'Transcribe Audio'));
+    await flush();
+    const transcript = host.querySelector('textarea');
+    if (!(transcript instanceof HTMLTextAreaElement)) throw new Error('Missing transcript');
     act(() => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
-        textarea,
-        'A shared pronunciation sample.',
-      );
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      setValue?.call(transcript, 'Corrected exact transcript');
+      transcript.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    const ming = [...host.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes('Ming 3.0 TTS 0.5B'),
-    );
-    if (!(ming instanceof HTMLButtonElement)) throw new Error('Ming engine not found');
-    click(ming);
+    click(button(host, 'Generate Voice'));
     await flush();
 
-    expect((host.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
-      'A shared pronunciation sample.',
+    const enrollment = fetchMock.mock.calls.find(
+      ([input]) => String(input) === '/api/voice-cloning/enrollment',
     );
-    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
-  });
-
-  it('regenerates an enhanced V3 preview without changing the saved voice', async () => {
-    let resolvePreview!: (response: Response) => void;
-    const previewResponse = new Promise<Response>((resolve) => {
-      resolvePreview = resolve;
-    });
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === 'PATCH') return previewResponse;
-      return Promise.resolve(
-        jsonResponse({
-          success: true,
-          profile: savedProfile,
-          chatterboxClassroomEnhancementAvailable: true,
-        }),
-      );
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const host = await mountTeachingVoiceCard();
-    expect(host.textContent).toContain('Using Voice');
-    await openCustomization(host);
-    expect(button(host, 'Regenerate Preview').disabled).toBe(false);
-
-    const accent = host.querySelector('#voice-language-id');
-    if (!(accent instanceof HTMLSelectElement)) throw new Error('Accent selector not found');
-    changeSelect(accent, 'hi');
-    click(button(host, 'Expressive'));
-    expect(host.textContent).toContain('Preview required for the selected accent and style.');
-    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
-
-    click(button(host, 'Enhanced'));
-    click(button(host, 'Regenerate Preview'));
-    expect(host.textContent).toContain('Generating your voice preview...');
-
-    const previewRequest = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
-    expect(previewRequest?.[0]).toBe('/api/voice-cloning/profile');
-    expect(JSON.parse(String(previewRequest?.[1]?.body))).toMatchObject({
-      profileId: PROFILE_ID,
-      action: 'preview-model',
-      modelVariant: 'v3',
-      languageId: 'hi',
-      previewTextLanguageId: 'en',
-      generationSettings: VOICE_SETTINGS_PRESETS.expressive,
-      enhancementMode: 'resemble-enhance',
-      previewText:
-        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
-    });
-
-    resolvePreview(jsonResponse({ success: true, profile: generatedProfile() }));
-    await flush();
-
-    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
-    expect(host.querySelector('[aria-label="Resemble Enhance preview"]')).not.toBeNull();
-    expect(host.textContent).toContain('Use These Settings');
-    expect(host.textContent).toContain('Using Voice');
-    expect(host.textContent).not.toContain(
-      'Enhanced preview is disabled for this language or deployment.',
+    const body = enrollment?.[1]?.body;
+    expect(body).toBeInstanceOf(FormData);
+    expect((body as FormData).get('workflow')).toBe('enhanced-qwen');
+    expect((body as FormData).get('referenceText')).toBe('Corrected exact transcript');
+    const uploaded = (body as FormData).get('recording');
+    expect(uploaded).toBeInstanceOf(File);
+    expect(uploaded).toMatchObject({ name: file.name, size: file.size, type: file.type });
+    expect(new Uint8Array(await (uploaded as File).arrayBuffer())).toEqual(
+      new Uint8Array(await file.arrayBuffer()),
     );
-    expect(
-      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
-    ).toEqual({ enabled: true, profileId: PROFILE_ID, enhancementMode: 'standard' });
-  });
-
-  it('keeps the active profile and prior preview when regeneration fails', async () => {
-    const previouslySavedProfile = { ...savedProfile, modelVariant: 'v2' as const };
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === 'PATCH') {
-        return Promise.resolve(
-          jsonResponse({ error: 'GENERATION_FAILED', details: 'Preview service is busy.' }, 503),
-        );
-      }
-      return Promise.resolve(jsonResponse({ success: true, profile: previouslySavedProfile }));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const host = await mountTeachingVoiceCard();
-    await openCustomization(host);
-    const accent = host.querySelector('#voice-language-id');
-    if (!(accent instanceof HTMLSelectElement)) throw new Error('Accent selector not found');
-    changeSelect(accent, 'hi');
-    click(button(host, 'Regenerate Preview'));
-    await flush();
-
-    expect(host.textContent).toContain(
-      'Preview service is busy. Your saved Teaching Voice is unchanged. Try again.',
-    );
-    expect(host.textContent).toContain('Using Voice');
-    expect(
-      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
-    ).toEqual({ enabled: true, profileId: PROFILE_ID, enhancementMode: 'standard' });
-
-    const restoredAccent = host.querySelector('#voice-language-id');
-    if (!(restoredAccent instanceof HTMLSelectElement)) {
-      throw new Error('Restored accent selector not found');
-    }
-    changeSelect(restoredAccent, 'en');
-    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
-  });
-
-  it('previews and explicitly activates Qwen without changing Chatterbox enrollment metadata', async () => {
-    const original = { format: 'wav', base64: 'cXdlbi1vcmlnaW5hbA==', createdAt: 'now' };
-    const enhanced = { format: 'wav', base64: 'cXdlbi1lbmhhbmNlZA==', createdAt: 'later' };
-    const modelPreview: VoiceModelPreviewResult = {
-      previewModel: 'qwen3-tts-1.7b-base',
-      qwenCloneMode: 'speaker-embedding',
-      enhancementMode: 'standard',
-      preview: original,
-      comparison: { original, enhanced },
-      previewText:
-        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
-    };
-    let serverProfile: PublicVoiceProfile = { ...savedProfile };
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === 'PATCH') {
-        const request = JSON.parse(String(init.body)) as { action: string };
-        if (request.action === 'preview-model') {
-          serverProfile = { ...serverProfile, qwenPreview: modelPreview };
-        } else if (request.action === 'activate-engine') {
-          serverProfile = {
-            ...serverProfile,
-            activeEngine: 'qwen3-tts',
-            qwenEnhancementMode: 'resemble-enhance',
-          };
-        }
-        return Promise.resolve(
-          jsonResponse({
-            success: true,
-            profile: serverProfile,
-            previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
-            modelPreview: request.action === 'preview-model' ? modelPreview : undefined,
-            qwenClassroomEnabled: true,
-            qwenClassroomEnhancementAvailable: true,
-          }),
-        );
-      }
-      return Promise.resolve(
-        jsonResponse({
-          success: true,
-          profile: { ...savedProfile, languageId: 'hi' },
-          previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
-          qwenClassroomEnabled: true,
-          qwenClassroomEnhancementAvailable: true,
-        }),
-      );
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const host = await mountTeachingVoiceCard();
-    await openCustomization(host);
-    const qwenEngine = [...host.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes('Qwen3-TTS 1.7B'),
-    );
-    if (!(qwenEngine instanceof HTMLButtonElement)) throw new Error('Qwen engine not found');
-    click(qwenEngine);
-
-    expect(host.querySelector('#voice-language-id')).toBeNull();
-    expect(host.textContent).toContain('Uses your saved recording with Qwen3-TTS');
-    expect(host.textContent).not.toContain('Clone Method');
-    expect(host.textContent).not.toContain('Full reference (ICL)');
-    expect(host.querySelector('[aria-label="Original Chatterbox preview"]')).toBeNull();
-    click(button(host, 'Generate Preview'));
-    await flush();
-
-    const previewRequest = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
-    expect(JSON.parse(String(previewRequest?.[1]?.body))).toEqual({
-      profileId: PROFILE_ID,
-      action: 'preview-model',
-      previewModel: 'qwen3-tts-1.7b-base',
-      enhancementMode: 'standard',
-      previewText:
-        "Newton's first law states that an object remains at rest unless acted upon by an external force.",
-    });
-    expect(host.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
-    expect(host.querySelector('[aria-label="Resemble Enhance preview"]')).not.toBeNull();
-    expect(button(host, 'Original').getAttribute('aria-pressed')).toBe('true');
-    click(button(host, 'Enhanced'));
-    expect(button(host, 'Enhanced').getAttribute('aria-pressed')).toBe('true');
-    click(button(host, 'Use Qwen3-TTS'));
-    await flush();
-    const previewRequests = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH');
-    expect(JSON.parse(String(previewRequests.at(-1)?.[1]?.body))).toMatchObject({
-      action: 'activate-engine',
-      previewModel: 'qwen3-tts-1.7b-base',
-      enhancementMode: 'resemble-enhance',
-    });
-    expect(host.textContent).toContain('Qwen3-TTS is active for classroom narration.');
-    expect(host.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
-    expect(host.textContent).not.toContain('Use These Settings');
-    expect(host.textContent).toContain('Using Voice');
-    expect(
-      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
-    ).toEqual({ enabled: true, profileId: PROFILE_ID, enhancementMode: 'standard' });
+    expect(host.textContent).toContain('Voice ready');
   });
 });

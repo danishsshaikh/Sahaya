@@ -818,4 +818,73 @@ describe('voice comparison coordinator', () => {
       supportsClassroom: true,
     });
   });
+
+  it('keeps Chatterbox selectable for a Qwen-first profile before lazy registration', async () => {
+    const { getVoiceComparisonBootstrap } = await import('@/lib/server/voice-comparison');
+    const bootstrap = await getVoiceComparisonBootstrap('usr_owner', {
+      ...profile(),
+      providerReferenceId: undefined,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+      referenceAudioKey: '/private/reference.wav',
+    });
+
+    expect(bootstrap.providers.find(({ id }) => id === 'chatterbox')).toMatchObject({
+      configured: true,
+      available: true,
+      supportsClassroom: true,
+    });
+  });
+
+  it('registers Chatterbox only when explicitly requested for a Qwen-first profile', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://chatterbox.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({
+      ...original,
+      providerReferenceId: undefined,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+      referenceAudioKey,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ providerReferenceId: 'chatterbox-lazy-id' }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(Buffer.from(pcmWav()), { headers: { 'content-type': 'audio/wav' } }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request: {
+        profileId: original.id,
+        providerId: 'chatterbox',
+        text: 'Preview this exact narration.',
+        language: 'en',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://chatterbox.test/profiles');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      profileId: original.id,
+      referenceAudioPath: referenceAudioKey,
+      language: 'en',
+      modelVariant: 'v3',
+    });
+    expect(
+      (await storage.readVoiceProfile(original.id, original.ownerId))?.providerReferenceId,
+    ).toBe('chatterbox-lazy-id');
+  });
 });

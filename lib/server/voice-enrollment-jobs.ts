@@ -46,6 +46,7 @@ import {
   getChatterboxDefaultModelVariant,
   isVoiceEnhancementAllowed,
 } from '@/lib/voice-cloning/config';
+import { activateEnhancedQwenTeachingVoice } from '@/lib/server/qwen3-tts-preview';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -72,6 +73,7 @@ export interface VoiceEnrollmentJob {
   completedAt?: number;
   languageId?: string;
   provider?: 'chatterbox' | 'indicf5';
+  workflow?: 'provider-default' | 'enhanced-qwen';
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
@@ -97,6 +99,7 @@ interface VoiceEnrollmentInput {
   referenceText?: string;
   recording: IncomingVoiceClip;
   enrollmentSource: 'microphone' | 'audio-import';
+  workflow: 'provider-default' | 'enhanced-qwen';
 }
 
 const TERMINAL_JOB_TTL_MS = 30 * 60 * 1000;
@@ -325,6 +328,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
   ownerUserId: string;
   languageId: string;
   provider: 'chatterbox' | 'indicf5';
+  workflow: 'provider-default' | 'enhanced-qwen';
 }): { job: VoiceEnrollmentJob; reused: boolean } {
   const now = nowMs();
   cleanupVoiceEnrollmentJobs(now);
@@ -343,6 +347,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
     updatedAt: now,
     languageId: input.languageId,
     provider: input.provider,
+    workflow: input.workflow,
     profileId: existing?.profileId,
   };
   jobs.set(input.attemptId, job);
@@ -525,6 +530,26 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       originalRecordingMimeType: input.recording.mimeType,
     });
 
+    if (input.workflow === 'enhanced-qwen') {
+      currentPhase = 'preview_generation';
+      updateJob(input.attemptId, { phase: currentPhase });
+      const readyProfile = await activateEnhancedQwenTeachingVoice(profile, input.ownerUserId);
+      currentPhase = 'finalizing';
+      updateJob(input.attemptId, { phase: currentPhase });
+      log.info('enhanced Teaching Voice enrolled', {
+        attemptId: input.attemptId,
+        profileId,
+        operation: 'enroll',
+        status: readyProfile.status,
+        language: input.languageId,
+        provider: 'qwen3-tts',
+        enhancement: 'resemble-enhance',
+        durationMs: nowMs() - startedAt,
+        qualityDecision: normalizedReference.qualityDecision.severity,
+      });
+      return readyProfile;
+    }
+
     const config: VoiceConfiguration = {
       languageId: input.languageId,
       ...(input.providerId === 'chatterbox'
@@ -706,6 +731,11 @@ export async function parseVoiceEnrollmentForm(
     throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
   }
   const providerId = newTeachingVoiceProvider(languageId);
+  const workflow =
+    formData.get('workflow') === 'enhanced-qwen' ? 'enhanced-qwen' : 'provider-default';
+  if (workflow === 'enhanced-qwen' && languageId !== 'en') {
+    throw new TeachingVoiceError('The simplified Teaching Voice workflow requires English audio.');
+  }
   const enrollmentSource =
     formData.get('enrollmentSource') === 'audio-import' ? 'audio-import' : 'microphone';
   let referenceText: string | undefined;
@@ -720,6 +750,11 @@ export async function parseVoiceEnrollmentForm(
       );
     }
     referenceText ||= undefined;
+    if (workflow === 'enhanced-qwen' && !referenceText) {
+      throw new TeachingVoiceError(
+        'Generate or enter an accurate transcript for the uploaded audio before creating the voice.',
+      );
+    }
     if (providerId === 'indicf5' && !referenceText) {
       throw new TeachingVoiceError(
         'IndicF5 requires the exact words spoken in the imported recording. Use configured transcription or enter and verify the transcript.',
@@ -745,6 +780,7 @@ export async function parseVoiceEnrollmentForm(
     referenceText,
     recording: await readEnrollmentRecording(formData),
     enrollmentSource,
+    workflow,
   };
 }
 
@@ -769,6 +805,7 @@ export async function startVoiceEnrollment(input: VoiceEnrollmentInput): Promise
       completedAt: now,
       languageId: input.languageId,
       provider: input.providerId,
+      workflow: input.workflow,
       profileId: completedProfile.id,
       result: completedProfile,
     };
@@ -781,6 +818,7 @@ export async function startVoiceEnrollment(input: VoiceEnrollmentInput): Promise
     ownerUserId: input.ownerUserId,
     languageId: input.languageId,
     provider: input.providerId,
+    workflow: input.workflow,
   });
   return { job, reused };
 }

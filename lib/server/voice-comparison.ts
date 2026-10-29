@@ -104,8 +104,7 @@ function voiceProviderAvailability(
   let unavailableReason: string | undefined;
 
   if (providerId === 'chatterbox') {
-    available =
-      referenceReady && profileProvider === 'chatterbox' && Boolean(profile.providerReferenceId);
+    available = referenceReady && profileProvider === 'chatterbox';
     unavailableReason = available
       ? undefined
       : 'Requires a ready English Chatterbox Teaching Voice.';
@@ -642,9 +641,29 @@ async function generateProviderAudio(input: {
     }
   } else {
     const provider = getVoiceCloningProvider(request.providerId);
-    const providerReferenceId = profile.providerReferenceId;
-    if (!providerReferenceId)
+    let providerReferenceId = profile.providerReferenceId;
+    if (!providerReferenceId && request.providerId === 'chatterbox') {
+      if (!profile.referenceAudioKey) {
+        throw new TeachingVoiceError('Teaching Voice reference audio was not found.');
+      }
+      const registered = await provider.createProfile({
+        profileId: profile.id,
+        referenceAudioKey: resolveReferenceAudioPath(profile.referenceAudioKey),
+        ...(profile.referenceText ? { referenceText: profile.referenceText } : {}),
+        language: profile.language,
+        modelVariant: resolveVoiceProfileModelVariant(profile),
+        generationSettings: resolveVoiceProfileGenerationSettings(profile),
+      });
+      providerReferenceId = registered.providerReferenceId;
+      await writeVoiceProfile({
+        ...profile,
+        providerReferenceId,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    if (!providerReferenceId) {
       throw new TeachingVoiceError('Teaching Voice registration was not found.');
+    }
     for (const text of chunks) {
       audioParts.push(
         (

@@ -61,15 +61,17 @@ QWEN3_TTS_BASE_URL=http://127.0.0.1:8771
 QWEN3_TTS_TIMEOUT_MS=180000
 ```
 
-Resemble Enhanced comparison additionally follows the existing preview gates:
-`VOICE_ENHANCEMENT_ENABLED=true` and `VOICE_ENHANCEMENT_PREVIEW_ENABLED=true`.
-`VOICE_ENHANCEMENT_CLASSROOM_ENABLED` remains independent and can stay `false`.
-Set it to `true` only when faculty should be able to select Enhanced Qwen audio for classroom
-narration. Original Qwen classroom audio does not require Resemble Enhance.
+The simplified homepage Teaching Voice workflow requires every relevant gate:
+`QWEN3_TTS_PREVIEW_ENABLED=true`, `QWEN3_TTS_CLASSROOM_ENABLED=true`,
+`VOICE_ENHANCEMENT_ENABLED=true`, `VOICE_ENHANCEMENT_PREVIEW_ENABLED=true`, and
+`VOICE_ENHANCEMENT_CLASSROOM_ENABLED=true`. The profile is not marked ready if
+enhancement fails, and classroom narration does not silently fall back to original
+Qwen audio. Advanced comparison tools retain their explicit engine and output
+selection behavior.
 
-Qwen Original remains the selected preview by default. Enhanced is produced from the same Qwen
-waveform and remains optional. Unlike Chatterbox, Qwen's enhanced result is not passed through the
-Chatterbox-specific EQ, silence removal, compression, or loudness mastering preset.
+Enhanced is produced from the Qwen waveform. Unlike Chatterbox, the Qwen result is
+not passed through the Chatterbox-specific EQ, silence removal, compression, or
+loudness mastering preset before enhancement.
 
 The service currently accepts English reference transcripts and English preview
 text only. Sahaya deliberately uses the profile's reference language and saved

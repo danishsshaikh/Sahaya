@@ -1,61 +1,20 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import {
-  Check,
-  CircleAlert,
-  FileAudio,
-  Loader2,
-  Mic,
-  Play,
-  RotateCcw,
-  SlidersHorizontal,
-  Trash2,
-  Volume2,
-  X,
-} from 'lucide-react';
+import { CheckCircle2, CircleAlert, FileAudio, Loader2, Mic, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { VoiceComparisonPanel } from '@/components/voice-cloning/voice-comparison-panel';
-import { DEFAULT_VOICE_COMPARISON_TEXT } from '@/lib/voice-comparison/types';
 import { cn } from '@/lib/utils';
-import {
-  CHATTERBOX_LANGUAGE_LABELS,
-  CHATTERBOX_SUPPORTED_LANGUAGE_IDS,
-} from '@/lib/audio/tts-language';
-import { getVoiceEnrollmentPhrases, getVoicePreviewText } from '@/lib/voice-cloning/phrases';
-import {
-  isChatterboxFacultySynthesisLanguage,
-  newTeachingVoiceProvider,
-  resolveTeachingVoiceLanguage,
-} from '@/lib/voice-cloning/language';
+import { getVoiceEnrollmentPhrases } from '@/lib/voice-cloning/phrases';
 import {
   MAX_RECORDING_SIZE_BYTES,
   MIN_RECORDING_SIZE_BYTES,
   VOICE_ENROLLMENT_TARGET_SECONDS,
 } from '@/lib/voice-cloning/limits';
-import {
-  DEFAULT_CHATTERBOX_MODEL_VARIANT,
-  RECOMMENDED_VOICE_GENERATION_SETTINGS,
-  VOICE_SETTINGS_PRESETS,
-  voiceGenerationPresetForSettings,
-  resolveVoiceProfileActiveEngine,
-  resolveVoiceProfileProvider,
-  type ChatterboxModelVariant,
-  type PublicVoiceProfile,
-  type VoiceConfiguration,
-  type VoiceEnhancementMode,
-  type VoiceGenerationSettings,
-  type VoiceModelPreviewResult,
-  type VoicePreviewModel,
-  type VoicePreviewTextLanguage,
-  type VoiceSettingsPreset,
-} from '@/lib/voice-cloning/types';
+import type { PublicVoiceProfile } from '@/lib/voice-cloning/types';
 import { readVoiceApiResponse, voiceFetchError } from '@/lib/voice-cloning/api-client';
 import {
   activateTeachingVoiceSelection,
-  clearTeachingVoiceSelection,
-  disableTeachingVoiceSelection,
   isTeachingVoiceExplicitlyDisabled,
   readTeachingVoiceSelection,
 } from '@/lib/voice-cloning/selection-client';
@@ -65,25 +24,14 @@ interface TeachingVoiceCardProps {
   onSelectedProfileIdChange: (profileId: string | undefined) => void;
 }
 
-type ClipState = {
-  blob?: Blob;
-  url?: string;
-  duration?: number;
-  error?: string;
-};
-
+type EnrollmentMode = 'microphone' | 'audio-import';
+type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
+type ClipState = { blob?: Blob; url?: string; duration?: number; error?: string };
 type ApiProfileResponse = {
-  success?: boolean;
   profile?: PublicVoiceProfile | null;
   error?: string;
   details?: string;
-  previewModels?: VoicePreviewModel[];
-  modelPreview?: VoiceModelPreviewResult;
-  qwenClassroomEnabled?: boolean;
-  qwenClassroomEnhancementAvailable?: boolean;
-  chatterboxClassroomEnhancementAvailable?: boolean;
 };
-
 type VoiceEnrollmentResponse = ApiProfileResponse & {
   attemptId?: string;
   status?: 'queued' | 'running' | 'completed' | 'failed';
@@ -92,29 +40,22 @@ type VoiceEnrollmentResponse = ApiProfileResponse & {
     | 'quality_check'
     | 'preprocessing'
     | 'provider_registration'
+    | 'preview_generation'
+    | 'mastering'
     | 'finalizing'
     | 'completed'
     | 'failed';
   pollIntervalMs?: number;
 };
 
-type SetupStep = 'record' | 'preview' | 'review';
-type EnrollmentMode = 'microphone' | 'audio-import';
-type BusyPhase = 'checking' | 'preparing' | 'generating' | 'finishing';
-type CustomizationEngine = 'chatterbox' | 'qwen3-tts' | 'sarvam' | 'bodhan' | 'ming3-tts';
-
 const BUSY_LABELS: Record<BusyPhase, string> = {
-  checking: 'Checking your recording...',
-  preparing: 'Preparing voice sample...',
-  generating: 'Generating your voice preview...',
-  finishing: 'Finishing audio...',
+  checking: 'Checking your recording…',
+  preparing: 'Preparing your voice…',
+  generating: 'Generating your voice…',
+  finishing: 'Saving your voice…',
 };
-
-const ENROLLMENT_ATTEMPT_STORAGE_PREFIX = 'sahaya.teachingVoice.enrollmentAttempt';
-
-function enrollmentStorageKey(language: string): string {
-  return `${ENROLLMENT_ATTEMPT_STORAGE_PREFIX}.${language}`;
-}
+const ENROLLMENT_ATTEMPT_STORAGE_KEY = 'sahaya.teachingVoice.enrollmentAttempt.en';
+const ENROLLMENT_PHRASE = getVoiceEnrollmentPhrases('en')[0];
 
 function createEnrollmentAttemptId(): string {
   return (
@@ -123,88 +64,9 @@ function createEnrollmentAttemptId(): string {
   );
 }
 
-function busyPhaseForEnrollmentPhase(phase?: VoiceEnrollmentResponse['phase']): BusyPhase {
-  if (phase === 'quality_check') return 'checking';
-  if (phase === 'preprocessing') return 'preparing';
-  if (phase === 'finalizing' || phase === 'completed') return 'finishing';
-  return 'generating';
-}
-
-const PRESET_OPTIONS: Array<{
-  value: Exclude<VoiceSettingsPreset, 'custom'>;
-  label: string;
-}> = [
-  { value: 'natural', label: 'Natural' },
-  { value: 'expressive', label: 'Expressive' },
-];
-
-const PRESET_DESCRIPTIONS: Record<Exclude<VoiceSettingsPreset, 'custom'>, string> = {
-  natural: 'Clear, balanced classroom narration.',
-  expressive: 'More emphasis for stories and key ideas.',
-  'accent-test': 'Legacy saved style.',
-};
-
-function cloneRecommendedSettings(): VoiceGenerationSettings {
-  return { ...RECOMMENDED_VOICE_GENERATION_SETTINGS };
-}
-
-function normalizeProfileLanguageId(profile: PublicVoiceProfile | null): string {
-  return resolveTeachingVoiceLanguage(profile?.languageId || profile?.language) || 'en';
-}
-
-function profileSelectionLanguage(profile: PublicVoiceProfile | null): string {
-  return resolveTeachingVoiceLanguage(profile?.language) || normalizeProfileLanguageId(profile);
-}
-
-function profileConfiguration(profile: PublicVoiceProfile): VoiceConfiguration {
-  return {
-    languageId: normalizeProfileLanguageId(profile),
-    ...(resolveVoiceProfileProvider(profile) === 'chatterbox'
-      ? {
-          modelVariant: profile.modelVariant,
-          generationSettings: profile.generationSettings ?? cloneRecommendedSettings(),
-          enhancementMode: profile.enhancementMode ?? 'standard',
-        }
-      : {}),
-  };
-}
-
-function voiceConfigurationsEqual(left: VoiceConfiguration, right: VoiceConfiguration): boolean {
-  if (
-    left.modelVariant !== right.modelVariant ||
-    left.languageId !== right.languageId ||
-    (left.enhancementMode ?? 'standard') !== (right.enhancementMode ?? 'standard')
-  )
-    return false;
-  const a = left.generationSettings;
-  const b = right.generationSettings;
-  if (!a || !b) return a === b;
-  return Object.keys(RECOMMENDED_VOICE_GENERATION_SETTINGS).every((key) => {
-    const typedKey = key as keyof VoiceGenerationSettings;
-    return Math.abs(a[typedKey] - b[typedKey]) < 0.000001;
-  });
-}
-
-function voiceSynthesisConfigurationsEqual(
-  left: VoiceConfiguration,
-  right: VoiceConfiguration,
-): boolean {
-  return voiceConfigurationsEqual(
-    { ...left, enhancementMode: 'standard' },
-    { ...right, enhancementMode: 'standard' },
-  );
-}
-
 function chooseMimeType(): string {
-  // Ogg/Opus can be sent to Sarvam unchanged. Chromium falls back to WebM,
-  // which is retained exactly but is never silently transcoded for Sarvam.
   const candidates = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm'];
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
-}
-
-function formatSeconds(value: number | undefined): string {
-  if (!value) return '';
-  return `${value.toFixed(1)}s`;
 }
 
 function formatClock(value: number): string {
@@ -213,203 +75,61 @@ function formatClock(value: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function phaseForEnrollment(phase?: VoiceEnrollmentResponse['phase']): BusyPhase {
+  if (phase === 'quality_check') return 'checking';
+  if (phase === 'preprocessing') return 'preparing';
+  if (phase === 'finalizing' || phase === 'completed') return 'finishing';
+  return 'generating';
+}
+
+function enhancedSample(profile: PublicVoiceProfile | null) {
+  return profile?.qwenPreview?.comparison.enhanced;
+}
+
+function isReady(profile: PublicVoiceProfile | null): profile is PublicVoiceProfile {
+  return Boolean(
+    profile?.status === 'ready' &&
+    profile.activeEngine === 'qwen3-tts' &&
+    profile.qwenEnhancementMode === 'resemble-enhance' &&
+    enhancedSample(profile),
+  );
+}
+
 export function TeachingVoiceCard({
   selectedProfileId,
   onSelectedProfileIdChange,
 }: TeachingVoiceCardProps) {
-  const [enrollmentLanguage, setEnrollmentLanguage] = useState('en');
-  const enrollmentPhrase = getVoiceEnrollmentPhrases(enrollmentLanguage)[0];
-  const importTranscriptRequired = newTeachingVoiceProvider(enrollmentLanguage) === 'indicf5';
-  const enrollmentParagraph = enrollmentPhrase?.text;
   const [profile, setProfile] = useState<PublicVoiceProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
-  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState<EnrollmentMode>('microphone');
   const [consented, setConsented] = useState(false);
-  const [enrollmentMode, setEnrollmentMode] = useState<EnrollmentMode>('microphone');
-  const [voiceName, setVoiceName] = useState('My Teaching Voice');
-  const [importTranscript, setImportTranscript] = useState('');
-  const [transcribingImport, setTranscribingImport] = useState(false);
-  const [recordingFileName, setRecordingFileName] = useState('teaching-voice.webm');
   const [recording, setRecording] = useState<ClipState>({});
+  const [recordingFileName, setRecordingFileName] = useState('teaching-voice.webm');
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [recordingPending, setRecordingPending] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [draftModelVariant, setDraftModelVariant] = useState<ChatterboxModelVariant>(
-    DEFAULT_CHATTERBOX_MODEL_VARIANT,
-  );
-  const [draftLanguageId, setDraftLanguageId] = useState('en');
-  const [previewTextLanguageId, setPreviewTextLanguageId] =
-    useState<VoicePreviewTextLanguage>('en');
-  const [draftGenerationSettings, setDraftGenerationSettings] =
-    useState<VoiceGenerationSettings>(cloneRecommendedSettings);
-  const [draftEnhancementMode, setDraftEnhancementMode] =
-    useState<VoiceEnhancementMode>('standard');
-  const [availablePreviewModels, setAvailablePreviewModels] = useState<VoicePreviewModel[]>([
-    'chatterbox-v3',
-  ]);
-  const [draftPreviewModel, setDraftPreviewModel] = useState<VoicePreviewModel>('chatterbox-v3');
-  const [qwenEnhancementMode, setQwenEnhancementMode] = useState<VoiceEnhancementMode>('standard');
-  const [qwenClassroomEnabled, setQwenClassroomEnabled] = useState(false);
-  const [qwenClassroomEnhancementAvailable, setQwenClassroomEnhancementAvailable] = useState(false);
-  const [chatterboxClassroomEnhancementAvailable, setChatterboxClassroomEnhancementAvailable] =
-    useState(false);
-  const [customizationEngine, setCustomizationEngine] = useState<CustomizationEngine>('chatterbox');
-  const [externalPreviewEngine, setExternalPreviewEngine] = useState<
-    'sarvam' | 'bodhan' | 'ming3-tts'
-  >('sarvam');
-  const [previewText, setPreviewText] = useState(DEFAULT_VOICE_COMPARISON_TEXT);
+  const [transcript, setTranscript] = useState('');
+  const [transcribing, setTranscribing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [busyPhase, setBusyPhase] = useState<BusyPhase | null>(null);
-  const [busyStartedAt, setBusyStartedAt] = useState<number | null>(null);
-  const [busyElapsedSeconds, setBusyElapsedSeconds] = useState(0);
-  const [setupStep, setSetupStep] = useState<SetupStep>('record');
-  const [customizeOpen, setCustomizeOpen] = useState(false);
-  const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [enrollmentAttemptId, setEnrollmentAttemptId] = useState<string | null>(null);
-  const [recordingRequiresRetry, setRecordingRequiresRetry] = useState(false);
+  const [busyPhase, setBusyPhase] = useState<BusyPhase>('checking');
   const [error, setError] = useState<string | null>(null);
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const candidateAudioRef = useRef<HTMLAudioElement | null>(null);
-  const enrollmentRequestInFlightRef = useRef(false);
-  const previewRequestInFlightRef = useRef(false);
-  const enrollmentPollTokenRef = useRef(0);
-  const busyTimersRef = useRef<number[]>([]);
+  const requestInFlightRef = useRef(false);
+  const pollTokenRef = useRef(0);
+  const recordingUrlRef = useRef<string | undefined>(undefined);
   const selectedProfileIdRef = useRef(selectedProfileId);
   const onSelectedProfileIdChangeRef = useRef(onSelectedProfileIdChange);
-  const recordingUrlRef = useRef<string | undefined>(undefined);
 
-  const readyProfile = profile?.status === 'ready' ? profile : null;
-  const readyProfileDisabled = readyProfile
-    ? isTeachingVoiceExplicitlyDisabled(
-        readTeachingVoiceSelection(profileSelectionLanguage(readyProfile)),
-        readyProfile.id,
-      )
+  const sample = enhancedSample(profile);
+  const ready = isReady(profile);
+  const persistedSelection = profile ? readTeachingVoiceSelection('en') : undefined;
+  const intentionallyDisabled = profile
+    ? isTeachingVoiceExplicitlyDisabled(persistedSelection, profile.id)
     : false;
-  const isChatterboxProfile = !!profile && resolveVoiceProfileProvider(profile) === 'chatterbox';
-  const isQwenPreview = draftPreviewModel === 'qwen3-tts-1.7b-base';
-  const selectedEnhancementMode = isQwenPreview ? qwenEnhancementMode : draftEnhancementMode;
-  const qwenModelPreview = profile?.qwenPreview;
-  const activeEngine = readyProfile
-    ? resolveVoiceProfileActiveEngine(readyProfile)
-    : isChatterboxProfile
-      ? 'chatterbox'
-      : 'indicf5';
-  const selectedEngine = isQwenPreview ? 'qwen3-tts' : 'chatterbox';
-  const draftConfiguration: VoiceConfiguration = {
-    languageId: draftLanguageId,
-    ...(isChatterboxProfile
-      ? {
-          modelVariant: draftModelVariant,
-          generationSettings: draftGenerationSettings,
-          enhancementMode: draftEnhancementMode,
-        }
-      : {}),
-  };
-  const draftPreset = voiceGenerationPresetForSettings(draftGenerationSettings);
-  const draftPresetDescription =
-    draftPreset === 'custom'
-      ? 'Manual settings are active. Choose a style above to return to a preset.'
-      : PRESET_DESCRIPTIONS[draftPreset];
-  const acceptedConfiguration = readyProfile ? profileConfiguration(readyProfile) : null;
-  const legacyPreviewText = getVoicePreviewText('en', 'chatterbox');
-  const draftMatchesAccepted =
-    acceptedConfiguration && voiceConfigurationsEqual(draftConfiguration, acceptedConfiguration);
-  const matchingDraftPreview =
-    profile?.draftPreview &&
-    voiceSynthesisConfigurationsEqual(profile.draftPreview.config, draftConfiguration) &&
-    (profile.draftPreview.config.previewTextLanguageId ?? 'en') === previewTextLanguageId &&
-    (profile.draftPreview.config.previewText ?? legacyPreviewText) === previewText
-      ? profile.draftPreview
-      : undefined;
-  const acceptedPreviewMatches = Boolean(
-    acceptedConfiguration &&
-    voiceSynthesisConfigurationsEqual(draftConfiguration, acceptedConfiguration) &&
-    (readyProfile?.previewTextLanguageId ?? 'en') === previewTextLanguageId &&
-    (readyProfile?.previewText ?? legacyPreviewText) === previewText,
-  );
-  const qwenPreviewMatches =
-    Boolean(qwenModelPreview) &&
-    (qwenModelPreview?.previewText ?? legacyPreviewText) === previewText;
-  const matchingComparison = isQwenPreview
-    ? qwenPreviewMatches
-      ? qwenModelPreview?.comparison
-      : undefined
-    : (matchingDraftPreview?.comparison ??
-      (acceptedPreviewMatches ? readyProfile?.previewComparison : undefined));
-  const selectedComparison =
-    matchingComparison ??
-    (isQwenPreview
-      ? qwenModelPreview?.comparison
-      : (profile?.draftPreview?.comparison ?? readyProfile?.previewComparison));
-  const selectedPreview = isQwenPreview
-    ? selectedComparison
-      ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
-        ? selectedComparison.enhanced
-        : selectedComparison.original
-      : undefined
-    : selectedComparison
-      ? selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced
-        ? selectedComparison.enhanced
-        : selectedComparison.original
-      : (matchingDraftPreview?.preview ??
-        (acceptedPreviewMatches ? readyProfile?.preview : undefined) ??
-        profile?.draftPreview?.preview ??
-        readyProfile?.preview);
-  const previewOutdated = Boolean(
-    isQwenPreview
-      ? !qwenPreviewMatches
-      : isChatterboxProfile &&
-          (profile?.draftPreview?.preview || readyProfile?.preview) &&
-          !matchingDraftPreview &&
-          !acceptedPreviewMatches,
-  );
-  const canApplyDraftConfiguration = Boolean(
-    customizationEngine === 'chatterbox' &&
-    !isQwenPreview &&
-    !draftMatchesAccepted &&
-    (matchingDraftPreview || acceptedPreviewMatches) &&
-    (draftEnhancementMode === 'standard' || matchingComparison?.enhanced),
-  );
-  const recordingReady = Boolean(recording.blob);
-  const canSubmitRecording = recordingReady && !recordingRequiresRetry && !busy;
-  const recordingGuidance =
-    recordingStartedAt !== null
-      ? 'Speak naturally and do not rush.'
-      : `Most recordings take about 10 to ${VOICE_ENROLLMENT_TARGET_SECONDS} seconds.`;
-
-  useEffect(() => {
-    recordingUrlRef.current = recording.url;
-  }, [recording.url]);
-
-  useEffect(() => {
-    if (recordingStartedAt === null) return undefined;
-    const updateElapsed = () => setElapsedSeconds((performance.now() - recordingStartedAt) / 1000);
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 250);
-    return () => window.clearInterval(timer);
-  }, [recordingStartedAt]);
-
-  useEffect(() => {
-    if (!busy || busyStartedAt === null) {
-      setBusyElapsedSeconds(0);
-      return undefined;
-    }
-    const updateElapsed = () => setBusyElapsedSeconds((performance.now() - busyStartedAt) / 1000);
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 250);
-    return () => window.clearInterval(timer);
-  }, [busy, busyStartedAt]);
-
-  useEffect(
-    () => () => {
-      enrollmentPollTokenRef.current += 1;
-      if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
-      busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    },
-    [],
-  );
+  const selected = ready && selectedProfileId === profile.id;
 
   useEffect(() => {
     selectedProfileIdRef.current = selectedProfileId;
@@ -417,561 +137,228 @@ export function TeachingVoiceCard({
   }, [onSelectedProfileIdChange, selectedProfileId]);
 
   useEffect(() => {
+    recordingUrlRef.current = recording.url;
+  }, [recording.url]);
+
+  useEffect(() => {
+    if (recordingStartedAt === null) return undefined;
+    const update = () => setElapsedSeconds((performance.now() - recordingStartedAt) / 1000);
+    update();
+    const timer = window.setInterval(update, 250);
+    return () => window.clearInterval(timer);
+  }, [recordingStartedAt]);
+
+  useEffect(
+    () => () => {
+      pollTokenRef.current += 1;
+      if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
+      if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    },
+    [],
+  );
+
+  const activateReadyProfile = (next: PublicVoiceProfile) => {
+    activateTeachingVoiceSelection('en', next.id, 'resemble-enhance');
+    selectedProfileIdRef.current = next.id;
+    onSelectedProfileIdChangeRef.current(next.id);
+  };
+
+  function clearRecording() {
+    setRecording((current) => {
+      if (current.url) URL.revokeObjectURL(current.url);
+      return {};
+    });
+    setRecordingStartedAt(null);
+    setElapsedSeconds(0);
+    setRecordingFileName('teaching-voice.webm');
+  }
+
+  const applyCompletedProfile = (next: PublicVoiceProfile): boolean => {
+    if (!isReady(next)) {
+      setError('Voice generation did not finish successfully. Your previous voice is unchanged.');
+      return false;
+    }
+    setProfile(next);
+    setEditing(false);
+    setError(null);
+    setConsented(false);
+    setTranscript('');
+    clearRecording();
+    activateReadyProfile(next);
+    return true;
+  };
+
+  useEffect(() => {
     let cancelled = false;
-    setProfileLoading(true);
-    const query = new URLSearchParams({ language: enrollmentLanguage });
-    if (selectedProfileIdRef.current) query.set('profileId', selectedProfileIdRef.current);
-    fetch(`/api/voice-cloning/profile?${query}`)
-      .then(async (res) => {
-        return readVoiceApiResponse<ApiProfileResponse>(res);
-      })
-      .then((data: ApiProfileResponse | null) => {
+    const load = async () => {
+      setProfileLoading(true);
+      try {
+        const request = async (profileId?: string) => {
+          const query = new URLSearchParams({ language: 'en' });
+          if (profileId) query.set('profileId', profileId);
+          return readVoiceApiResponse<ApiProfileResponse>(
+            await fetch(`/api/voice-cloning/profile?${query}`),
+          );
+        };
+        let data: ApiProfileResponse;
+        try {
+          data = await request(selectedProfileIdRef.current);
+        } catch {
+          data = await request();
+        }
         if (cancelled) return;
-        const next = data?.profile ?? null;
-        const previewModels = data?.previewModels?.length
-          ? data.previewModels
-          : (['chatterbox-v3'] as VoicePreviewModel[]);
-        setAvailablePreviewModels(previewModels);
-        const restoredPreviewModel =
-          next?.activeEngine === 'qwen3-tts' && previewModels.includes('qwen3-tts-1.7b-base')
-            ? 'qwen3-tts-1.7b-base'
-            : 'chatterbox-v3';
-        setDraftPreviewModel(restoredPreviewModel);
-        setCustomizationEngine(
-          restoredPreviewModel === 'qwen3-tts-1.7b-base' ? 'qwen3-tts' : 'chatterbox',
-        );
-        setQwenEnhancementMode(next?.qwenEnhancementMode ?? 'standard');
-        setQwenClassroomEnabled(data?.qwenClassroomEnabled === true);
-        setQwenClassroomEnhancementAvailable(data?.qwenClassroomEnhancementAvailable === true);
-        setChatterboxClassroomEnhancementAvailable(
-          data?.chatterboxClassroomEnhancementAvailable === true,
-        );
-        setPreviewText(
-          restoredPreviewModel === 'qwen3-tts-1.7b-base'
-            ? (next?.qwenPreview?.previewText ?? DEFAULT_VOICE_COMPARISON_TEXT)
-            : (next?.draftPreview?.config.previewText ??
-                next?.previewText ??
-                DEFAULT_VOICE_COMPARISON_TEXT),
-        );
+        const next = data.profile ?? null;
         setProfile(next);
-        if (next?.status === 'preview-ready' || next?.status === 'ready') {
-          setSetupStep('review');
-          setCustomizeOpen(false);
+        setEditing(!next);
+        if (
+          isReady(next) &&
+          !isTeachingVoiceExplicitlyDisabled(readTeachingVoiceSelection('en'), next.id)
+        ) {
+          activateReadyProfile(next);
         }
-        if (next?.draftPreview) {
-          setDraftModelVariant(
-            next.draftPreview.config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT,
-          );
-          setDraftLanguageId(next.draftPreview.config.languageId);
-          setPreviewTextLanguageId(next.draftPreview.config.previewTextLanguageId ?? 'en');
-          setDraftGenerationSettings(
-            next.draftPreview.config.generationSettings ?? cloneRecommendedSettings(),
-          );
-          setDraftEnhancementMode(next.draftPreview.config.enhancementMode ?? 'standard');
-        } else if (next) {
-          const config = profileConfiguration(next);
-          setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
-          setDraftLanguageId(config.languageId);
-          setPreviewTextLanguageId(next.previewTextLanguageId ?? 'en');
-          setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
-          setDraftEnhancementMode(config.enhancementMode ?? 'standard');
+      } catch (caught) {
+        if (!cancelled) {
+          setEditing(true);
+          setError(caught instanceof Error ? caught.message : 'Could not load Teaching Voice.');
         }
-        if (next?.status === 'ready') {
-          const language = profileSelectionLanguage(next);
-          const persisted = readTeachingVoiceSelection(language);
-          const selectedId = selectedProfileIdRef.current;
-          const mayRestore = !selectedId || selectedId === next.id;
-          const explicitlyDisabled = isTeachingVoiceExplicitlyDisabled(persisted, next.id);
-          if (!explicitlyDisabled && mayRestore) {
-            activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
-            selectedProfileIdRef.current = next.id;
-            onSelectedProfileIdChangeRef.current(next.id);
-          }
-        }
-      })
-      .catch(() => {
-        if (!cancelled)
-          setError('Could not load Teaching Voice. Try again before selecting a voice.');
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setProfileLoading(false);
-      });
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
     };
-  }, [enrollmentLanguage]);
-
-  useEffect(() => {
-    return () => {
-      if (recorderRef.current?.state === 'recording') {
-        recorderRef.current.stop();
-      }
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-    };
   }, []);
 
-  const replaceRecording = (next: ClipState) => {
-    if (candidateAudioRef.current) {
-      candidateAudioRef.current.pause();
-      candidateAudioRef.current.currentTime = 0;
-    }
-    setRecording((prev) => {
-      if (prev.url) URL.revokeObjectURL(prev.url);
-      return next;
-    });
-    setEnrollmentError(null);
-    setPreviewError(null);
-    setRecordingRequiresRetry(false);
-    setSetupStep('record');
-  };
+  const finishAttempt = () => window.localStorage.removeItem(ENROLLMENT_ATTEMPT_STORAGE_KEY);
 
-  const clearCandidateRecording = () => {
-    enrollmentPollTokenRef.current += 1;
-    if (enrollmentAttemptId) {
-      window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
-      setEnrollmentAttemptId(null);
-    }
-    busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    busyTimersRef.current = [];
-    replaceRecording({});
-    setBusy(false);
-    setBusyPhase(null);
-    setBusyStartedAt(null);
-    setEnrollmentError(null);
-    setPreviewError(null);
-    setError(null);
-    setRecordingRequiresRetry(false);
-    setSetupStep('record');
-  };
-
-  const prepareForRerecord = () => {
-    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    recorderRef.current = null;
-    streamRef.current = null;
-    setRecordingStartedAt(null);
-    setElapsedSeconds(0);
-    clearCandidateRecording();
-  };
-
-  const activateProfile = (next: PublicVoiceProfile) => {
-    const language = profileSelectionLanguage(next);
-    activateTeachingVoiceSelection(language, next.id, next.enhancementMode ?? 'standard');
-    selectedProfileIdRef.current = next.id;
-    onSelectedProfileIdChange(next.id);
-  };
-
-  const disableProfile = (next: PublicVoiceProfile) => {
-    disableTeachingVoiceSelection(profileSelectionLanguage(next), next.id);
-    selectedProfileIdRef.current = undefined;
-    onSelectedProfileIdChange(undefined);
-  };
-
-  const startBusy = (initialPhase: BusyPhase, stagedPhases: Array<[number, BusyPhase]> = []) => {
-    busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    busyTimersRef.current = stagedPhases.map(([delay, phase]) =>
-      window.setTimeout(() => setBusyPhase(phase), delay),
-    );
+  const pollEnrollment = async (attemptId: string) => {
+    const token = ++pollTokenRef.current;
+    requestInFlightRef.current = true;
     setBusy(true);
-    setBusyPhase(initialPhase);
-    setBusyStartedAt(performance.now());
-  };
-
-  const stopBusy = () => {
-    busyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    busyTimersRef.current = [];
-    setBusy(false);
-    setBusyPhase(null);
-    setBusyStartedAt(null);
-  };
-
-  const applyEnrollmentProfile = (next: PublicVoiceProfile) => {
-    setProfile(next);
-    setSetupStep('review');
-    setCustomizeOpen(false);
-    setRecordingRequiresRetry(false);
-    const config = next.draftPreview?.config ?? profileConfiguration(next);
-    setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
-    setDraftLanguageId(config.languageId);
-    setPreviewTextLanguageId(next.draftPreview?.config.previewTextLanguageId ?? 'en');
-    setPreviewText(
-      next.draftPreview?.config.previewText ?? next.previewText ?? DEFAULT_VOICE_COMPARISON_TEXT,
-    );
-    setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
-    setDraftEnhancementMode(config.enhancementMode ?? 'standard');
-  };
-
-  const finishEnrollmentAttempt = (attemptId: string) => {
-    setEnrollmentAttemptId(null);
-    window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
-    if (enrollmentAttemptId === attemptId) setEnrollmentAttemptId(null);
-  };
-
-  const pollEnrollmentAttempt = async (attemptId: string) => {
-    const pollToken = ++enrollmentPollTokenRef.current;
-    enrollmentRequestInFlightRef.current = true;
-    setEnrollmentAttemptId(attemptId);
-    window.localStorage.setItem(enrollmentStorageKey(enrollmentLanguage), attemptId);
-    setSetupStep('preview');
-    if (!busy) startBusy('generating', [[14000, 'finishing']]);
-
+    setBusyPhase('generating');
+    window.localStorage.setItem(ENROLLMENT_ATTEMPT_STORAGE_KEY, attemptId);
     try {
-      while (pollToken === enrollmentPollTokenRef.current) {
-        let data: VoiceEnrollmentResponse | null = null;
+      while (token === pollTokenRef.current) {
         try {
-          const response = await fetch(
-            `/api/voice-cloning/enrollment/${encodeURIComponent(attemptId)}`,
+          const data = await readVoiceApiResponse<VoiceEnrollmentResponse>(
+            await fetch(`/api/voice-cloning/enrollment/${encodeURIComponent(attemptId)}`),
           );
-          data = await readVoiceApiResponse<VoiceEnrollmentResponse>(response);
-        } catch (error) {
-          const parsed = voiceFetchError(error);
-          setPreviewError(
-            parsed.kind === 'non-json' || parsed.kind === 'network'
-              ? 'Voice creation could not be confirmed. Checking enrollment status...'
+          if (token !== pollTokenRef.current) return;
+          setBusyPhase(phaseForEnrollment(data.phase));
+          if (data.status === 'completed' && data.profile) {
+            finishAttempt();
+            applyCompletedProfile(data.profile);
+            return;
+          }
+          if (data.status === 'failed') {
+            finishAttempt();
+            setError(data.error || 'Voice generation failed. Please try again.');
+            return;
+          }
+        } catch (caught) {
+          const parsed = voiceFetchError(caught);
+          if (
+            (parsed.kind === 'http' || parsed.kind === 'non-json') &&
+            parsed.status !== undefined &&
+            parsed.status >= 400 &&
+            parsed.status < 500
+          ) {
+            finishAttempt();
+            setError(parsed.message);
+            return;
+          }
+          setError(
+            parsed.kind === 'network' || parsed.kind === 'non-json'
+              ? 'Voice generation could not be confirmed. Checking again…'
               : parsed.message,
           );
         }
-
-        if (pollToken !== enrollmentPollTokenRef.current) return;
-
-        if (data?.phase) setBusyPhase(busyPhaseForEnrollmentPhase(data.phase));
-        if (data?.status === 'completed' && data.profile) {
-          applyEnrollmentProfile(data.profile);
-          setPreviewError(null);
-          finishEnrollmentAttempt(attemptId);
-          return;
-        }
-        if (data?.status === 'failed') {
-          finishEnrollmentAttempt(attemptId);
-          setPreviewError(data.error || 'Voice enrollment failed. Please try again.');
-          return;
-        }
-
-        const delay = Math.max(1500, Math.min(data?.pollIntervalMs ?? 3000, 8000));
-        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        await new Promise((resolve) => window.setTimeout(resolve, 3000));
       }
     } finally {
-      if (pollToken === enrollmentPollTokenRef.current) {
-        enrollmentRequestInFlightRef.current = false;
-        stopBusy();
+      if (token === pollTokenRef.current) {
+        requestInFlightRef.current = false;
+        setBusy(false);
       }
     }
   };
 
   useEffect(() => {
-    const storedAttemptId = window.localStorage.getItem(enrollmentStorageKey(enrollmentLanguage));
-    if (!storedAttemptId || profile?.status === 'preview-ready' || profile?.status === 'ready') {
-      return;
-    }
-    setOpen(true);
-    setPreviewError('Checking Teaching Voice enrollment status...');
-    void pollEnrollmentAttempt(storedAttemptId);
+    const attemptId = window.localStorage.getItem(ENROLLMENT_ATTEMPT_STORAGE_KEY);
+    if (!attemptId) return;
+    void pollEnrollment(attemptId);
     return () => {
-      enrollmentPollTokenRef.current += 1;
+      pollTokenRef.current += 1;
     };
-    // The poller deliberately owns its own token lifecycle; re-enter only when
-    // the selected enrollment language changes.
+    // Resume only once after mount. The poller owns its lifecycle token.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrollmentLanguage]);
+  }, []);
 
-  const applyPreset = (preset: VoiceSettingsPreset) => {
-    if (preset === 'custom') return;
-    setDraftGenerationSettings({ ...VOICE_SETTINGS_PRESETS[preset] });
+  const beginReplacement = (nextMode: EnrollmentMode) => {
+    if (busy) return;
+    clearRecording();
+    setMode(nextMode);
+    setEditing(true);
+    setConsented(false);
+    setTranscript('');
+    setError(null);
   };
-
-  const activateSelectedEngine = async () => {
-    if (!profile || previewRequestInFlightRef.current) return;
-    previewRequestInFlightRef.current = true;
-    startBusy('finishing');
-    setPreviewError(null);
-    try {
-      const response = await fetch('/api/voice-cloning/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profileId: profile.id,
-          action: 'activate-engine',
-          previewModel: draftPreviewModel,
-          ...(isQwenPreview ? { enhancementMode: qwenEnhancementMode } : {}),
-        }),
-      });
-      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
-      if (!data.profile) throw new Error('Could not activate the selected voice engine.');
-      setProfile(data.profile);
-      setQwenClassroomEnabled(data.qwenClassroomEnabled === true);
-      setQwenClassroomEnhancementAvailable(data.qwenClassroomEnhancementAvailable === true);
-      setChatterboxClassroomEnhancementAvailable(
-        data.chatterboxClassroomEnhancementAvailable === true,
-      );
-      activateProfile(data.profile);
-    } catch (err) {
-      setPreviewError(
-        `${err instanceof Error ? err.message : 'Could not activate the selected voice engine.'} Your current classroom voice is unchanged.`,
-      );
-    } finally {
-      previewRequestInFlightRef.current = false;
-      stopBusy();
-    }
-  };
-
-  const renderVoiceConfigurationControls = () => (
-    <div className="space-y-4">
-      {draftPreset === 'custom' && !isQwenPreview && (
-        <span className="inline-flex rounded-full border border-border/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-          Custom voice style
-        </span>
-      )}
-
-      {!isQwenPreview ? (
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-foreground">Voice Style</div>
-          <div className="flex flex-wrap gap-2">
-            {PRESET_OPTIONS.map((preset) => {
-              const selected = draftPreset === preset.value;
-              return (
-                <button
-                  key={preset.value}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => applyPreset(preset.value)}
-                  className={cn(
-                    'min-w-[104px] rounded-full border px-3 py-1.5 text-center text-sm font-medium transition-colors',
-                    selected
-                      ? 'border-primary bg-primary/5 text-foreground'
-                      : 'border-border/70 text-muted-foreground hover:bg-muted/40',
-                  )}
-                >
-                  {preset.label}
-                </button>
-              );
-            })}
-          </div>
-          <p className="max-w-[62ch] text-xs leading-snug text-muted-foreground">
-            {draftPresetDescription}
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <p className="max-w-[62ch] text-xs leading-snug text-muted-foreground">
-            Uses your saved recording with Qwen3-TTS. Previewing does not change classroom narration
-            until you explicitly activate this engine.
-          </p>
-          {!qwenClassroomEnabled && (
-            <p className="text-xs text-muted-foreground">
-              Qwen3-TTS classroom narration is disabled for this deployment.
-            </p>
-          )}
-        </div>
-      )}
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        {!isQwenPreview ? (
-          <div className="space-y-2">
-            <label htmlFor="voice-language-id" className="text-xs font-medium text-foreground">
-              Accent
-            </label>
-            <select
-              id="voice-language-id"
-              value={draftLanguageId}
-              onChange={(event) => {
-                const languageId = event.target.value;
-                if (!isChatterboxFacultySynthesisLanguage(languageId)) return;
-                setDraftLanguageId(languageId);
-                setPreviewTextLanguageId('en');
-              }}
-              className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
-            >
-              <option value="en">English</option>
-              <option value="hi">Hindi-influenced</option>
-            </select>
-            <p className="text-xs leading-snug text-muted-foreground">
-              Adjusts pronunciation conditioning only. Your lesson text is not translated.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-1 text-xs leading-snug text-muted-foreground">
-            <div className="font-medium text-foreground">Preview Language</div>
-            <p>English, based on the transcript saved with your recording.</p>
-          </div>
-        )}
-
-        <fieldset className="space-y-2">
-          <legend className="text-xs font-medium text-foreground">Voice Output</legend>
-          <div className="inline-flex rounded-md border border-border/70 p-0.5">
-            {(
-              [
-                ['standard', 'Original'],
-                ['resemble-enhance', 'Enhanced'],
-              ] as const
-            ).map(([value, label]) => {
-              const selected = selectedEnhancementMode === value;
-              const unavailable =
-                value === 'resemble-enhance' &&
-                !!matchingComparison &&
-                !matchingComparison.enhanced;
-              return (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={selected}
-                  disabled={unavailable}
-                  onClick={() =>
-                    isQwenPreview ? setQwenEnhancementMode(value) : setDraftEnhancementMode(value)
-                  }
-                  className={cn(
-                    'rounded px-3 py-1.5 text-xs font-medium transition-colors',
-                    selected ? 'bg-primary text-primary-foreground' : 'text-muted-foreground',
-                    unavailable && 'cursor-not-allowed opacity-50',
-                  )}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {selectedComparison?.enhancementError && (
-            <p className="text-xs text-muted-foreground">{selectedComparison.enhancementError}</p>
-          )}
-          {selectedEnhancementMode === 'resemble-enhance' &&
-            !(isQwenPreview
-              ? qwenClassroomEnhancementAvailable
-              : chatterboxClassroomEnhancementAvailable) && (
-              <p className="text-xs text-muted-foreground">
-                Enhanced preview is available. Using Enhanced in class requires classroom
-                enhancement to be enabled on the server.
-              </p>
-            )}
-        </fieldset>
-      </div>
-
-      {readyProfile && (
-        <div className="flex flex-col gap-3 border-t border-border/70 pt-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs leading-snug text-muted-foreground" aria-live="polite">
-            {previewOutdated
-              ? isQwenPreview
-                ? 'Generate a Qwen3-TTS preview from your saved recording.'
-                : 'Preview required for the selected accent and style.'
-              : isQwenPreview
-                ? activeEngine === 'qwen3-tts'
-                  ? 'Qwen3-TTS is active for classroom narration.'
-                  : 'Preview ready. Activate Qwen3-TTS to use it in class.'
-                : 'Your saved Teaching Voice remains active until changes are applied.'}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={generateModelPreview}
-              disabled={busy || !previewText.trim()}
-            >
-              <Play className="size-4" />
-              {selectedPreview ? 'Regenerate Preview' : 'Generate Preview'}
-            </Button>
-            {isQwenPreview && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={activateSelectedEngine}
-                disabled={
-                  busy ||
-                  !qwenClassroomEnabled ||
-                  !qwenModelPreview ||
-                  (qwenEnhancementMode === 'resemble-enhance' &&
-                    !qwenClassroomEnhancementAvailable) ||
-                  (activeEngine === selectedEngine &&
-                    readyProfile?.qwenEnhancementMode === qwenEnhancementMode)
-                }
-              >
-                <Check className="size-4" />
-                {activeEngine === 'qwen3-tts' &&
-                readyProfile?.qwenEnhancementMode === qwenEnhancementMode
-                  ? 'Using Qwen3-TTS'
-                  : 'Use Qwen3-TTS'}
-              </Button>
-            )}
-            {!isQwenPreview && activeEngine !== 'chatterbox' && draftMatchesAccepted && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={activateSelectedEngine}
-                disabled={
-                  busy ||
-                  (draftEnhancementMode === 'resemble-enhance' &&
-                    !chatterboxClassroomEnhancementAvailable)
-                }
-              >
-                <Check className="size-4" />
-                Use Chatterbox V3
-              </Button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
 
   const startRecording = async () => {
-    if (busy || profileLoading || recordingPending || recorderRef.current || !enrollmentPhrase)
-      return;
-    clearCandidateRecording();
+    if (busy || recordingPending || recorderRef.current) return;
     if (!consented) {
-      setEnrollmentError('Consent is required before recording.');
+      setError('Confirm that this is your voice before recording.');
       return;
     }
     if (typeof MediaRecorder === 'undefined') {
-      setEnrollmentError('This browser does not support audio recording.');
+      setError('This browser does not support audio recording.');
       return;
     }
     const mimeType = chooseMimeType();
     if (!mimeType) {
-      setEnrollmentError('This browser cannot record a supported audio format.');
+      setError('This browser cannot record a supported audio format.');
       return;
     }
+    clearRecording();
     setRecordingPending(true);
+    setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const chunks: BlobPart[] = [];
       const recorder = new MediaRecorder(stream, { mimeType });
-      const recordingStartedAt = performance.now();
+      const startedAt = performance.now();
       streamRef.current = stream;
       recorderRef.current = recorder;
-      setRecordingStartedAt(recordingStartedAt);
-      setElapsedSeconds(0);
+      setRecordingStartedAt(startedAt);
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chunks.push(event.data);
       };
-      recorder.onerror = () => {
-        setEnrollmentError('Recording failed. Please try again.');
-      };
+      recorder.onerror = () => setError('Recording failed. Please try again.');
       recorder.onstop = () => {
-        const duration = (performance.now() - recordingStartedAt) / 1000;
+        const duration = (performance.now() - startedAt) / 1000;
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
         setRecordingStartedAt(null);
         const blob = new Blob(chunks, { type: mimeType });
         if (blob.size < MIN_RECORDING_SIZE_BYTES) {
-          replaceRecording({
-            error: 'The recording appears empty. Please check your microphone and try again.',
+          setRecording({
+            error: 'The recording appears empty. Check your microphone and try again.',
           });
           return;
         }
-        setRecordingFileName(
-          mimeType.includes('ogg') ? 'teaching-voice.ogg' : 'teaching-voice.webm',
-        );
-        replaceRecording({
-          blob,
-          duration,
-          url: URL.createObjectURL(blob),
-        });
+        const fileName = mimeType.includes('ogg') ? 'teaching-voice.ogg' : 'teaching-voice.webm';
+        setRecordingFileName(fileName);
+        setRecording({ blob, duration, url: URL.createObjectURL(blob) });
       };
       recorder.start();
-    } catch (err) {
+    } catch (caught) {
       setRecordingStartedAt(null);
-      setEnrollmentError(
-        err instanceof DOMException && err.name === 'NotAllowedError'
+      setError(
+        caught instanceof DOMException && caught.name === 'NotAllowedError'
           ? 'Microphone permission was denied.'
           : 'Microphone is unavailable.',
       );
@@ -981,9 +368,7 @@ export function TeachingVoiceCard({
   };
 
   const stopRecording = () => {
-    if (recorderRef.current?.state === 'recording') {
-      recorderRef.current.stop();
-    }
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
   };
 
   const importAudioFile = (file: File | undefined) => {
@@ -1014,21 +399,20 @@ export function TeachingVoiceCard({
     ]);
     const baseType = inferredType?.toLowerCase().split(';', 1)[0];
     if (!baseType || !supported.has(baseType)) {
-      replaceRecording({
-        error: 'Unsupported file. Choose WAV, MP3, M4A, OGG, FLAC, or WebM audio.',
-      });
+      setRecording({ error: 'Choose a WAV, MP3, M4A, OGG, FLAC, or WebM audio file.' });
       return;
     }
     if (file.size < MIN_RECORDING_SIZE_BYTES || file.size > MAX_RECORDING_SIZE_BYTES) {
-      replaceRecording({
-        error: 'The selected audio file is empty or exceeds the enrollment size limit.',
-      });
+      setRecording({ error: 'The audio file is empty or exceeds the upload size limit.' });
       return;
     }
+    clearRecording();
     const preserved = file.type ? file : new File([file], file.name, { type: baseType });
     const url = URL.createObjectURL(preserved);
     setRecordingFileName(file.name);
-    replaceRecording({ blob: preserved, url });
+    setRecording({ blob: preserved, url });
+    setTranscript('');
+    setError(null);
     const probe = new Audio(url);
     probe.addEventListener(
       'loadedmetadata',
@@ -1037,994 +421,421 @@ export function TeachingVoiceCard({
     );
     probe.addEventListener(
       'error',
-      () => replaceRecording({ error: 'The browser could not decode this audio file.' }),
+      () => setRecording({ error: 'The browser could not decode this audio file.' }),
       { once: true },
     );
   };
 
-  const transcribeImportedAudio = async () => {
-    if (!recording.blob || transcribingImport) return;
-    setTranscribingImport(true);
-    setEnrollmentError(null);
+  const transcribeAudio = async () => {
+    if (!recording.blob || transcribing) return;
+    setTranscribing(true);
+    setError(null);
     try {
       const formData = new FormData();
       formData.set('audio', recording.blob, recordingFileName);
-      formData.set('language', enrollmentLanguage);
-      const response = await fetch('/api/transcription', { method: 'POST', body: formData });
-      const data = await readVoiceApiResponse<{ text?: string }>(response);
-      const transcript = data.text?.trim();
-      if (!transcript) throw new Error('The configured transcription service returned no text.');
-      setImportTranscript(transcript);
+      formData.set('language', 'en');
+      const data = await readVoiceApiResponse<{ text?: string }>(
+        await fetch('/api/transcription', { method: 'POST', body: formData }),
+      );
+      const text = data.text?.trim();
+      if (!text) throw new Error('The transcription service returned no text.');
+      setTranscript(text);
     } catch (caught) {
-      setEnrollmentError(
+      setError(
         caught instanceof Error
           ? caught.message
-          : 'Transcription is not available. You can still use providers that do not require text.',
+          : 'Transcription is unavailable. Enter the spoken words manually.',
       );
     } finally {
-      setTranscribingImport(false);
+      setTranscribing(false);
     }
   };
 
-  const submitEnrollment = async () => {
-    if (
-      !recordingReady ||
-      !recording.blob ||
-      (enrollmentMode === 'microphone' && !enrollmentPhrase) ||
-      (enrollmentMode === 'audio-import' && importTranscriptRequired && !importTranscript.trim()) ||
-      recordingRequiresRetry ||
-      enrollmentRequestInFlightRef.current
-    ) {
+  const generateFromExistingProfile = async () => {
+    if (!profile || requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
+    setBusy(true);
+    setBusyPhase('generating');
+    setError(null);
+    try {
+      const data = await readVoiceApiResponse<ApiProfileResponse>(
+        await fetch('/api/voice-cloning/profile', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profileId: profile.id, action: 'activate-enhanced-qwen' }),
+        }),
+      );
+      if (!data.profile) throw new Error('Voice generation returned no saved voice.');
+      applyCompletedProfile(data.profile);
+    } catch (caught) {
+      setError(
+        `${caught instanceof Error ? caught.message : 'Voice generation failed.'} Your saved voice is unchanged.`,
+      );
+    } finally {
+      requestInFlightRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const generateFromRecording = async () => {
+    if (!recording.blob || requestInFlightRef.current) return;
+    if (!consented) {
+      setError('Confirm that you own this voice or have permission to use it.');
       return;
     }
-    enrollmentRequestInFlightRef.current = true;
-    startBusy('checking', [
-      [900, 'preparing'],
-      [2600, 'generating'],
-    ]);
-    setSetupStep('preview');
+    if (mode === 'audio-import' && !transcript.trim()) {
+      setError('Transcribe the uploaded audio or enter the exact spoken words.');
+      return;
+    }
+    requestInFlightRef.current = true;
+    setBusy(true);
+    setBusyPhase('checking');
     setError(null);
-    setEnrollmentError(null);
-    setPreviewError(null);
-    const attemptId = enrollmentAttemptId ?? createEnrollmentAttemptId();
-    setEnrollmentAttemptId(attemptId);
-    window.localStorage.setItem(enrollmentStorageKey(enrollmentLanguage), attemptId);
-    let pollingStarted = false;
+    const attemptId = createEnrollmentAttemptId();
+    window.localStorage.setItem(ENROLLMENT_ATTEMPT_STORAGE_KEY, attemptId);
+    let polling = false;
     try {
       const formData = new FormData();
       formData.set('attemptId', attemptId);
+      formData.set('workflow', 'enhanced-qwen');
       formData.set('consent', 'true');
-      formData.set('displayName', voiceName.trim() || 'My Teaching Voice');
-      formData.set('language', enrollmentLanguage);
-      formData.set('languageId', enrollmentLanguage);
-      formData.set('enrollmentSource', enrollmentMode);
-      if (enrollmentMode === 'microphone') {
-        formData.set('phraseId', enrollmentPhrase!.id);
-        formData.set('referenceText', enrollmentPhrase!.text);
+      formData.set('displayName', 'My Teaching Voice');
+      formData.set('language', 'en');
+      formData.set('languageId', 'en');
+      formData.set('enrollmentSource', mode);
+      if (mode === 'microphone') {
+        formData.set('phraseId', ENROLLMENT_PHRASE!.id);
+        formData.set('referenceText', ENROLLMENT_PHRASE!.text);
       } else {
-        if (importTranscript.trim()) formData.set('referenceText', importTranscript.trim());
+        formData.set('referenceText', transcript.trim());
       }
       formData.set('recording', recording.blob, recordingFileName);
-      const response = await fetch('/api/voice-cloning/enrollment', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await readVoiceApiResponse<VoiceEnrollmentResponse>(response);
+      const data = await readVoiceApiResponse<VoiceEnrollmentResponse>(
+        await fetch('/api/voice-cloning/enrollment', { method: 'POST', body: formData }),
+      );
       if (data.status === 'completed' && data.profile) {
-        applyEnrollmentProfile(data.profile);
-        finishEnrollmentAttempt(attemptId);
+        finishAttempt();
+        applyCompletedProfile(data.profile);
         return;
       }
       if (data.status === 'failed') {
-        setPreviewError(data.error || 'Voice enrollment failed.');
+        finishAttempt();
+        setError(data.error || 'Voice generation failed. Please try again.');
         return;
       }
-      pollingStarted = true;
-      await pollEnrollmentAttempt(data.attemptId || attemptId);
-    } catch (err) {
-      const parsed = voiceFetchError(err);
+      polling = true;
+      await pollEnrollment(data.attemptId || attemptId);
+    } catch (caught) {
+      const parsed = voiceFetchError(caught);
       if (parsed.kind === 'http' && parsed.status !== undefined && parsed.status < 500) {
-        finishEnrollmentAttempt(attemptId);
-        setSetupStep('record');
-        setRecordingRequiresRetry(true);
-        setEnrollmentError(parsed.message);
+        finishAttempt();
+        setError(parsed.message);
         return;
       }
-      setPreviewError(
-        parsed.kind === 'non-json' || parsed.kind === 'network'
-          ? 'Voice creation could not be confirmed. Checking enrollment status...'
-          : parsed.message,
-      );
-      pollingStarted = true;
-      await pollEnrollmentAttempt(attemptId);
+      polling = true;
+      setError('Voice generation could not be confirmed. Checking again…');
+      await pollEnrollment(attemptId);
     } finally {
-      enrollmentRequestInFlightRef.current = false;
-      if (!pollingStarted) stopBusy();
-    }
-  };
-
-  const acceptPreview = async () => {
-    if (!profile || previewRequestInFlightRef.current) return;
-    previewRequestInFlightRef.current = true;
-    setSetupStep('preview');
-    startBusy('finishing');
-    setError(null);
-    setPreviewError(null);
-    try {
-      const response = await fetch('/api/voice-cloning/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profileId: profile.id,
-          action: 'accept-preview',
-          ...draftConfiguration,
-        }),
-      });
-      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
-      if (!data.profile) throw new Error('Could not accept preview.');
-      setProfile(data.profile);
-      setChatterboxClassroomEnhancementAvailable(
-        data.chatterboxClassroomEnhancementAvailable === true,
-      );
-      setSetupStep('review');
-      setCustomizeOpen(false);
-      const config = profileConfiguration(data.profile);
-      setDraftModelVariant(config.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
-      setDraftLanguageId(config.languageId);
-      setPreviewTextLanguageId(data.profile.previewTextLanguageId ?? 'en');
-      setPreviewText(data.profile.previewText ?? previewText);
-      setDraftGenerationSettings(config.generationSettings ?? cloneRecommendedSettings());
-      setDraftEnhancementMode(config.enhancementMode ?? 'standard');
-      activateProfile(data.profile);
-    } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : 'Could not accept preview.');
-    } finally {
-      previewRequestInFlightRef.current = false;
-      stopBusy();
-    }
-  };
-
-  async function generateModelPreview() {
-    if (!profile || previewRequestInFlightRef.current) return;
-    const previewConfiguration = isChatterboxProfile
-      ? { ...draftConfiguration, modelVariant: DEFAULT_CHATTERBOX_MODEL_VARIANT }
-      : draftConfiguration;
-    previewRequestInFlightRef.current = true;
-    setSetupStep('preview');
-    startBusy('generating', [[14000, 'finishing']]);
-    setError(null);
-    setPreviewError(null);
-    try {
-      const response = await fetch('/api/voice-cloning/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profileId: profile.id,
-          action: 'preview-model',
-          previewModel: draftPreviewModel,
-          previewText,
-          ...(isQwenPreview
-            ? { enhancementMode: qwenEnhancementMode }
-            : { ...previewConfiguration, previewTextLanguageId }),
-        }),
-      });
-      const data = await readVoiceApiResponse<ApiProfileResponse>(response);
-      if (!data.profile) throw new Error('Could not generate preview.');
-      if (isQwenPreview) {
-        if (!data.modelPreview || data.modelPreview.previewModel !== 'qwen3-tts-1.7b-base') {
-          throw new Error('Qwen3-TTS returned an invalid preview.');
-        }
-        if (data.modelPreview.qwenCloneMode !== 'speaker-embedding') {
-          throw new Error('Qwen3-TTS returned a preview for the wrong clone method.');
-        }
-        setProfile(data.profile);
-        setQwenClassroomEnabled(data.qwenClassroomEnabled === true);
-        setQwenClassroomEnhancementAvailable(data.qwenClassroomEnhancementAvailable === true);
-        setChatterboxClassroomEnhancementAvailable(
-          data.chatterboxClassroomEnhancementAvailable === true,
-        );
-        setSetupStep('review');
-        return;
+      if (!polling) {
+        requestInFlightRef.current = false;
+        setBusy(false);
       }
-      setProfile(data.profile);
-      setChatterboxClassroomEnhancementAvailable(
-        data.chatterboxClassroomEnhancementAvailable === true,
-      );
-      setSetupStep('review');
-      const generatedConfig = data.profile.draftPreview?.config;
-      if (generatedConfig) {
-        setDraftModelVariant(generatedConfig.modelVariant ?? DEFAULT_CHATTERBOX_MODEL_VARIANT);
-        setDraftLanguageId(generatedConfig.languageId);
-        setPreviewTextLanguageId(generatedConfig.previewTextLanguageId ?? 'en');
-        setPreviewText(generatedConfig.previewText ?? previewText);
-        setDraftGenerationSettings(
-          generatedConfig.generationSettings ?? cloneRecommendedSettings(),
-        );
-        setDraftEnhancementMode(generatedConfig.enhancementMode ?? 'standard');
-      }
-    } catch (err) {
-      setSetupStep('review');
-      const message = err instanceof Error ? err.message : 'Could not generate preview.';
-      setPreviewError(`${message} Your saved Teaching Voice is unchanged. Try again.`);
-    } finally {
-      previewRequestInFlightRef.current = false;
-      stopBusy();
-    }
-  }
-
-  const deleteProfile = async (profileId?: string) => {
-    if (previewRequestInFlightRef.current) return;
-    previewRequestInFlightRef.current = true;
-    startBusy('finishing');
-    setError(null);
-    try {
-      const id = profileId ?? profile?.id;
-      if (!id) return;
-      const response = await fetch(
-        `/api/voice-cloning/profile?profileId=${encodeURIComponent(id)}`,
-        { method: 'DELETE' },
-      );
-      await readVoiceApiResponse(response);
-      setProfile(null);
-      setSetupStep('record');
-      setCustomizeOpen(false);
-      setEnrollmentError(null);
-      setPreviewError(null);
-      if (enrollmentAttemptId) {
-        window.localStorage.removeItem(enrollmentStorageKey(enrollmentLanguage));
-        setEnrollmentAttemptId(null);
-      }
-      if (!profileId || selectedProfileId === profileId) {
-        clearTeachingVoiceSelection(profileSelectionLanguage(profile));
-        selectedProfileIdRef.current = undefined;
-        onSelectedProfileIdChange(undefined);
-      }
-      if (!profileId) setOpen(false);
-    } catch {
-      setError('Could not delete the voice profile.');
-    } finally {
-      previewRequestInFlightRef.current = false;
-      stopBusy();
     }
   };
 
-  const discardCandidateProfile = async (profileId: string) => {
-    if (previewRequestInFlightRef.current) return;
-    previewRequestInFlightRef.current = true;
-    startBusy('finishing');
-    try {
-      const response = await fetch(
-        `/api/voice-cloning/profile?profileId=${encodeURIComponent(profileId)}`,
-        {
-          method: 'DELETE',
-        },
-      );
-      await readVoiceApiResponse(response);
-      clearCandidateRecording();
-      setProfile(null);
-      setCustomizeOpen(false);
-    } catch {
-      setError('Could not delete the candidate voice preview.');
-    } finally {
-      previewRequestInFlightRef.current = false;
-      stopBusy();
-    }
+  const generateVoice = () => {
+    if (editing || !profile) return generateFromRecording();
+    return generateFromExistingProfile();
   };
 
-  const renderStepHeader = (step: SetupStep, title: string) => {
-    const stepNumber = step === 'record' ? 1 : step === 'preview' ? 2 : 3;
-    return (
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="text-[11px] font-medium uppercase tracking-normal text-muted-foreground">
-            Step {stepNumber} of 3
-          </div>
-          <div className="text-sm font-semibold text-foreground">{title}</div>
-        </div>
-        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-          {(['record', 'preview', 'review'] as const).map((item) => (
-            <span
-              key={item}
-              className={cn('h-1.5 w-7 rounded-full', item === step ? 'bg-primary' : 'bg-border')}
-              aria-hidden="true"
-            />
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  const renderBusyPreview = () => (
-    <div className="rounded-lg border border-border/70 p-4">
-      {renderStepHeader('preview', 'Preview')}
-      <div className="mt-4 flex items-center gap-3 text-sm text-foreground" aria-live="polite">
-        <Loader2 className="size-4 animate-spin" />
-        <span>{busyPhase ? BUSY_LABELS[busyPhase] : 'Generating your voice preview...'}</span>
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-          {formatClock(busyElapsedSeconds)}
-        </span>
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        You can reconnect to this page while the voice is being prepared.
-      </p>
-    </div>
-  );
-
-  const renderPreviewError = () =>
-    previewError ? (
-      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-        {previewError}
-      </div>
-    ) : null;
-
-  const renderVoicePreview = () => {
-    if (!selectedComparison) {
-      return selectedPreview ? (
-        <audio
-          controls
-          ref={candidateAudioRef}
-          className="w-full"
-          src={`data:audio/${selectedPreview.format};base64,${selectedPreview.base64}`}
-        />
-      ) : null;
-    }
-    return (
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="border border-border/70 p-3">
-          <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
-            <span>Original</span>
-            {selectedEnhancementMode === 'standard' && (
-              <span className="text-primary">Selected</span>
-            )}
-          </div>
-          <audio
-            controls
-            ref={candidateAudioRef}
-            className="w-full"
-            aria-label={
-              isQwenPreview ? 'Original Qwen3-TTS preview' : 'Original Chatterbox preview'
-            }
-            src={`data:audio/${selectedComparison.original.format};base64,${selectedComparison.original.base64}`}
-          />
-        </div>
-        <div className="border border-border/70 p-3">
-          <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
-            <span>Enhanced</span>
-            {selectedEnhancementMode === 'resemble-enhance' && selectedComparison.enhanced && (
-              <span className="text-primary">Selected</span>
-            )}
-          </div>
-          {selectedComparison.enhanced ? (
-            <audio
-              controls
-              className="w-full"
-              aria-label="Resemble Enhance preview"
-              src={`data:audio/${selectedComparison.enhanced.format};base64,${selectedComparison.enhanced.base64}`}
-            />
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {selectedComparison.enhancementError || 'Enhanced preview is not available.'}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderCustomizationWorkspace = () => {
-    const engines: Array<{
-      id: CustomizationEngine;
-      label: string;
-      kind: 'Cloned voice' | 'Preset voice';
-      previewOnly: boolean;
-      experimental?: boolean;
-      disabled?: boolean;
-    }> = [
-      { id: 'chatterbox', label: 'Chatterbox V3', kind: 'Cloned voice', previewOnly: false },
-      {
-        id: 'qwen3-tts',
-        label: 'Qwen3-TTS 1.7B',
-        kind: 'Cloned voice',
-        previewOnly: false,
-        disabled: !availablePreviewModels.includes('qwen3-tts-1.7b-base'),
-      },
-      { id: 'sarvam', label: 'Sarvam AI', kind: 'Cloned voice', previewOnly: true },
-      { id: 'bodhan', label: 'Bodhan Indic-Speak', kind: 'Preset voice', previewOnly: true },
-      {
-        id: 'ming3-tts',
-        label: 'Ming 3.0 TTS 0.5B',
-        kind: 'Cloned voice',
-        previewOnly: true,
-        experimental: true,
-      },
-    ];
-    const localEngine = customizationEngine === 'chatterbox' || customizationEngine === 'qwen3-tts';
-
-    return (
-      <section aria-labelledby="customize-voice-heading" className="space-y-4">
-        <div>
-          <h3 id="customize-voice-heading" className="text-sm font-semibold text-foreground">
-            Customize Voice
-          </h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Previewing an engine does not change your classroom voice.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2" aria-label="Voice engine">
-          {engines.map((engine) => {
-            const selected = customizationEngine === engine.id;
-            return (
-              <button
-                key={engine.id}
-                type="button"
-                aria-pressed={selected}
-                disabled={engine.disabled}
-                onClick={() => {
-                  setCustomizationEngine(engine.id);
-                  if (engine.id === 'chatterbox') setDraftPreviewModel('chatterbox-v3');
-                  if (engine.id === 'qwen3-tts') setDraftPreviewModel('qwen3-tts-1.7b-base');
-                  if (
-                    engine.id === 'sarvam' ||
-                    engine.id === 'bodhan' ||
-                    engine.id === 'ming3-tts'
-                  ) {
-                    setExternalPreviewEngine(engine.id);
-                  }
-                  setPreviewError(null);
-                }}
-                className={cn(
-                  'min-w-0 rounded-md border px-3 py-2 text-left transition-colors',
-                  selected
-                    ? 'border-primary bg-primary/5 text-foreground'
-                    : 'border-border/70 text-muted-foreground hover:bg-muted/40',
-                  engine.disabled && 'cursor-not-allowed opacity-50',
-                )}
-              >
-                <span className="block truncate text-xs font-semibold">{engine.label}</span>
-                <span className="mt-0.5 block text-[11px]">
-                  {engine.kind}
-                  {engine.experimental ? ' · Experimental' : ''}
-                  {engine.previewOnly ? ' · Preview only' : ''}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <label className="block space-y-1 text-xs font-medium">
-          Preview text
-          <Textarea
-            value={previewText}
-            maxLength={1000}
-            onChange={(event) => setPreviewText(event.target.value)}
-            className="min-h-24 resize-y font-normal"
-          />
-          <span className="block text-right font-normal tabular-nums text-muted-foreground">
-            {previewText.length}/1000
-          </span>
-        </label>
-
-        {localEngine && (
-          <>
-            <div className="rounded-lg border border-border/70 p-3">
-              {renderVoiceConfigurationControls()}
-            </div>
-            {selectedPreview && renderVoicePreview()}
-          </>
-        )}
-        <div className={cn(localEngine && 'hidden')} aria-hidden={localEngine || undefined}>
-          <VoiceComparisonPanel
-            profile={readyProfile!}
-            providerId={externalPreviewEngine}
-            text={previewText}
-          />
-        </div>
-      </section>
-    );
-  };
+  const canGenerate =
+    !busy &&
+    !transcribing &&
+    (editing
+      ? Boolean(recording.blob && consented && (mode === 'microphone' || transcript.trim()))
+      : Boolean(profile));
 
   return (
-    <div className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <label htmlFor="teaching-voice-language" className="text-xs font-medium">
-          Teaching Voice language
-        </label>
-        <select
-          id="teaching-voice-language"
-          value={enrollmentLanguage}
-          disabled={busy || recordingPending || recordingStartedAt !== null}
-          onChange={(event) => {
-            clearCandidateRecording();
-            setProfile(null);
-            setCustomizeOpen(false);
-            setDraftLanguageId(event.target.value);
-            setEnrollmentLanguage(event.target.value);
-          }}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
-        >
-          {['en', 'hi', 'mr'].map((language) => (
-            <option key={language} value={language}>
-              {language === 'en' ? 'English' : language === 'hi' ? 'Hindi' : 'Marathi'}
-            </option>
-          ))}
-          <optgroup label="Existing voices">
-            {CHATTERBOX_SUPPORTED_LANGUAGE_IDS.filter(
-              (language) => language !== 'en' && language !== 'hi',
-            ).map((language) => (
-              <option key={language} value={language}>
-                {CHATTERBOX_LANGUAGE_LABELS[language]}
-              </option>
-            ))}
-          </optgroup>
-        </select>
-      </div>
-      {error && !open && (
-        <p role="alert" className="mb-3 text-xs text-destructive">
-          {error}
-        </p>
-      )}
+    <section className="mt-4 w-full rounded-xl border border-border/70 bg-background/85 p-4 shadow-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-foreground">My Teaching Voice</div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {readyProfile
-              ? selectedProfileId === readyProfile.id
-                ? `Teaching Voice selected: ${activeEngine === 'qwen3-tts' ? 'Qwen3-TTS 1.7B' : activeEngine === 'chatterbox' ? 'Chatterbox V3' : 'IndicF5'}`
-                : readyProfileDisabled
-                  ? 'Teaching Voice ready, narration disabled'
-                  : 'Teaching Voice ready'
-              : profile?.status === 'preview-ready'
-                ? 'Preview is ready for review'
-                : 'Narration is off until you create a Teaching Voice'}
-          </div>
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">My Teaching Voice</h2>
+          {!profileLoading && ready && !editing ? (
+            <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+              {intentionallyDisabled && !selected ? 'Voice ready, narration is off' : 'Voice ready'}
+            </p>
+          ) : null}
         </div>
-        <div className="flex flex-wrap gap-2">
-          {readyProfile && (
+        {!profileLoading && ready && !editing ? (
+          <div className="flex flex-wrap gap-2">
+            {intentionallyDisabled && !selected ? (
+              <Button type="button" size="sm" onClick={() => activateReadyProfile(profile)}>
+                Use Voice
+              </Button>
+            ) : null}
             <Button
               type="button"
               size="sm"
-              variant={selectedProfileId === readyProfile.id ? 'default' : 'outline'}
-              onClick={() =>
-                selectedProfileId === readyProfile.id
-                  ? disableProfile(readyProfile)
-                  : activateProfile(readyProfile)
-              }
+              variant="outline"
+              onClick={() => beginReplacement('microphone')}
+              disabled={busy}
             >
-              <Check className="size-4" />
-              {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use Voice'}
+              <Mic className="size-4" />
+              Record again
             </Button>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={profileLoading}
-            onClick={() => setOpen((v) => !v)}
-          >
-            <Volume2 className="size-4" />
-            {readyProfile ? 'Manage Voice' : profile ? 'Continue Setup' : 'Create Voice'}
-          </Button>
-        </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => beginReplacement('audio-import')}
+              disabled={busy}
+            >
+              <FileAudio className="size-4" />
+              Upload Audio
+            </Button>
+          </div>
+        ) : null}
       </div>
 
-      {open && (
-        <div className="mt-4 border-t border-border/70 pt-4">
-          {error && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-              <CircleAlert className="mt-0.5 size-4 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
+      {profileLoading ? (
+        <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          Loading voice…
+        </div>
+      ) : null}
 
-          {busy && setupStep === 'preview' ? (
-            renderBusyPreview()
-          ) : profile?.status === 'preview-ready' ? (
+      {error ? (
+        <div
+          role="alert"
+          className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          <CircleAlert className="mt-0.5 size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {busy ? (
+        <div
+          className="mt-4 flex items-center gap-3 border-t border-border/70 pt-4"
+          aria-live="polite"
+        >
+          <Loader2 className="size-5 shrink-0 animate-spin text-primary" />
+          <div>
+            <p className="text-sm font-medium text-foreground">{BUSY_LABELS[busyPhase]}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Keep this page open while your sample is prepared.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {!profileLoading && ready && !editing && sample ? (
+        <div className="mt-4 border-t border-border/70 pt-4">
+          <audio
+            controls
+            className="h-10 w-full"
+            aria-label="Teaching Voice sample"
+            src={`data:audio/${sample.format};base64,${sample.base64}`}
+          />
+        </div>
+      ) : null}
+
+      {!profileLoading && !ready && !editing && profile ? (
+        <div className="mt-4 flex flex-col gap-3 border-t border-border/70 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">
+            Your saved recording can be used to finish creating your voice.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => beginReplacement('microphone')}
+            >
+              <Mic className="size-4" />
+              Record again
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => beginReplacement('audio-import')}
+            >
+              <FileAudio className="size-4" />
+              Upload Audio
+            </Button>
+            <Button type="button" size="sm" onClick={generateVoice} disabled={!canGenerate}>
+              <Volume2 className="size-4" />
+              Generate Voice
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {!profileLoading && editing ? (
+        <div className="mt-4 space-y-4 border-t border-border/70 pt-4">
+          <div
+            className="inline-flex rounded-md border border-border/70 p-0.5"
+            aria-label="Voice input"
+          >
+            <button
+              type="button"
+              aria-pressed={mode === 'microphone'}
+              onClick={() => beginReplacement('microphone')}
+              className={cn(
+                'rounded px-3 py-1.5 text-xs font-medium transition-colors',
+                mode === 'microphone'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              Record Voice
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === 'audio-import'}
+              onClick={() => beginReplacement('audio-import')}
+              className={cn(
+                'rounded px-3 py-1.5 text-xs font-medium transition-colors',
+                mode === 'audio-import'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              Upload Audio
+            </button>
+          </div>
+
+          <label className="flex items-start gap-3 text-xs leading-relaxed text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={consented}
+              onChange={(event) => setConsented(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              {mode === 'microphone'
+                ? 'I am recording my own voice and authorize its use for synthetic course narration.'
+                : 'I own this recording or have explicit permission from the speaker to create a synthetic voice.'}{' '}
+              Your original audio is stored privately and previous voices are preserved.
+            </span>
+          </label>
+
+          {mode === 'microphone' ? (
             <div className="space-y-3">
-              {renderStepHeader('review', 'Use Voice')}
-              {profile.enrollmentQuality?.severity === 'warning' &&
-                profile.enrollmentQuality.warnings.length > 0 && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-                    <CircleAlert className="mt-0.5 size-4 shrink-0" />
-                    <span>{profile.enrollmentQuality.warnings[0]}</span>
-                  </div>
-                )}
-              {selectedPreview ? (
-                renderVoicePreview()
-              ) : (
-                <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
-                  <Play className="size-4" />
-                  Generate Preview
-                </Button>
-              )}
-              {isChatterboxProfile && customizeOpen && (
-                <div className="rounded-lg border border-border/70 p-3">
-                  {renderVoiceConfigurationControls()}
-                </div>
-              )}
-              {renderPreviewError()}
-              <div className="flex flex-wrap gap-2">
-                {!selectedPreview && (
-                  <Button type="button" size="sm" onClick={generateModelPreview} disabled={busy}>
-                    <Play className="size-4" />
-                    Generate Preview
+              <p className="max-w-[70ch] text-sm leading-relaxed text-foreground">
+                {ENROLLMENT_PHRASE?.text}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {recordingStartedAt !== null ? (
+                  <Button type="button" size="sm" onClick={stopRecording}>
+                    <Mic className="size-4" />
+                    Stop Recording
                   </Button>
-                )}
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={acceptPreview}
-                  disabled={busy || !selectedPreview}
-                >
-                  <Check className="size-4" />
-                  Use This Voice
-                </Button>
-                {isChatterboxProfile && (
+                ) : (
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    onClick={() => setCustomizeOpen((value) => !value)}
-                    disabled={busy}
+                    onClick={startRecording}
+                    disabled={!consented || recordingPending || busy}
                   >
-                    <SlidersHorizontal className="size-4" />
-                    {customizeOpen ? 'Hide Settings' : 'Customize Voice'}
+                    <Mic className="size-4" />
+                    Start Recording
                   </Button>
                 )}
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => discardCandidateProfile(profile.id)}
-                  disabled={busy}
-                >
-                  <RotateCcw className="size-4" />
-                  Re-record
-                </Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)}>
-                  <X className="size-4" />
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : readyProfile ? (
-            <div className="space-y-3">
-              {renderStepHeader('review', 'Use Voice')}
-              {renderCustomizationWorkspace()}
-              {renderPreviewError()}
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selectedProfileId === readyProfile.id ? 'default' : 'outline'}
-                  onClick={() => activateProfile(readyProfile)}
-                  disabled={busy || selectedProfileId === readyProfile.id}
-                >
-                  <Check className="size-4" />
-                  {selectedProfileId === readyProfile.id ? 'Using Voice' : 'Use This Voice'}
-                </Button>
-                {canApplyDraftConfiguration && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={acceptPreview}
-                    disabled={
-                      busy ||
-                      (draftEnhancementMode === 'resemble-enhance' &&
-                        !chatterboxClassroomEnhancementAvailable)
-                    }
-                  >
-                    <Check className="size-4" />
-                    Use These Settings
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setProfile(null);
-                    setSetupStep('record');
-                    setCustomizeOpen(false);
-                  }}
-                  disabled={busy}
-                >
-                  <FileAudio className="size-4" />
-                  Add Another Voice
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="destructive"
-                  onClick={() => deleteProfile()}
-                  disabled={busy}
-                >
-                  <Trash2 className="size-4" />
-                  Delete Voice
-                </Button>
-              </div>
-            </div>
-          ) : setupStep === 'preview' && previewError ? (
-            <div className="space-y-3">
-              {renderStepHeader('preview', 'Preview')}
-              {renderPreviewError()}
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={submitEnrollment}
-                  disabled={!recordingReady || busy}
-                >
-                  <Play className="size-4" />
-                  Try Again
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={prepareForRerecord}
-                  disabled={busy}
-                >
-                  <RotateCcw className="size-4" />
-                  Back to Recording
-                </Button>
+                <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
+                  {formatClock(
+                    recordingStartedAt !== null ? elapsedSeconds : (recording.duration ?? 0),
+                  )}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Most recordings take about 10 to {VOICE_ENROLLMENT_TARGET_SECONDS} seconds.
+                </span>
               </div>
             </div>
           ) : (
-            <div className="space-y-4">
-              {renderStepHeader(
-                'record',
-                enrollmentMode === 'microphone' ? 'Record' : 'Import Voice',
-              )}
-              <div
-                className="inline-flex rounded-md border p-0.5"
-                aria-label="Voice enrollment method"
-              >
-                {(
-                  [
-                    ['microphone', 'Record with microphone'],
-                    ['audio-import', 'Upload Audio'],
-                  ] as const
-                ).map(([mode, label]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={enrollmentMode === mode}
-                    onClick={() => {
-                      clearCandidateRecording();
-                      setEnrollmentMode(mode);
-                    }}
-                    className={cn(
-                      'rounded px-3 py-1.5 text-xs font-medium',
-                      enrollmentMode === mode
-                        ? 'bg-primary text-primary-foreground'
-                        : 'text-muted-foreground',
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <label className="block space-y-1 text-xs font-medium">
-                Voice name
+            <div className="space-y-3">
+              <label className="block text-xs font-medium text-foreground">
+                <span className="sr-only">Choose voice recording</span>
                 <input
-                  value={voiceName}
-                  maxLength={80}
-                  onChange={(event) => setVoiceName(event.target.value)}
-                  className="h-9 w-full rounded-md border bg-background px-2 text-sm font-normal"
+                  type="file"
+                  accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/ogg,audio/flac,audio/webm,.wav,.mp3,.m4a,.ogg,.opus,.flac,.webm"
+                  disabled={busy}
+                  onChange={(event) => importAudioFile(event.target.files?.[0])}
+                  className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border file:border-border file:bg-background file:px-3 file:py-2 file:text-xs file:font-medium file:text-foreground"
                 />
               </label>
-              <label className="flex items-start gap-3 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={consented}
-                  onChange={(event) => setConsented(event.target.checked)}
-                  className="mt-0.5"
-                />
-                <span>
-                  {enrollmentMode === 'microphone'
-                    ? 'I am recording my own voice and authorize Sahaya to use it for synthetic course narration.'
-                    : 'I own this recording or have explicit permission from the speaker to create a synthetic voice from it.'}{' '}
-                  The original audio will be stored privately and will not replace any saved voice.
-                </span>
-              </label>
-
-              {enrollmentMode === 'microphone' ? (
-                <div className="rounded-lg border border-border/70 p-3">
-                  <div className="text-sm font-medium text-foreground">
-                    Record Your Teaching Voice
-                  </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Read this paragraph naturally. Most recordings take about 10 to 15 seconds, but
-                    do not rush.
-                  </p>
-                  <p className="mt-3 max-w-[70ch] text-sm leading-relaxed text-foreground">
-                    {enrollmentParagraph ||
-                      'New voice enrollment is available in English, Hindi and Marathi.'}
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                    <span>Quiet room</span>
-                    <span aria-hidden="true">•</span>
-                    <span>Steady mic distance</span>
-                    <span aria-hidden="true">•</span>
-                    <span>Natural voice</span>
-                  </div>
-                  <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                    Your recording is used only to create your private teaching-voice reference. A
-                    quiet, natural recording usually produces the closest result.
-                  </p>
-
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    {recordingStartedAt !== null ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={stopRecording}
-                        aria-label="Stop recording teaching voice"
-                      >
-                        <Mic className="size-4" />
-                        Stop Recording
-                      </Button>
-                    ) : (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={
-                          !consented ||
-                          busy ||
-                          profileLoading ||
-                          recordingPending ||
-                          !enrollmentPhrase
-                        }
-                        onClick={startRecording}
-                        aria-label="Start recording teaching voice"
-                      >
-                        <Mic className="size-4" />
-                        Start Recording
-                      </Button>
-                    )}
-                    <span
-                      className={cn(
-                        'rounded-md border px-2 py-1 text-sm tabular-nums',
-                        recordingStartedAt !== null
-                          ? 'border-destructive/30 bg-destructive/5 text-destructive'
-                          : 'border-border text-muted-foreground',
-                      )}
-                      aria-live="polite"
-                    >
-                      {formatClock(
-                        recordingStartedAt !== null ? elapsedSeconds : (recording.duration ?? 0),
-                      )}
+              {recording.blob ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="truncate text-xs text-muted-foreground">
+                      {recordingFileName}
                     </span>
-                    <span className="text-xs text-muted-foreground">{recordingGuidance}</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={transcribeAudio}
+                      disabled={transcribing || busy}
+                    >
+                      {transcribing ? <Loader2 className="size-4 animate-spin" /> : null}
+                      {transcribing ? 'Transcribing…' : 'Transcribe Audio'}
+                    </Button>
                   </div>
-
-                  {recording.url && (
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <audio
-                        controls
-                        ref={candidateAudioRef}
-                        className="h-9 min-w-[240px] max-w-full flex-1"
-                        src={recording.url}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        {formatSeconds(recording.duration)}
-                      </span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={prepareForRerecord}
-                        disabled={!consented || busy}
-                      >
-                        <RotateCcw className="size-4" />
-                        Re-record
-                      </Button>
-                    </div>
-                  )}
-
-                  {recording.error && (
-                    <p className="mt-2 text-xs text-destructive" role="alert">
-                      {recording.error}
-                    </p>
-                  )}
-                  {enrollmentError && (
-                    <p className="mt-2 text-xs text-destructive" role="alert">
-                      {enrollmentError}
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3 rounded-lg border border-border/70 p-3">
-                  <div>
-                    <div className="text-sm font-medium text-foreground">Upload Audio</div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      WAV, MP3, M4A, OGG, FLAC, and WebM are accepted. Sahaya retains the exact
-                      upload and creates a provider-ready reference separately when required.
-                    </p>
-                  </div>
-                  <label className="block space-y-1 text-xs font-medium">
-                    Audio file
-                    <input
-                      type="file"
-                      accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/ogg,audio/flac,audio/webm,.wav,.mp3,.m4a,.ogg,.opus,.flac,.webm"
-                      disabled={!consented || busy}
-                      onChange={(event) => importAudioFile(event.target.files?.[0])}
-                      className="block w-full text-xs font-normal file:mr-3 file:rounded-md file:border file:bg-background file:px-3 file:py-1.5"
-                    />
-                  </label>
-                  <label className="block space-y-1 text-xs font-medium">
-                    {importTranscriptRequired
-                      ? 'Reference transcript (required for IndicF5)'
-                      : 'Reference transcript (optional)'}
+                  <label className="block space-y-1 text-xs font-medium text-foreground">
+                    Transcript
                     <Textarea
-                      value={importTranscript}
+                      value={transcript}
                       maxLength={2000}
-                      placeholder="If provided, enter or correct the exact words spoken."
-                      onChange={(event) => setImportTranscript(event.target.value)}
+                      placeholder="Enter or correct the exact words spoken in the recording."
+                      onChange={(event) => setTranscript(event.target.value)}
                       className="min-h-20 resize-y font-normal"
                     />
-                    <span className="block text-xs font-normal text-muted-foreground">
-                      {importTranscriptRequired
-                        ? 'IndicF5 requires accurate reference text. Transcribe it below or enter it exactly; Sahaya will never invent one.'
-                        : 'Chatterbox does not require this. Qwen and Ming compatibility requires accurate reference text; Sahaya will never invent one.'}
-                    </span>
                   </label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={!recording.blob || busy || transcribingImport}
-                    onClick={transcribeImportedAudio}
-                  >
-                    {transcribingImport ? <Loader2 className="size-4 animate-spin" /> : null}
-                    {transcribingImport ? 'Transcribing...' : 'Transcribe Audio'}
-                  </Button>
-                  <p className="text-xs text-muted-foreground">
-                    This explicitly uses the configured transcription provider and may incur its
-                    normal usage cost. Review and correct the result before continuing.
-                  </p>
-                  {recording.url ? (
-                    <div className="space-y-1">
-                      <p className="text-xs text-muted-foreground">Original file preview</p>
-                      <audio controls className="h-9 w-full" src={recording.url} />
-                    </div>
-                  ) : null}
-                  {recording.error ? (
-                    <p className="text-xs text-destructive" role="alert">
-                      {recording.error}
-                    </p>
-                  ) : null}
-                  {enrollmentError ? (
-                    <p className="text-xs text-destructive" role="alert">
-                      {enrollmentError}
-                    </p>
-                  ) : null}
                 </div>
-              )}
-
-              <div className="flex flex-wrap justify-end gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={submitEnrollment}
-                  disabled={
-                    !canSubmitRecording ||
-                    !consented ||
-                    !voiceName.trim() ||
-                    transcribingImport ||
-                    (importTranscriptRequired && !importTranscript.trim())
-                  }
-                >
-                  <Play className="size-4" />
-                  Continue
-                </Button>
-              </div>
+              ) : null}
             </div>
           )}
+
+          {recording.url ? (
+            <audio
+              controls
+              className="h-10 w-full"
+              aria-label="Selected recording"
+              src={recording.url}
+            />
+          ) : null}
+          {recording.error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {recording.error}
+            </p>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {profile ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  clearRecording();
+                  setEditing(false);
+                  setError(null);
+                }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+            ) : null}
+            <Button type="button" size="sm" onClick={generateVoice} disabled={!canGenerate}>
+              <Volume2 className="size-4" />
+              Generate Voice
+            </Button>
+          </div>
         </div>
-      )}
-    </div>
+      ) : null}
+    </section>
   );
 }

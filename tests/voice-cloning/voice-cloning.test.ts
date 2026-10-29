@@ -528,65 +528,40 @@ describe('faculty voice setup UI contract', () => {
   const componentSource = () =>
     readFileSync(join(repoRoot, 'components/voice-cloning/teaching-voice-card.tsx'), 'utf8');
 
-  it('keeps customization behind an explicit control and prevents duplicate enrollments', () => {
+  it('shows one faculty-facing record or upload workflow', () => {
     const source = componentSource();
 
-    expect(source).toContain("type SetupStep = 'record' | 'preview' | 'review'");
-    expect(source).toContain("checking: 'Checking your recording...'");
-    expect(source).toContain("preparing: 'Preparing voice sample...'");
-    expect(source).toContain("generating: 'Generating your voice preview...'");
-    expect(source).toContain("finishing: 'Finishing audio...'");
-    expect(source).toContain('const [customizeOpen, setCustomizeOpen] = useState(false)');
-    expect(source).toContain("value: Exclude<VoiceSettingsPreset, 'custom'>");
-    expect(source).toContain("{ value: 'natural', label: 'Natural' }");
-    expect(source).toContain("{ value: 'expressive', label: 'Expressive' }");
-    expect(source).toContain('draftPresetDescription');
-    expect(source).toContain('Manual settings are active.');
-    expect(source).not.toContain("{ value: 'custom'");
-    expect(source).not.toContain("{ value: 'accent-test', label: 'Accent Test' }");
-    expect(source).toContain('Speak naturally and do not rush.');
-    expect(source).not.toContain('Minimum');
-    expect(source).not.toContain('MAX_RECORDING_DURATION_SECONDS');
-    expect(source).not.toContain('MIN_RECORDING_DURATION_SECONDS');
-    expect(source).toContain('enrollmentRequestInFlightRef.current');
-    expect(source).toContain('setRecordingRequiresRetry(true)');
-    expect(source).toContain('Customize Voice');
-    expect(source).not.toContain('{renderVoiceConfigurationControls()}\n\n              <div');
+    expect(source).toContain('My Teaching Voice');
+    expect(source).toContain('Record Voice');
+    expect(source).toContain('Upload Audio');
+    expect(source).toContain('Generate Voice');
+    expect(source).toContain('Voice ready');
+    expect(source).toContain("formData.set('workflow', 'enhanced-qwen')");
+    expect(source).not.toContain('Customize Voice');
+    expect(source).not.toContain('Generate Preview');
+    expect(source).not.toContain('Voice Output');
+    expect(source).not.toContain('Use These Settings');
+    expect(source).not.toContain('VoiceComparisonPanel');
   });
 
-  it('keeps customization controls compact and teacher-facing', () => {
+  it('keeps consent and upload transcription explicit', () => {
     const source = componentSource();
 
-    expect(source).toContain('Clear, balanced classroom narration.');
-    expect(source).toContain('More emphasis for stories and key ideas.');
-    expect(source).toContain('Adjusts pronunciation conditioning only.');
-    expect(source).toContain('<option value="en">English</option>');
-    expect(source).toContain('<option value="hi">Hindi-influenced</option>');
-    expect(source).toContain('Voice Output');
-    expect(source).toContain('Generate Preview');
-    expect(source).not.toContain('Voice Model');
-    expect(source).not.toContain('Advanced Voice Settings');
-    expect(source).not.toContain('Expert Settings');
-    expect(source).toContain('sm:grid-cols-2');
-    expect(source).not.toContain('Chatterbox receives');
-    expect(source).not.toContain('grid gap-2 sm:grid-cols-4');
+    expect(source).toContain('I own this recording or have explicit permission');
+    expect(source).toContain('Transcribe Audio');
+    expect(source).toContain('Enter or correct the exact words spoken');
+    expect(source).toContain("formData.set('referenceText', transcript.trim())");
+    expect(source).not.toContain('Reference transcript (optional)');
   });
 
-  it('cleans candidate recording state during re-record without deleting accepted voice state', () => {
+  it('prevents duplicate generation and preserves earlier profiles during replacement', () => {
     const source = componentSource();
 
-    expect(source).toContain('const candidateAudioRef = useRef<HTMLAudioElement | null>(null)');
-    expect(source).toContain('candidateAudioRef.current.pause()');
-    expect(source).toContain('candidateAudioRef.current.currentTime = 0');
-    expect(source).toContain('URL.revokeObjectURL(prev.url)');
-    expect(source).toContain('const clearCandidateRecording = () =>');
-    expect(source).toContain('setRecordingRequiresRetry(false)');
-    expect(source).toContain('setPreviewError(null)');
-    expect(source).toContain('setEnrollmentError(null)');
-    expect(source).toContain('const discardCandidateProfile = async (profileId: string)');
-    expect(source).toContain('onClick={() => discardCandidateProfile(profile.id)}');
-    expect(source).toContain("method: 'DELETE'");
-    expect(source).not.toContain('Discard');
+    expect(source).toContain('requestInFlightRef.current');
+    expect(source).toContain('if (!profile || requestInFlightRef.current) return');
+    expect(source).toContain('if (!recording.blob || requestInFlightRef.current) return');
+    expect(source).toContain('previous voices are preserved');
+    expect(source).not.toContain("method: 'DELETE'");
   });
 });
 
@@ -737,6 +712,7 @@ describe('voice profile model preview API', () => {
   const isQwen3TtsClassroomEnabled = vi.fn();
   const generateQwen3TtsModelPreview = vi.fn();
   const currentQwen3TtsPreview = vi.fn();
+  const activateEnhancedQwenTeachingVoice = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
   beforeEach(async () => {
@@ -761,6 +737,7 @@ describe('voice profile model preview API', () => {
     isQwen3TtsClassroomEnabled.mockReset();
     generateQwen3TtsModelPreview.mockReset();
     currentQwen3TtsPreview.mockReset();
+    activateEnhancedQwenTeachingVoice.mockReset();
     createVoiceProfileId.mockClear();
     referenceAudioExists.mockResolvedValue(true);
     createProfile.mockImplementation(async ({ profileId }) => ({ providerReferenceId: profileId }));
@@ -809,6 +786,12 @@ describe('voice profile model preview API', () => {
     isQwen3TtsPreviewEnabled.mockReturnValue(false);
     isQwen3TtsClassroomEnabled.mockReturnValue(false);
     currentQwen3TtsPreview.mockImplementation((profile) => profile.qwenPreviewCache?.result);
+    activateEnhancedQwenTeachingVoice.mockImplementation(async (profile) => ({
+      ...profile,
+      status: 'ready',
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+    }));
     vi.doMock('@/lib/voice-cloning/config', () => ({
       getVoiceCloningDefaultLanguage: () => 'en',
       getChatterboxDefaultModelVariant: () => 'v3',
@@ -824,6 +807,7 @@ describe('voice profile model preview API', () => {
       createQwen3TtsPreviewCacheKey: vi.fn(() => 'qwen-cache-v1'),
       currentQwen3TtsPreview,
       generateQwen3TtsModelPreview,
+      activateEnhancedQwenTeachingVoice,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', () => ({
       isVoiceRecordingQualityError: (error: unknown) =>
@@ -1034,6 +1018,75 @@ describe('voice profile model preview API', () => {
     );
   });
 
+  it('runs the simplified workflow through enhanced Qwen without a Chatterbox preview', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const exactBytes = new Uint8Array([7, 7, 3, 1]);
+    const form = enrollmentForm();
+    form.set('attemptId', 'attempt-enhanced-qwen');
+    form.set('workflow', 'enhanced-qwen');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('recording', new File([exactBytes], 'faculty.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-enhanced-qwen');
+
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: {
+        activeEngine: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+        status: 'ready',
+      },
+    });
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({ bytes: exactBytes, fileName: 'faculty.wav' }),
+    );
+    expect(activateEnhancedQwenTeachingVoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+        referenceAudioKey: '/private/reference.wav',
+      }),
+      'local-faculty',
+    );
+    expect(createProfile).not.toHaveBeenCalled();
+    expect(generatePreview).not.toHaveBeenCalled();
+  });
+
+  it('requires an accurate transcript for enhanced uploaded enrollment', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-enhanced-without-transcript');
+    form.set('workflow', 'enhanced-qwen');
+    form.set('consent', 'true');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'en');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('accurate transcript'),
+    });
+    expect(nextServerMocks.afterCallbacks).toHaveLength(0);
+  });
+
   it('imports authorized audio with its exact transcript and preserves the original bytes', async () => {
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
     const exactBytes = new Uint8Array([8, 6, 7, 5, 3, 0, 9]);
@@ -1207,6 +1260,38 @@ describe('voice profile model preview API', () => {
       );
     },
   );
+
+  it('activates enhanced Qwen for an owned existing profile without replacing its recording', async () => {
+    const existing = readyProfile('v3');
+    readVoiceProfile.mockResolvedValue(existing);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: existing.id,
+          action: 'activate-enhanced-qwen',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      profile: {
+        id: existing.id,
+        activeEngine: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+      },
+    });
+    expect(activateEnhancedQwenTeachingVoice).toHaveBeenCalledExactlyOnceWith(
+      existing,
+      'local-faculty',
+    );
+    expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
+    expect(writeReferenceAudio).not.toHaveBeenCalled();
+  });
 
   it('previews English and Hindi text with Hindi synthesis from one English reference', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));

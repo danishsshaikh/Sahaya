@@ -55,6 +55,7 @@ import {
   voiceEnrollmentResponse,
 } from '@/lib/server/voice-enrollment-jobs';
 import {
+  activateEnhancedQwenTeachingVoice,
   createQwen3TtsPreviewCacheKey,
   currentQwen3TtsPreview,
   generateQwen3TtsModelPreview,
@@ -310,6 +311,27 @@ export async function PATCH(req: NextRequest) {
     const next = { ...profile, displayName, updatedAt: new Date().toISOString() };
     await writeVoiceProfile(next);
     return apiSuccess({ profile: publicVoiceProfile(next) });
+  }
+
+  if (body.action === 'activate-enhanced-qwen') {
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Teaching Voice is not ready for generation');
+    }
+    try {
+      const next = await activateEnhancedQwenTeachingVoice(profile, user.id);
+      return apiSuccess({
+        profile: publicVoiceProfile(next),
+        previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Teaching Voice generation failed',
+      );
+    }
   }
 
   const previewModel = body.previewModel ?? 'chatterbox-v3';

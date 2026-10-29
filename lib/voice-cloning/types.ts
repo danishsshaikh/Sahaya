@@ -486,7 +486,7 @@ export function compatibleVoiceProviders(profile: VoiceProfile): VoiceLibraryPro
   const language = profile.language;
   const referenceReady = profile.status === 'ready' && Boolean(profile.referenceAudioKey);
   const compatible: VoiceLibraryProviderId[] = [];
-  if (referenceReady && provider === 'chatterbox' && profile.providerReferenceId) {
+  if (referenceReady && provider === 'chatterbox') {
     compatible.push('chatterbox');
   }
   if (
