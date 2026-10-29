@@ -65,6 +65,16 @@ import {
   resolveSpeechAudioId,
 } from '@/lib/audio/regenerate-speech-tts';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('allocated speech audio identities', () => {
   beforeEach(() => {
     mocks.staticVoiceEnabled.mockReturnValue(true);
@@ -147,6 +157,46 @@ describe('allocated speech audio identities', () => {
       undefined,
       undefined,
     );
+  });
+
+  it('coalesces duplicate regeneration requests for the same narration action', async () => {
+    mocks.stageState = { stage: { id: 'stage-1' }, scenes: [] };
+    const generation = deferred<string>();
+    mocks.generateAndStoreTTS.mockReturnValue(generation.promise);
+
+    const first = regenerateSpeechAudio(
+      3,
+      { id: 'speech-1', text: 'Retry just this narration' },
+      'English',
+    );
+    const duplicate = regenerateSpeechAudio(
+      3,
+      { id: 'speech-1', text: 'Retry just this narration' },
+      'English',
+    );
+
+    await vi.waitFor(() => expect(mocks.generateAndStoreTTS).toHaveBeenCalledOnce());
+    generation.resolve('ast_regenerated');
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([
+      'ast_regenerated',
+      'ast_regenerated',
+    ]);
+    expect(mocks.generateAndStoreTTS).toHaveBeenCalledOnce();
+  });
+
+  it('clears failed single-flight state so the same action can be retried', async () => {
+    mocks.stageState = { stage: { id: 'stage-1' }, scenes: [] };
+    mocks.generateAndStoreTTS
+      .mockRejectedValueOnce(new Error('Qwen3-TTS capacity remained busy.'))
+      .mockResolvedValueOnce('ast_recovered');
+
+    await expect(
+      regenerateSpeechAudio(3, { id: 'speech-1', text: 'Retry just this narration' }, 'English'),
+    ).rejects.toThrow('Qwen3-TTS capacity remained busy.');
+    await expect(
+      regenerateSpeechAudio(3, { id: 'speech-1', text: 'Retry just this narration' }, 'English'),
+    ).resolves.toBe('ast_recovered');
+    expect(mocks.generateAndStoreTTS).toHaveBeenCalledTimes(2);
   });
 
   it('replaces bytes under an exclusively owned allocated id', async () => {

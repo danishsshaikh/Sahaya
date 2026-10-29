@@ -1,4 +1,5 @@
 import { getQwen3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
+import { runWithQwen3TtsCapacity } from '@/lib/server/qwen3-tts-capacity';
 import {
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
@@ -32,51 +33,61 @@ async function request(
   operation: TeachingVoiceProviderOperation,
 ): Promise<Response> {
   const { baseUrl, timeoutMs } = getQwen3TtsPreviewServiceConfig();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${baseUrl}${endpoint}`, { ...init, signal: controller.signal });
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
-      const detail = typeof body?.detail === 'string' ? body.detail : undefined;
-      if (
-        endpoint === '/synthesize' &&
-        response.status === 404 &&
-        (detail === 'voice profile not found' || detail === 'voice clone mode is not registered')
-      ) {
-        throw new VoiceProviderProfileNotFoundError('Qwen3-TTS voice prompt must be recreated.');
+  const execute = async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${baseUrl}${endpoint}`, { ...init, signal: controller.signal });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+        const detail = typeof body?.detail === 'string' ? body.detail : undefined;
+        if (
+          endpoint === '/synthesize' &&
+          response.status === 404 &&
+          (detail === 'voice profile not found' || detail === 'voice clone mode is not registered')
+        ) {
+          throw new VoiceProviderProfileNotFoundError('Qwen3-TTS voice prompt must be recreated.');
+        }
+        const message =
+          response.status === 429
+            ? 'Qwen3-TTS capacity remained busy. Retry this narration after the current generation finishes.'
+            : response.status === 503
+              ? 'Qwen3-TTS is unavailable. Check the Teaching Voice service health.'
+              : 'Qwen3-TTS could not generate audio.';
+        throw providerError(
+          message,
+          response.status === 429 ? 429 : 502,
+          endpoint,
+          operation,
+          response,
+          detail,
+        );
       }
-      const message =
-        response.status === 429
-          ? 'Qwen3-TTS is busy. Try again after the current generation finishes.'
-          : response.status === 503
-            ? 'Qwen3-TTS is unavailable. Check the Teaching Voice service health.'
-            : 'Qwen3-TTS could not generate audio.';
+      return response;
+    } catch (error) {
+      if (
+        error instanceof TeachingVoiceError ||
+        error instanceof VoiceProviderProfileNotFoundError
+      ) {
+        throw error;
+      }
       throw providerError(
-        message,
-        response.status === 429 ? 429 : 502,
+        controller.signal.aborted
+          ? 'Qwen3-TTS generation timed out. Your saved Teaching Voice is unchanged.'
+          : 'Qwen3-TTS Teaching Voice service is unreachable.',
+        502,
         endpoint,
         operation,
-        response,
-        detail,
       );
+    } finally {
+      clearTimeout(timer);
     }
-    return response;
-  } catch (error) {
-    if (error instanceof TeachingVoiceError || error instanceof VoiceProviderProfileNotFoundError) {
-      throw error;
-    }
-    throw providerError(
-      controller.signal.aborted
-        ? 'Qwen3-TTS generation timed out. Your saved Teaching Voice is unchanged.'
-        : 'Qwen3-TTS Teaching Voice service is unreachable.',
-      502,
-      endpoint,
-      operation,
-    );
-  } finally {
-    clearTimeout(timer);
-  }
+  };
+  return operation === 'provider_registration' ||
+    operation === 'preview_generation' ||
+    operation === 'synthesis'
+    ? runWithQwen3TtsCapacity(execute, init.signal ?? undefined)
+    : execute();
 }
 
 export class Qwen3TtsVoiceCloningProvider implements VoiceCloningProvider {

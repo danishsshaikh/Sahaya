@@ -93,12 +93,12 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function busyError() {
+function busyError(provider: 'chatterbox' | 'qwen3-tts' = 'chatterbox') {
   return new TeachingVoiceProviderOperationError(
     'Teaching Voice service is busy. Try again after the current generation finishes.',
     429,
     {
-      provider: 'chatterbox',
+      provider,
       endpoint: '/synthesize',
       operation: 'synthesis',
       providerStatus: 429,
@@ -350,6 +350,30 @@ describe('profile-specific synthesis and recovery', () => {
     );
     expect(result.audio).toEqual(new Uint8Array([1]));
     expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it('recovers a bounded Qwen busy response before enhancement runs once', async () => {
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '2');
+    profile = {
+      ...profile,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+    };
+    mocks.synthesize
+      .mockRejectedValueOnce(busyError('qwen3-tts'))
+      .mockResolvedValueOnce({ audio: new Uint8Array([4]), format: 'wav' });
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([4]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([8]), format: 'wav' },
+    });
+
+    await expect(synthesizeFacultyVoice(request)).resolves.toEqual({
+      audio: new Uint8Array([8]),
+      format: 'wav',
+    });
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.processQwenAudio).toHaveBeenCalledOnce();
   });
 
   it('recreates a Qwen speaker prompt after service restart without overwriting Chatterbox IDs', async () => {

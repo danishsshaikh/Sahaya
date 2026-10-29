@@ -49,7 +49,7 @@ afterEach(() => {
   clearResourceJobQueueForTests();
 });
 
-describe('IndicF5 Teaching Voice jobs', () => {
+describe('Teaching Voice jobs', () => {
   it('serializes several clips and keeps later clips queued', async () => {
     const first = deferred<{ audio: Uint8Array; format: string }>();
     const second = deferred<{ audio: Uint8Array; format: string }>();
@@ -140,5 +140,86 @@ describe('IndicF5 Teaching Voice jobs', () => {
         language: 'en',
       }),
     );
+  });
+
+  it('serializes several concurrent Qwen slide jobs in submission order', async () => {
+    const gates = [
+      deferred<{ audio: Uint8Array; format: string }>(),
+      deferred<{ audio: Uint8Array; format: string }>(),
+      deferred<{ audio: Uint8Array; format: string }>(),
+    ];
+    const started: string[] = [];
+    mocks.synthesize.mockImplementation((request: { text: string }) => {
+      const index = started.length;
+      started.push(request.text);
+      return gates[index].promise;
+    });
+    const jobs = ['First slide', 'Second slide', 'Third slide'].map(
+      (text, index) =>
+        enqueueTeachingVoiceJob({
+          ...input(`tts_qwen_${index}`, text),
+          providerId: 'qwen3-tts',
+          profileId: 'vcp_english',
+          language: 'en',
+          sceneId: `scene-${index}`,
+        }).job,
+    );
+
+    await vi.waitFor(() => expect(started).toEqual(['First slide']));
+    expect(readTeachingVoiceJob(jobs[1].id, 'faculty-1')).toMatchObject({
+      status: 'queued',
+      jobsAhead: 1,
+    });
+    gates[0].resolve({ audio: new Uint8Array([1]), format: 'wav' });
+    await vi.waitFor(() => expect(started).toEqual(['First slide', 'Second slide']));
+    gates[1].resolve({ audio: new Uint8Array([2]), format: 'wav' });
+    await vi.waitFor(() => expect(started).toEqual(['First slide', 'Second slide', 'Third slide']));
+    gates[2].resolve({ audio: new Uint8Array([3]), format: 'wav' });
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(jobs[2].id, 'faculty-1')?.status).toBe('completed'),
+    );
+  });
+
+  it('retries only a failed Qwen action and preserves completed action audio', async () => {
+    mocks.synthesize
+      .mockResolvedValueOnce({ audio: new Uint8Array([7]), format: 'wav' })
+      .mockRejectedValueOnce(new Error('Qwen capacity wait expired'))
+      .mockResolvedValueOnce({ audio: new Uint8Array([9]), format: 'wav' });
+    const completed = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_complete', 'Completed action'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    }).job;
+    const failedRequest = {
+      ...input('tts_qwen_failed', 'Retry only this action'),
+      providerId: 'qwen3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+    const failed = enqueueTeachingVoiceJob(failedRequest).job;
+
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(failed.id, 'faculty-1')?.status).toBe('failed'),
+    );
+    expect(readTeachingVoiceJobResult(completed.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([7]),
+      format: 'wav',
+    });
+
+    const retry = enqueueTeachingVoiceJob(failedRequest);
+    expect(retry.reused).toBe(false);
+    expect(retry.job.id).not.toBe(failed.id);
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(retry.job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+    expect(readTeachingVoiceJobResult(retry.job.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([9]),
+      format: 'wav',
+    });
+    expect(readTeachingVoiceJobResult(completed.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([7]),
+      format: 'wav',
+    });
   });
 });

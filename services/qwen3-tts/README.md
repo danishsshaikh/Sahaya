@@ -59,7 +59,16 @@ QWEN3_TTS_PREVIEW_ENABLED=true
 QWEN3_TTS_CLASSROOM_ENABLED=true
 QWEN3_TTS_BASE_URL=http://127.0.0.1:8771
 QWEN3_TTS_TIMEOUT_MS=180000
+# Optional: bounded FIFO wait at the model boundary (defaults shown).
+QWEN3_TTS_QUEUE_WAIT_SECONDS=120
+QWEN3_TTS_MAX_PENDING=64
 ```
+
+Every profile-registration and synthesis request shares this one FIFO model
+slot. The wait happens inside the service instead of returning an immediate
+busy response, so queued Sahaya jobs do not spend their retry budget merely
+waiting for an earlier generation. The queue wait remains bounded; a timed-out
+request returns `429` with `Retry-After` and can be retried explicitly.
 
 The simplified homepage Teaching Voice workflow requires every relevant gate:
 `QWEN3_TTS_PREVIEW_ENABLED=true`, `QWEN3_TTS_CLASSROOM_ENABLED=true`,

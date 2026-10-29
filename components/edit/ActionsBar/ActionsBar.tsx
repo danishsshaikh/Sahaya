@@ -317,6 +317,7 @@ export function SpeechTtsBar({
 }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<TtsStatus>('none');
+  const [generationError, setGenerationError] = useState<string | null>(null);
   const [pronunciationRepairPending, setPronunciationRepairPending] = useState(false);
   // Holds this line in the generating state across a batch ("Voice all") run
   // and — crucially — until its OWN audio re-check resolves, so it can't
@@ -340,6 +341,7 @@ export function SpeechTtsBar({
   // so an in-flight `audioObjectUrl` await can tell it was superseded and drop
   // its result — this is what kills the double-click double-Audio race.
   const previewTokenRef = useRef(0);
+  const regenerationRef = useRef<Promise<string | null> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objUrlRef = useRef<string | null>(null);
 
@@ -447,14 +449,13 @@ export function SpeechTtsBar({
   const mayRegenerate = useMayGenerateForStage(useStageStore((state) => state.stage?.id));
 
   const regenerate = async () => {
+    if (regenerationRef.current) return;
+    setGenerationError(null);
     setStatus('generating');
+    const operation = regenerateSpeechAudio(sceneOrder, { id: actionId, text, audioId }, language);
+    regenerationRef.current = operation;
     try {
-      const previousAudioId = audioId;
-      const id = await regenerateSpeechAudio(
-        sceneOrder,
-        { id: actionId, text, audioId: previousAudioId },
-        language,
-      );
+      const id = await operation;
       if (id) {
         setReadAudioId(id);
         onGenerated(id);
@@ -462,8 +463,12 @@ export function SpeechTtsBar({
       } else {
         setStatus('none');
       }
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message.trim() : '';
+      setGenerationError(message.slice(0, 180) || t('edit.tts.statusError'));
       setStatus('error');
+    } finally {
+      if (regenerationRef.current === operation) regenerationRef.current = null;
     }
   };
 
@@ -496,7 +501,12 @@ export function SpeechTtsBar({
   return (
     <div className="flex items-center gap-1 border-t border-border/60 px-2 py-1">
       <Volume2 className="size-3 shrink-0 text-muted-foreground/40" />
-      <span className={cn('text-[10px] font-medium', s.cls)}>{s.label}</span>
+      <span
+        className={cn('max-w-56 truncate text-[10px] font-medium', s.cls)}
+        title={effStatus === 'error' ? (generationError ?? s.label) : undefined}
+      >
+        {effStatus === 'error' && generationError ? generationError : s.label}
+      </span>
       <span className="ml-auto" />
       {mayRegenerate && stageId ? (
         <PronunciationRepairDialog

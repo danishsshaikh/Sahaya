@@ -30,6 +30,16 @@ describe('Qwen3-TTS Teaching Voice service scaffold', () => {
     expect(source).not.toContain('indicf5');
   });
 
+  it('queues profile creation and synthesis fairly instead of returning immediate busy', () => {
+    expect(source).toContain('class FairGenerationQueue:');
+    expect(source).toContain('self._waiters.append(token)');
+    expect(source).toContain('self._waiters[0] is not token');
+    expect(source).toContain('acquire_generation_slot("profile-registration")');
+    expect(source).toContain('acquire_generation_slot("synthesis")');
+    expect(source).toContain('QWEN3_TTS_QUEUE_WAIT_SECONDS');
+    expect(source).not.toContain('generation_lock.acquire(blocking=False)');
+  });
+
   it('keeps prompts transient and supports explicit cache removal', () => {
     expect(source).toContain('profiles: dict[str, VoicePrompt] = {}');
     expect(source).toContain('@app.delete("/profiles/{profile_id}")');

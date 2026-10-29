@@ -5,7 +5,9 @@ import logging
 import os
 import re
 import threading
+import time
 import traceback
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,10 +37,50 @@ CLONE_MODES = {"speaker-embedding", "icl"}
 app = FastAPI(title="Sahaya Qwen3-TTS Teaching Voice Service")
 log = logging.getLogger("sahaya.qwen3_tts")
 
-generation_lock = threading.Lock()
 state_lock = threading.Lock()
 model: Any | None = None
 model_error: str | None = None
+
+
+class FairGenerationQueue:
+    """FIFO admission for the single model slot shared by every HTTP caller."""
+
+    def __init__(self, max_pending: int) -> None:
+        self._condition = threading.Condition()
+        self._active = False
+        self._waiters: deque[object] = deque()
+        self._max_pending = max_pending
+
+    def acquire(self, timeout_seconds: float) -> float | None:
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        token = object()
+        with self._condition:
+            if len(self._waiters) >= self._max_pending:
+                return None
+            self._waiters.append(token)
+            while self._active or self._waiters[0] is not token:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._waiters.remove(token)
+                    self._condition.notify_all()
+                    return None
+                self._condition.wait(remaining)
+            self._waiters.popleft()
+            self._active = True
+        return time.monotonic() - started_at
+
+    def release(self) -> None:
+        with self._condition:
+            if not self._active:
+                raise RuntimeError("Qwen3-TTS generation slot was not acquired")
+            self._active = False
+            self._condition.notify_all()
+
+
+QUEUE_WAIT_SECONDS = max(1.0, float(os.getenv("QWEN3_TTS_QUEUE_WAIT_SECONDS", "120")))
+MAX_PENDING_GENERATIONS = max(1, int(os.getenv("QWEN3_TTS_MAX_PENDING", "64")))
+generation_queue = FairGenerationQueue(MAX_PENDING_GENERATIONS)
 
 
 @dataclass(frozen=True)
@@ -143,6 +185,22 @@ def require_model() -> Any:
     return model
 
 
+def acquire_generation_slot(operation: str) -> None:
+    waited_seconds = generation_queue.acquire(QUEUE_WAIT_SECONDS)
+    if waited_seconds is None:
+        raise HTTPException(
+            status_code=429,
+            detail="Qwen3-TTS queue wait timed out; retry this narration",
+            headers={"Retry-After": "5"},
+        )
+    if waited_seconds > 0.001:
+        log.info(
+            "Qwen3-TTS queue admitted operation=%s waitedMs=%d",
+            operation,
+            round(waited_seconds * 1000),
+        )
+
+
 def load_model() -> None:
     global model, model_error
     if Qwen3TTSModel is None:
@@ -199,8 +257,7 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
     ):
         return {"providerReferenceId": req.profileId}
 
-    if not generation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="Qwen3-TTS Teaching Voice service is busy")
+    acquire_generation_slot("profile-registration")
     try:
         with state_lock:
             existing = profiles.get(req.profileId)
@@ -244,7 +301,7 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
         )
         raise HTTPException(status_code=500, detail="voice prompt creation failed") from None
     finally:
-        generation_lock.release()
+        generation_queue.release()
 
 
 @app.delete("/profiles/{profile_id}")
@@ -280,8 +337,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
     if prompt is None:
         raise HTTPException(status_code=404, detail="voice clone mode is not registered")
     validate_reference(str(profile.reference_audio))
-    if not generation_lock.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="Qwen3-TTS Teaching Voice service is busy")
+    acquire_generation_slot("synthesis")
     try:
         with torch.inference_mode():
             waveforms, sample_rate = active_model.generate_voice_clone(
@@ -310,7 +366,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
         )
         raise HTTPException(status_code=500, detail="voice synthesis failed") from None
     finally:
-        generation_lock.release()
+        generation_queue.release()
 
 
 @app.delete("/profiles/{profile_id}")

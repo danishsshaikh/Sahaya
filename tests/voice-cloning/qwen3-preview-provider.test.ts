@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
+import { clearQwen3TtsCapacityForTests } from '@/lib/server/qwen3-tts-capacity';
 
 afterEach(() => {
+  clearQwen3TtsCapacityForTests();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
@@ -73,6 +75,43 @@ describe('Qwen3-TTS preview provider', () => {
       status: 429,
       metadata: { provider: 'qwen3-tts', endpoint: '/synthesize' },
     });
+  });
+
+  it('does not send a queued request while another Qwen operation owns capacity', async () => {
+    let finishFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(firstResponse)
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([82, 73, 70, 70]), {
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new Qwen3TtsVoiceCloningProvider();
+    const first = provider.synthesize({
+      providerReferenceId: 'vcp_existing',
+      text: 'First slide narration.',
+      language: 'en',
+    });
+    const second = provider.generatePreview({
+      providerReferenceId: 'vcp_existing',
+      text: 'Relevant preview.',
+      language: 'en',
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    finishFirst(
+      new Response(new Uint8Array([82, 73, 70, 70]), {
+        headers: { 'content-type': 'audio/wav' },
+      }),
+    );
+    await expect(first).resolves.toMatchObject({ format: 'wav' });
+    await expect(second).resolves.toMatchObject({ format: 'wav' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('registers ICL separately with the exact saved transcript', async () => {

@@ -930,6 +930,11 @@ export async function generateAndStoreTTS(
   // clip onto a timeline without re-decoding. null → leave undefined; the audio
   // still persists and plays.
   const duration = measureAudioDuration(bytes, data.format) ?? undefined;
+  if (teacherVoiceProfileId && (!duration || bytes.byteLength === 0)) {
+    throw new Error(
+      'Teaching Voice returned invalid audio. This narration was not marked as voiced.',
+    );
+  }
   const serverBacked = isServerBackedMediaPersistence();
   // Server-backed: the bytes go to the pool and the pool allocates the
   // identity, so the id the speech action ends up holding names durable audio
