@@ -45,6 +45,7 @@ import {
   VOICE_COMPARISON_LANGUAGES,
   VOICE_COMPARISON_PROVIDERS,
 } from '@/lib/voice-comparison/catalog';
+import type { CourseNarrationState } from '@/lib/course-narration/types';
 import type { VoiceComparisonLanguageCode } from '@/lib/voice-comparison/types';
 
 const roots: Root[] = [];
@@ -52,14 +53,17 @@ const roots: Root[] = [];
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-function providerBootstrap(language: VoiceComparisonLanguageCode) {
+function providerBootstrap(
+  language: VoiceComparisonLanguageCode,
+  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
+) {
   const currentProfile = {
     id: `current-${language}-profile`,
     displayName: 'Current Teaching Voice',
     provider: language === 'hi' ? 'indicf5' : 'chatterbox',
     language,
     status: 'ready',
-    activeEngine: language === 'hi' ? 'indicf5' : 'chatterbox',
+    activeEngine: activeEngine ?? (language === 'hi' ? 'indicf5' : 'chatterbox'),
     createdAt: '2026-01-02T00:00:00.000Z',
     updatedAt: '2026-01-02T00:00:00.000Z',
     consentTimestamp: '2026-01-01T00:00:00.000Z',
@@ -111,13 +115,18 @@ async function flush() {
   });
 }
 
-async function mount(language: VoiceComparisonLanguageCode) {
+async function mount(
+  language: VoiceComparisonLanguageCode,
+  narration?: CourseNarrationState,
+  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
+) {
   store.state.stage = {
     id: 'browser-course-without-profile-pointer',
     name: 'Existing browser course',
     createdAt: 1,
     updatedAt: 2,
     lessonLanguage: language,
+    ...(narration ? { narration } : {}),
   };
   store.state.scenes = [
     {
@@ -125,7 +134,7 @@ async function mount(language: VoiceComparisonLanguageCode) {
       actions: [{ id: 'speech-1', type: 'speech', text: 'Exact existing narration.' }],
     },
   ];
-  const bootstrap = providerBootstrap(language);
+  const bootstrap = providerBootstrap(language, activeEngine);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       const body = JSON.parse(String(init.body)) as {
@@ -204,7 +213,8 @@ describe('Narration Voice provider controls', () => {
 
     for (const name of [
       'Chatterbox V3',
-      'Qwen3-TTS 1.7B',
+      'Qwen3-TTS (Enhanced)',
+      'Qwen3-TTS (Original)',
       'Sarvam AI',
       'Ming 3.0 TTS 0.5B',
       'Bodhan Indic-Speak',
@@ -240,7 +250,61 @@ describe('Narration Voice provider controls', () => {
     expect(engineButton(host, 'IndicF5').disabled).toBe(false);
     expect(engineButton(host, 'Chatterbox V3').disabled).toBe(true);
     expect(engineButton(host, 'Sarvam AI').disabled).toBe(false);
-    expect(engineButton(host, 'Qwen3-TTS 1.7B').disabled).toBe(true);
+    expect(engineButton(host, 'Qwen3-TTS (Enhanced)').disabled).toBe(true);
+    expect(engineButton(host, 'Qwen3-TTS (Original)').disabled).toBe(true);
+  });
+
+  it('persists explicit Original Qwen selection and sends it to preview generation', async () => {
+    const { host, fetchMock } = await mount('en');
+
+    const enhanced = engineButton(host, 'Qwen3-TTS (Enhanced)');
+    const original = engineButton(host, 'Qwen3-TTS (Original)');
+    expect(enhanced.disabled).toBe(false);
+    expect(original.disabled).toBe(false);
+
+    act(() => original.click());
+    await flush();
+    expect(store.state.stage).toMatchObject({
+      narration: {
+        preferredSelection: {
+          providerId: 'qwen3-tts',
+          providerName: 'Qwen3-TTS (Original)',
+          enhancementMode: 'standard',
+          profileId: 'current-en-profile',
+        },
+      },
+    });
+
+    act(() => engineButton(host, 'Preview This Scene').click());
+    await flush();
+    await flush();
+    const request = fetchMock.mock.calls
+      .filter(([, init]) => init?.method === 'POST')
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((body) => body.providerId === 'qwen3-tts');
+    expect(request).toMatchObject({
+      providerId: 'qwen3-tts',
+      enhancementMode: 'standard',
+      text: 'Exact existing narration.',
+    });
+
+    const savedNarration = (store.state.stage as { narration: CourseNarrationState }).narration;
+    const restored = await mount('en', savedNarration);
+    expect(engineButton(restored.host, 'Qwen3-TTS (Original)').className).toContain(
+      'border-primary',
+    );
+    expect(
+      [...restored.host.querySelectorAll('select')].some((select) =>
+        select.parentElement?.textContent?.includes('Audio mode'),
+      ),
+    ).toBe(false);
+  });
+
+  it('defaults an unconfigured Qwen Teaching Voice course to Enhanced', async () => {
+    const { host } = await mount('en', undefined, 'qwen3-tts');
+
+    expect(engineButton(host, 'Qwen3-TTS (Enhanced)').className).toContain('border-primary');
+    expect(engineButton(host, 'Qwen3-TTS (Original)').className).not.toContain('border-primary');
   });
 
   it('persists a previous saved voice for only this course and previews with that profile', async () => {

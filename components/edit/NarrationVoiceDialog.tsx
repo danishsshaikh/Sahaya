@@ -9,6 +9,7 @@ import { activateCourseNarrationVersion } from '@/lib/course-narration/activatio
 import { storeCourseNarrationAudio } from '@/lib/course-narration/audio-storage';
 import { buildBrowserCourseNarrationRegistration } from '@/lib/course-narration/browser-registration';
 import type {
+  CourseNarrationEnhancementMode,
   CourseNarrationSelection,
   CourseNarrationState,
   CourseNarrationVersion,
@@ -28,12 +29,20 @@ import type {
   VoiceComparisonBootstrap,
   VoiceComparisonLanguageCode,
   VoiceComparisonPreviewResult,
+  VoiceComparisonProviderAvailability,
 } from '@/lib/voice-comparison/types';
 
 interface NarrationVoiceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   sceneId: string;
+}
+
+interface NarrationProviderChoice {
+  provider: VoiceComparisonProviderAvailability;
+  name: string;
+  enhancementMode?: CourseNarrationEnhancementMode;
+  description: string;
 }
 
 class NarrationPersistenceError extends Error {
@@ -64,9 +73,21 @@ function speechActions(actions: readonly unknown[] | undefined): SpeechAction[] 
 
 function profileProviderName(profile: PublicVoiceProfile | null): string {
   if (!profile) return 'Original narration';
-  if (profile.activeEngine === 'qwen3-tts') return 'Qwen3-TTS 1.7B';
+  if (profile.activeEngine === 'qwen3-tts') {
+    return profile.qwenEnhancementMode === 'standard'
+      ? 'Qwen3-TTS (Original)'
+      : 'Qwen3-TTS (Enhanced)';
+  }
   if (profile.activeEngine === 'indicf5') return 'IndicF5';
   return 'Chatterbox V3';
+}
+
+function narrationProviderName(
+  provider: VoiceComparisonProviderAvailability,
+  enhancementMode: CourseNarrationEnhancementMode,
+): string {
+  if (provider.id !== 'qwen3-tts') return provider.name;
+  return enhancementMode === 'standard' ? 'Qwen3-TTS (Original)' : 'Qwen3-TTS (Enhanced)';
 }
 
 function profileSupportsProvider(
@@ -102,9 +123,8 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
   const [language, setLanguage] = useState<VoiceComparisonLanguageCode>('en');
   const [voice, setVoice] = useState('');
   const [style, setStyle] = useState('educational lecture');
-  const [enhancementMode, setEnhancementMode] = useState<'standard' | 'resemble-enhance'>(
-    'standard',
-  );
+  const [enhancementMode, setEnhancementMode] =
+    useState<CourseNarrationEnhancementMode>('resemble-enhance');
   const [loading, setLoading] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [registrationRequired, setRegistrationRequired] = useState(false);
@@ -122,11 +142,44 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     [scenes],
   );
   const provider = bootstrap?.providers.find((candidate) => candidate.id === providerId);
+  const providerChoices = useMemo<NarrationProviderChoice[]>(
+    () =>
+      (bootstrap?.providers ?? []).flatMap<NarrationProviderChoice>((candidate) =>
+        candidate.id === 'qwen3-tts'
+          ? [
+              {
+                provider: candidate,
+                name: 'Qwen3-TTS (Enhanced)',
+                enhancementMode: 'resemble-enhance' as const,
+                description: 'Resemble-enhanced',
+              },
+              {
+                provider: candidate,
+                name: 'Qwen3-TTS (Original)',
+                enhancementMode: 'standard' as const,
+                description: 'Original Qwen output',
+              },
+            ]
+          : [
+              {
+                provider: candidate,
+                name: candidate.name,
+                enhancementMode: undefined,
+                description: candidate.experimental
+                  ? 'Experimental'
+                  : candidate.voiceType === 'preset'
+                    ? 'Preset voice'
+                    : 'Saved faculty voice',
+              },
+            ],
+      ),
+    [bootstrap?.providers],
+  );
   const matchingVoices = useMemo(() => bootstrap?.bodhanVoices ?? [], [bootstrap?.bodhanVoices]);
   const selection: CourseNarrationSelection | null = provider
     ? {
         providerId,
-        providerName: provider.name,
+        providerName: narrationProviderName(provider, enhancementMode),
         ...(profile && providerId !== 'bodhan' ? { profileId: profile.id } : {}),
         language,
         ...(providerId === 'bodhan' ? { voice, style } : {}),
@@ -194,26 +247,69 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       }
       setBootstrap(body.narration);
       setProfile(body.narration.profile ?? null);
+      const preferredSelection = current.stage.narration?.preferredSelection;
       const initialLanguage = body.narration.languages.some(
-        (candidate) => candidate.code === lessonLanguage,
+        (candidate) => candidate.code === preferredSelection?.language,
       )
-        ? lessonLanguage!
-        : body.narration.languages.some(
-              (candidate) => candidate.code === body.narration?.profile?.language,
-            )
-          ? (body.narration.profile!.language as VoiceComparisonLanguageCode)
-          : 'en';
+        ? preferredSelection!.language
+        : body.narration.languages.some((candidate) => candidate.code === lessonLanguage)
+          ? lessonLanguage!
+          : body.narration.languages.some(
+                (candidate) => candidate.code === body.narration?.profile?.language,
+              )
+            ? (body.narration.profile!.language as VoiceComparisonLanguageCode)
+            : 'en';
       setLanguage(initialLanguage);
-      const first = body.narration.providers.find(
+      const preferredProvider = body.narration.providers.find(
         (candidate) =>
+          candidate.id === preferredSelection?.providerId &&
           candidate.configured &&
           candidate.courseNarrationEnabled &&
           candidate.supportedLanguages.includes(initialLanguage) &&
           profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
       );
-      if (first) setProviderId(first.id);
-      setVoice(body.narration.bodhanVoices[0]?.id ?? '');
-      setStyle(body.narration.bodhanStyles[0] ?? 'educational lecture');
+      const profileDefaultProvider = !preferredSelection
+        ? body.narration.providers.find(
+            (candidate) =>
+              candidate.id === body.narration?.profile?.activeEngine &&
+              candidate.configured &&
+              candidate.courseNarrationEnabled &&
+              candidate.supportedLanguages.includes(initialLanguage) &&
+              profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
+          )
+        : undefined;
+      const first =
+        preferredProvider ??
+        profileDefaultProvider ??
+        body.narration.providers.find(
+          (candidate) =>
+            candidate.configured &&
+            candidate.courseNarrationEnabled &&
+            candidate.supportedLanguages.includes(initialLanguage) &&
+            profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
+        );
+      if (first) {
+        setProviderId(first.id);
+        setEnhancementMode(
+          first.id === 'qwen3-tts'
+            ? preferredSelection?.enhancementMode === 'standard'
+              ? 'standard'
+              : 'resemble-enhance'
+            : preferredSelection?.providerId === first.id && preferredSelection.enhancementMode
+              ? preferredSelection.enhancementMode
+              : 'standard',
+        );
+      }
+      setVoice(
+        preferredSelection?.providerId === 'bodhan' && preferredSelection.voice
+          ? preferredSelection.voice
+          : (body.narration.bodhanVoices[0]?.id ?? ''),
+      );
+      setStyle(
+        preferredSelection?.providerId === 'bodhan' && preferredSelection.style
+          ? preferredSelection.style
+          : (body.narration.bodhanStyles[0] ?? 'educational lecture'),
+      );
     };
     void load().catch((caught: unknown) => {
       if ((caught as { name?: string }).name !== 'AbortError') {
@@ -224,6 +320,56 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     });
     return () => request.abort();
   }, [lessonLanguage, loadAttempt, open, stageId, teacherVoiceProfileId]);
+
+  const selectionForProvider = (
+    candidate: VoiceComparisonProviderAvailability,
+    mode: CourseNarrationEnhancementMode,
+    selectedProfile: PublicVoiceProfile | null = profile,
+  ): CourseNarrationSelection => ({
+    providerId: candidate.id,
+    providerName: narrationProviderName(candidate, mode),
+    ...(selectedProfile && candidate.id !== 'bodhan' ? { profileId: selectedProfile.id } : {}),
+    language,
+    ...(candidate.id === 'bodhan' ? { voice, style } : {}),
+    ...(candidate.supportsEnhancement ? { enhancementMode: mode } : {}),
+    experimental: candidate.experimental,
+  });
+
+  const persistPreferredSelection = async (
+    nextSelection: CourseNarrationSelection,
+    selectedProfile: PublicVoiceProfile | null = profile,
+  ) => {
+    if (readOnly) return;
+    const current = useStageStore.getState();
+    if (!current.stage || current.stage.id !== stageId) return;
+    const narration = ensureOriginalNarrationState(
+      current.stage.narration,
+      current.scenes,
+      nextSelection.language,
+      profileProviderName(selectedProfile),
+    );
+    if (!(await persistNarrationState({ ...narration, preferredSelection: nextSelection }))) {
+      throw new NarrationPersistenceError('The course narration selection could not be saved.');
+    }
+  };
+
+  const selectProviderChoice = (
+    candidate: VoiceComparisonProviderAvailability,
+    selectedMode?: CourseNarrationEnhancementMode,
+  ) => {
+    const mode = candidate.id === 'qwen3-tts' ? (selectedMode ?? 'resemble-enhance') : 'standard';
+    setProviderId(candidate.id);
+    setEnhancementMode(mode);
+    setPreview(null);
+    setError(null);
+    void persistPreferredSelection(selectionForProvider(candidate, mode)).catch((caught) => {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'The course narration selection could not be saved.',
+      );
+    });
+  };
 
   const selectCourseProfile = async (profileId: string) => {
     if (!stageId || loading) return;
@@ -253,15 +399,27 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         throw new Error('The selected voice could not be saved in this browser.');
       }
       setProfile(selected);
+      let selectedProvider = provider;
+      let selectedMode = enhancementMode;
       if (!profileSupportsProvider(selected, providerId)) {
-        const nextProvider = bootstrap?.providers.find(
+        selectedProvider = bootstrap?.providers.find(
           (candidate) =>
             candidate.configured &&
             candidate.courseNarrationEnabled &&
             candidate.supportedLanguages.includes(language) &&
             profileSupportsProvider(selected, candidate.id),
         );
-        if (nextProvider) setProviderId(nextProvider.id);
+        if (selectedProvider) {
+          selectedMode = selectedProvider.id === 'qwen3-tts' ? 'resemble-enhance' : 'standard';
+          setProviderId(selectedProvider.id);
+          setEnhancementMode(selectedMode);
+        }
+      }
+      if (selectedProvider) {
+        await persistPreferredSelection(
+          selectionForProvider(selectedProvider, selectedMode, selected),
+          selected,
+        );
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The selected voice could not be saved.');
@@ -452,7 +610,14 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
               ? { processingMode: 'raw-provider-output' }
               : selection.providerId === 'ming3-tts'
                 ? { processingMode: 'model-native-output' }
-                : {}),
+                : selection.providerId === 'qwen3-tts'
+                  ? {
+                      processingMode:
+                        selection.enhancementMode === 'standard'
+                          ? 'model-native-output'
+                          : 'resemble-enhanced-output',
+                    }
+                  : {}),
           },
           createdAt: now,
           updatedAt: now,
@@ -471,7 +636,13 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       const versions = latest.versions.some((candidate) => candidate.id === version.id)
         ? latest.versions.map((candidate) => (candidate.id === version.id ? version : candidate))
         : [...latest.versions, version];
-      if (!(await persistNarrationState({ ...latest, versions }))) {
+      if (
+        !(await persistNarrationState({
+          ...latest,
+          preferredSelection: jobSelection,
+          versions,
+        }))
+      ) {
         throw new NarrationPersistenceError(
           'Narration progress could not be saved. No further synthesis was requested.',
         );
@@ -606,7 +777,10 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
           <div>
             <h2 className="font-medium">Narration Voice</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Current: {active?.providerName ?? profileProviderName(profile)}
+              Current:{' '}
+              {active?.providerName ??
+                stage?.narration?.preferredSelection?.providerName ??
+                profileProviderName(profile)}
             </p>
           </div>
           <DialogClose className="grid size-7 place-items-center rounded-md text-muted-foreground hover:bg-muted">
@@ -652,7 +826,8 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                   Voice engine
                 </h3>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {bootstrap.providers.map((candidate) => {
+                  {providerChoices.map((choice) => {
+                    const candidate = choice.provider;
                     const disabled =
                       !candidate.configured ||
                       !candidate.courseNarrationEnabled ||
@@ -660,29 +835,27 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                       !profileSupportsProvider(profile, candidate.id);
                     return (
                       <button
-                        key={candidate.id}
+                        key={`${candidate.id}:${choice.enhancementMode ?? 'default'}`}
                         type="button"
                         disabled={disabled || loading}
-                        onClick={() => setProviderId(candidate.id)}
+                        onClick={() => selectProviderChoice(candidate, choice.enhancementMode)}
                         title={
                           disabled
                             ? (candidate.unavailableReason ??
                               'Unavailable for this course language')
-                            : candidate.name
+                            : choice.name
                         }
                         className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
-                          providerId === candidate.id
+                          providerId === candidate.id &&
+                          (candidate.id !== 'qwen3-tts' ||
+                            enhancementMode === choice.enhancementMode)
                             ? 'border-primary bg-primary/5'
                             : 'border-border hover:bg-muted/50'
                         } disabled:cursor-not-allowed disabled:opacity-45`}
                       >
-                        <span className="block font-medium">{candidate.name}</span>
+                        <span className="block font-medium">{choice.name}</span>
                         <span className="text-[11px] text-muted-foreground">
-                          {candidate.experimental
-                            ? 'Experimental'
-                            : candidate.voiceType === 'preset'
-                              ? 'Preset voice'
-                              : 'Saved faculty voice'}
+                          {choice.description}
                         </span>
                       </button>
                     );
@@ -768,13 +941,13 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                     </select>
                   </label>
                 ) : null}
-                {provider?.supportsEnhancement ? (
+                {provider?.supportsEnhancement && providerId !== 'qwen3-tts' ? (
                   <label className="space-y-1 text-xs font-medium sm:col-span-2">
                     Audio mode
                     <select
                       value={enhancementMode}
                       onChange={(event) =>
-                        setEnhancementMode(event.target.value as 'standard' | 'resemble-enhance')
+                        setEnhancementMode(event.target.value as CourseNarrationEnhancementMode)
                       }
                       className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                     >

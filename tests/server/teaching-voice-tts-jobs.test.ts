@@ -37,7 +37,7 @@ import { GET as getAudio } from '@/app/api/generate/tts/jobs/[jobId]/audio/route
 const jobId = 'rq_abcdefghijklmnopqrstuvwxyz';
 const user = { id: 'faculty-a' };
 
-function postRequest(language = 'en') {
+function postRequest(language = 'en', extra: Record<string, unknown> = {}) {
   return new NextRequest('http://localhost/api/generate/tts', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -48,6 +48,7 @@ function postRequest(language = 'en') {
       ttsLanguageCode: language,
       stageId: 'stage-1',
       sceneId: 'scene-1',
+      ...extra,
     }),
   });
 }
@@ -126,11 +127,45 @@ describe('Teaching Voice async TTS routes', () => {
       status: 'queued',
       teachingVoiceProvider: 'indicf5',
     });
-    expect(mocks.resolveSelection).toHaveBeenCalledWith('vcp_faculty', 'faculty-a', 'hi');
+    expect(mocks.resolveSelection).toHaveBeenCalledWith(
+      'vcp_faculty',
+      'faculty-a',
+      'hi',
+      undefined,
+    );
     expect(mocks.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: 'indicf5', language: 'hi' }),
     );
     expect(mocks.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('routes a course-scoped Original Qwen request without changing the saved profile', async () => {
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'qwen3-tts', synthesisLanguage: 'en' });
+    mocks.enqueue.mockReturnValue({
+      job: { ...snapshot(), resourceKey: 'teaching-voice:qwen3-tts' },
+      reused: false,
+    });
+
+    const response = await POST(
+      postRequest('en', {
+        teachingVoiceProviderId: 'qwen3-tts',
+        teachingVoiceEnhancementMode: 'standard',
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(mocks.resolveSelection).toHaveBeenCalledWith(
+      'vcp_faculty',
+      'faculty-a',
+      'en',
+      'qwen3-tts',
+    );
+    expect(mocks.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: 'qwen3-tts',
+        qwenEnhancementMode: 'standard',
+      }),
+    );
   });
 
   it('rejects prose in the Teaching Voice language transport', async () => {

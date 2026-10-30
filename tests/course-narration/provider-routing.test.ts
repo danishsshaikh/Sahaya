@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   findCurrentProfile: vi.fn(),
   enhance: vi.fn(),
   readEntries: vi.fn(),
+  readCache: vi.fn(),
   writeCache: vi.fn(),
 }));
 
@@ -31,6 +32,7 @@ vi.mock('@/lib/server/voice-comparison-cache', async (importOriginal) => {
   return {
     ...original,
     readVoiceComparisonCacheEntries: mocks.readEntries,
+    readVoiceComparisonCache: mocks.readCache,
     writeVoiceComparisonCache: mocks.writeCache,
   };
 });
@@ -61,6 +63,7 @@ describe('course narration provider routing', () => {
     mocks.requireProfile.mockReset();
     mocks.findCurrentProfile.mockReset().mockResolvedValue(null);
     mocks.readEntries.mockReset().mockResolvedValue([]);
+    mocks.readCache.mockReset().mockResolvedValue(null);
     mocks.writeCache.mockReset().mockResolvedValue(undefined);
   });
 
@@ -171,6 +174,55 @@ describe('course narration provider routing', () => {
     expect(result.request?.enhancementMode).toBe('resemble-enhance');
     expect(Buffer.from(result.audio.base64, 'base64').toString()).toBe('enhanced');
     expect(mocks.writeCache).toHaveBeenCalledWith('owner-1', result);
+  });
+
+  it('keeps Original Qwen bytes untouched and separates its cache identity from Enhanced', async () => {
+    mocks.generatePreview.mockResolvedValue({
+      profileId: 'profile-1',
+      providerId: 'qwen3-tts',
+      providerName: 'Qwen3-TTS 1.7B',
+      audio: { format: 'wav', base64: Buffer.from('original-qwen').toString('base64') },
+      cacheKey: 'raw-qwen-key',
+      request: { text: 'Exact text', language: 'en' },
+    });
+    mocks.enhance.mockResolvedValue({
+      audio: new Uint8Array(Buffer.from('enhanced-qwen')),
+      format: 'wav',
+      enhancedDurationSeconds: 2.5,
+    });
+
+    const original = await synthesizeCourseNarration({
+      ownerId: 'owner-1',
+      stageId: 'course-1',
+      profileId: 'profile-1',
+      providerId: 'qwen3-tts',
+      text: 'Exact text',
+      language: 'en',
+      enhancementMode: 'standard',
+    });
+    const enhanced = await synthesizeCourseNarration({
+      ownerId: 'owner-1',
+      stageId: 'course-1',
+      profileId: 'profile-1',
+      providerId: 'qwen3-tts',
+      text: 'Exact text',
+      language: 'en',
+      enhancementMode: 'resemble-enhance',
+    });
+
+    expect(Buffer.from(original.audio.base64, 'base64').toString()).toBe('original-qwen');
+    expect(original).toMatchObject({
+      providerName: 'Qwen3-TTS (Original)',
+      processingMode: 'model-native-output',
+      request: { enhancementMode: 'standard' },
+    });
+    expect(Buffer.from(enhanced.audio.base64, 'base64').toString()).toBe('enhanced-qwen');
+    expect(enhanced).toMatchObject({
+      providerName: 'Qwen3-TTS (Enhanced)',
+      request: { enhancementMode: 'resemble-enhance' },
+    });
+    expect(original.cacheKey).not.toBe(enhanced.cacheKey);
+    expect(mocks.enhance).toHaveBeenCalledOnce();
   });
 
   it('does not report the course missing when a retained legacy profile id is stale', async () => {

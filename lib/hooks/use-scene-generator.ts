@@ -699,6 +699,17 @@ export async function generateAndStoreTTS(
   const settings = useSettingsStore.getState();
   const stage = useStageStore.getState().stage;
   const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
+  const preferredNarrationSelection = stage?.narration?.preferredSelection;
+  const teachingVoiceProviderId =
+    teacherVoiceProfileId && preferredNarrationSelection?.providerId === 'qwen3-tts'
+      ? 'qwen3-tts'
+      : undefined;
+  const teachingVoiceEnhancementMode =
+    teachingVoiceProviderId === 'qwen3-tts'
+      ? preferredNarrationSelection?.enhancementMode === 'standard'
+        ? 'standard'
+        : 'resemble-enhance'
+      : undefined;
   if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) return null;
   const lessonLanguage = normalizeTeachingVoiceLanguageId(stage?.lessonLanguage);
   const narrationLanguage = lessonLanguage || language || stage?.languageDirective;
@@ -806,6 +817,8 @@ export async function generateAndStoreTTS(
               ttsProviderConfig?.baseUrl || ttsProviderConfig?.customDefaultBaseUrl || undefined,
             ttsProviderOptions: providerOptions,
             teacherVoiceProfileId,
+            teachingVoiceProviderId,
+            teachingVoiceEnhancementMode,
             ttsLanguageCode,
             stageId,
             sceneId,

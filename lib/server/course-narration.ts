@@ -261,7 +261,32 @@ export async function synthesizeCourseNarration(input: {
     signal: input.signal,
     preserveTextChunks: true,
   });
-  if (input.enhancementMode !== 'resemble-enhance') return raw;
+  const enhancementMode =
+    input.enhancementMode === 'resemble-enhance' ? 'resemble-enhance' : 'standard';
+  const modeCacheKey = createVoiceComparisonCacheKey({
+    source: raw.cacheKey,
+    providerId: input.providerId,
+    outputCodec: raw.audio.format,
+    enhancementMode,
+    purpose: 'course-narration-audio-mode-v2',
+  });
+  const modeCached = await readVoiceComparisonCache(input.ownerId, modeCacheKey);
+  if (modeCached) return modeCached;
+  if (enhancementMode !== 'resemble-enhance') {
+    if (input.providerId !== 'qwen3-tts') return raw;
+    const original: VoiceComparisonPreviewResult = {
+      ...raw,
+      providerName: 'Qwen3-TTS (Original)',
+      processingMode: 'model-native-output',
+      request: raw.request
+        ? { ...raw.request, enhancementMode: 'standard' }
+        : { text: input.text, language: input.language, enhancementMode: 'standard' },
+      cacheKey: modeCacheKey,
+      cached: false,
+    };
+    await writeVoiceComparisonCache(input.ownerId, original);
+    return original;
+  }
   if (
     (input.providerId !== 'chatterbox' && input.providerId !== 'qwen3-tts') ||
     !isVoiceEnhancementAllowed(input.providerId, input.language, 'classroom')
@@ -274,6 +299,7 @@ export async function synthesizeCourseNarration(input: {
   });
   const result: VoiceComparisonPreviewResult = {
     ...raw,
+    ...(input.providerId === 'qwen3-tts' ? { providerName: 'Qwen3-TTS (Enhanced)' } : {}),
     audio: {
       format: enhanced.format,
       base64: Buffer.from(enhanced.audio).toString('base64'),
@@ -288,11 +314,7 @@ export async function synthesizeCourseNarration(input: {
           language: input.language,
           enhancementMode: 'resemble-enhance',
         },
-    cacheKey: createVoiceComparisonCacheKey({
-      source: raw.cacheKey,
-      enhancementMode: 'resemble-enhance',
-      purpose: 'course-narration-v1',
-    }),
+    cacheKey: modeCacheKey,
     cached: false,
   };
   await writeVoiceComparisonCache(input.ownerId, result);

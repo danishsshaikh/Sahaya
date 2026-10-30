@@ -31,6 +31,7 @@ import {
   resolveVoiceProfileQwenEnhancementMode,
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
+  type VoiceEnhancementMode,
 } from '@/lib/voice-cloning/types';
 
 const log = createLogger('VoiceCloningSynthesis');
@@ -205,6 +206,7 @@ export async function resolveFacultyVoiceSelection(
   profileId: string,
   ownerId: string,
   requestedLanguage?: string,
+  requestedProviderId?: 'qwen3-tts',
 ): Promise<{ providerId: string; synthesisLanguage?: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
@@ -213,7 +215,7 @@ export async function resolveFacultyVoiceSelection(
   if (!profile || profile.ownerId !== ownerId || profile.status === 'deleted') {
     throw new TeachingVoiceError('Voice profile not found.', 404);
   }
-  const providerId = resolveVoiceProfileActiveEngine(profile);
+  const providerId = requestedProviderId ?? resolveVoiceProfileActiveEngine(profile);
   if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
     throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
   }
@@ -237,6 +239,8 @@ export async function synthesizeFacultyVoice(input: {
   text: string;
   language?: string;
   queueJobId?: string;
+  providerId?: 'qwen3-tts';
+  qwenEnhancementMode?: VoiceEnhancementMode;
 }): Promise<{ audio: Uint8Array; format: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
@@ -251,7 +255,7 @@ export async function synthesizeFacultyVoice(input: {
   if (!(await referenceAudioExists(profile.referenceAudioKey))) {
     throw new TeachingVoiceError('Voice profile reference audio not found. Re-enroll this voice.');
   }
-  const providerId = resolveVoiceProfileActiveEngine(profile);
+  const providerId = input.providerId ?? resolveVoiceProfileActiveEngine(profile);
   if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
     throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
   }
@@ -261,7 +265,8 @@ export async function synthesizeFacultyVoice(input: {
   const language = resolveSynthesisLanguage(profile, providerId, input.language);
   const qwenEnhancementRequested =
     providerId === 'qwen3-tts' &&
-    resolveVoiceProfileQwenEnhancementMode(profile) === 'resemble-enhance';
+    (input.qwenEnhancementMode ?? resolveVoiceProfileQwenEnhancementMode(profile)) ===
+      'resemble-enhance';
   if (qwenEnhancementRequested && !isVoiceEnhancementAllowed('qwen3-tts', language, 'classroom')) {
     throw new TeachingVoiceError(
       'Enhanced Qwen3-TTS classroom narration is disabled for this deployment.',
@@ -341,7 +346,7 @@ export async function synthesizeFacultyVoice(input: {
           502,
         );
       }
-      mastered = variants.enhanced ?? variants.original;
+      mastered = qwenEnhancementRequested ? variants.enhanced! : variants.original;
     } else {
       mastered = await masterGeneratedVoiceAudio(result.audio, result.format, 'indicf5-natural');
     }

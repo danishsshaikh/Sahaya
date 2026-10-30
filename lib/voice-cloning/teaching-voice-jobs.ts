@@ -10,6 +10,7 @@ import {
 } from '@/lib/voice-cloning/teaching-voice-artifacts';
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 import { createLogger } from '@/lib/logger';
+import type { VoiceEnhancementMode } from '@/lib/voice-cloning/types';
 
 const log = createLogger('TeachingVoiceJobs');
 
@@ -33,6 +34,7 @@ export interface TeachingVoiceJobInput {
   stageId?: string;
   outlineId?: string;
   sceneId?: string;
+  qwenEnhancementMode?: VoiceEnhancementMode;
 }
 
 export interface QueuedTeachingVoiceJobInput extends TeachingVoiceJobInput {
@@ -83,6 +85,9 @@ export function createTeachingVoiceIdempotencyKey(
         outlineId: input.outlineId ?? null,
         sceneId: input.sceneId ?? null,
         language: input.language ?? null,
+        ...(input.providerId === 'qwen3-tts'
+          ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
+          : {}),
         textHash,
       }),
     )
@@ -106,6 +111,9 @@ export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
     stageId: input.stageId,
     outlineId: input.outlineId,
     sceneId: input.sceneId,
+    ...(input.providerId === 'qwen3-tts'
+      ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
+      : {}),
   };
   return getResourceJobQueue().enqueue<TeachingVoiceJobResult>({
     resourceKey: resourceKeyForProvider(input.providerId),
@@ -122,6 +130,12 @@ export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
           text: input.text,
           language: input.language,
           queueJobId: jobId,
+          ...(input.providerId === 'qwen3-tts'
+            ? {
+                providerId: 'qwen3-tts' as const,
+                qwenEnhancementMode: input.qwenEnhancementMode,
+              }
+            : {}),
         });
       } catch (error) {
         throw synthesisFailure(error);

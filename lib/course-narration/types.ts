@@ -4,6 +4,7 @@ import type {
 } from '@/lib/voice-comparison/types';
 
 export type CourseNarrationVersionStatus = 'generating' | 'complete' | 'failed' | 'cancelled';
+export type CourseNarrationEnhancementMode = 'standard' | 'resemble-enhance';
 
 export interface CourseNarrationClip {
   /** Exact text that was sent for this speech action. */
@@ -37,7 +38,7 @@ export interface CourseNarrationVersion {
   settings: {
     voice?: string;
     style?: string;
-    enhancementMode?: 'standard' | 'resemble-enhance';
+    enhancementMode?: CourseNarrationEnhancementMode;
     processingMode?: string;
   };
   createdAt: string;
@@ -54,6 +55,8 @@ export interface CourseNarrationState {
   schemaVersion: 1;
   activeVersionId: string;
   versions: CourseNarrationVersion[];
+  /** Explicit course-scoped editor choice. Absence keeps the Teaching Voice default. */
+  preferredSelection?: CourseNarrationSelection;
 }
 
 export interface CourseNarrationSelection {
@@ -63,6 +66,6 @@ export interface CourseNarrationSelection {
   language: VoiceComparisonLanguageCode;
   voice?: string;
   style?: string;
-  enhancementMode?: 'standard' | 'resemble-enhance';
+  enhancementMode?: CourseNarrationEnhancementMode;
   experimental?: boolean;
 }

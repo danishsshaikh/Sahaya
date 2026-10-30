@@ -184,6 +184,51 @@ describe('allocated speech audio identities', () => {
     expect(mocks.generateAndStoreTTS).toHaveBeenCalledOnce();
   });
 
+  it('does not coalesce Original and Enhanced regeneration for the same action', async () => {
+    const original = deferred<string>();
+    const enhanced = deferred<string>();
+    mocks.generateAndStoreTTS
+      .mockReturnValueOnce(original.promise)
+      .mockReturnValueOnce(enhanced.promise);
+    mocks.stageState = {
+      stage: {
+        id: 'stage-1',
+        teacherVoiceProfileId: 'vcp_ready',
+        narration: {
+          preferredSelection: {
+            providerId: 'qwen3-tts',
+            enhancementMode: 'standard',
+          },
+        },
+      },
+      scenes: [],
+    };
+
+    const originalRequest = regenerateSpeechAudio(
+      3,
+      { id: 'speech-1', text: 'Same narration' },
+      'English',
+    );
+    (
+      mocks.stageState.stage as {
+        narration: { preferredSelection: { enhancementMode: string } };
+      }
+    ).narration.preferredSelection.enhancementMode = 'resemble-enhance';
+    const enhancedRequest = regenerateSpeechAudio(
+      3,
+      { id: 'speech-1', text: 'Same narration' },
+      'English',
+    );
+
+    await vi.waitFor(() => expect(mocks.generateAndStoreTTS).toHaveBeenCalledTimes(2));
+    original.resolve('ast_original');
+    enhanced.resolve('ast_enhanced');
+    await expect(Promise.all([originalRequest, enhancedRequest])).resolves.toEqual([
+      'ast_original',
+      'ast_enhanced',
+    ]);
+  });
+
   it('clears failed single-flight state so the same action can be retried', async () => {
     mocks.stageState = { stage: { id: 'stage-1' }, scenes: [] };
     mocks.generateAndStoreTTS

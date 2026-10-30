@@ -127,6 +127,42 @@ describe('course narration versions', () => {
     ).toBe(false);
   });
 
+  it('identifies Original and Enhanced Qwen narration as independent saved versions', () => {
+    const scenes = [scene('one', 1, 'Same transcript')];
+    const originalQwen: CourseNarrationVersion = {
+      ...captureOriginalNarration(scenes, 'en'),
+      id: 'qwen-original',
+      providerId: 'qwen3-tts',
+      providerName: 'Qwen3-TTS (Original)',
+      settings: { enhancementMode: 'standard', processingMode: 'model-native-output' },
+    };
+
+    expect(
+      versionMatchesSelection(
+        originalQwen,
+        {
+          providerId: 'qwen3-tts',
+          providerName: 'Qwen3-TTS (Original)',
+          language: 'en',
+          enhancementMode: 'standard',
+        },
+        scenes,
+      ),
+    ).toBe(true);
+    expect(
+      versionMatchesSelection(
+        originalQwen,
+        {
+          providerId: 'qwen3-tts',
+          providerName: 'Qwen3-TTS (Enhanced)',
+          language: 'en',
+          enhancementMode: 'resemble-enhance',
+        },
+        scenes,
+      ),
+    ).toBe(false);
+  });
+
   it('declares course narration capability separately for all six adapters', () => {
     expect(
       Object.fromEntries(
@@ -158,7 +194,17 @@ describe('course narration versions', () => {
       name: 'Course',
       createdAt: 1,
       updatedAt: 1,
-      narration: { schemaVersion: 1 as const, activeVersionId: 'original', versions: [original] },
+      narration: {
+        schemaVersion: 1 as const,
+        activeVersionId: 'original',
+        versions: [original],
+        preferredSelection: {
+          providerId: 'qwen3-tts' as const,
+          providerName: 'Qwen3-TTS (Original)',
+          language: 'en' as const,
+          enhancementMode: 'standard' as const,
+        },
+      },
     };
 
     expect(JSON.parse(JSON.stringify(stage))).toEqual(stage);

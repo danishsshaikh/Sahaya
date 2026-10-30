@@ -23,6 +23,7 @@ vi.mock('@/lib/voice-cloning/teaching-voice-artifacts', () => ({
 
 import { clearResourceJobQueueForTests } from '@/lib/server/resource-job-queue';
 import {
+  createTeachingVoiceIdempotencyKey,
   enqueueTeachingVoiceJob,
   readTeachingVoiceJob,
   readTeachingVoiceJobResult,
@@ -68,6 +69,24 @@ afterEach(() => {
 });
 
 describe('Teaching Voice jobs', () => {
+  it('keeps Original and Enhanced Qwen artifacts under different idempotency identities', () => {
+    const qwen = {
+      ...input('tts_qwen_mode', 'Same exact Qwen narration'),
+      providerId: 'qwen3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+
+    expect(
+      createTeachingVoiceIdempotencyKey({ ...qwen, qwenEnhancementMode: 'standard' }),
+    ).not.toBe(
+      createTeachingVoiceIdempotencyKey({
+        ...qwen,
+        qwenEnhancementMode: 'resemble-enhance',
+      }),
+    );
+  });
+
   it('serializes several clips and keeps later clips queued', async () => {
     const first = deferred<{ audio: Uint8Array; format: string }>();
     const second = deferred<{ audio: Uint8Array; format: string }>();

@@ -352,6 +352,59 @@ describe('profile-specific synthesis and recovery', () => {
     expect(mocks.write).not.toHaveBeenCalled();
   });
 
+  it('uses the course-selected Qwen provider and skips enhancement for Original mode', async () => {
+    profile = {
+      ...profile,
+      activeEngine: 'chatterbox',
+      qwenEnhancementMode: 'resemble-enhance',
+    };
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+
+    await expect(
+      resolveFacultyVoiceSelection(profile.id, profile.ownerId, 'en', 'qwen3-tts'),
+    ).resolves.toEqual({ providerId: 'qwen3-tts', synthesisLanguage: 'en' });
+    await expect(
+      synthesizeFacultyVoice({
+        ...request,
+        providerId: 'qwen3-tts',
+        qwenEnhancementMode: 'standard',
+      }),
+    ).resolves.toEqual({ audio: new Uint8Array([1]), format: 'wav' });
+
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3-tts');
+    expect(mocks.processQwenAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptEnhancement: false,
+        originalMasteringPreset: null,
+        enhancedMasteringPreset: null,
+      }),
+    );
+  });
+
+  it('honors explicit course-selected Enhanced mode even when the profile setting is Original', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts', qwenEnhancementMode: 'standard' };
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+
+    await expect(
+      synthesizeFacultyVoice({
+        ...request,
+        providerId: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+      }),
+    ).resolves.toEqual({ audio: new Uint8Array([9]), format: 'wav' });
+    expect(mocks.processQwenAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptEnhancement: true }),
+    );
+  });
+
   it('recovers a bounded Qwen busy response before enhancement runs once', async () => {
     vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
     vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '2');
