@@ -38,6 +38,8 @@ const log = createLogger('VoiceCloningSynthesis');
 const DEFAULT_BUSY_RETRY_BASE_MS = 3000;
 const DEFAULT_BUSY_RETRY_MAX_RETRIES = 20;
 const DEFAULT_BUSY_RETRY_MAX_WAIT_MS = 5 * 60 * 1000;
+const DEFAULT_QWEN_BUSY_MAX_RETRIES = 1;
+const DEFAULT_QWEN_BUSY_MAX_WAIT_MS = 90 * 1000;
 const MAX_BUSY_RETRY_DELAY_MS = 30000;
 
 function traceTeachingVoiceSynthesis(event: string, extra: Record<string, unknown>) {
@@ -53,25 +55,26 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function busyRetryConfig() {
+function busyRetryConfig(provider?: unknown) {
+  const qwen = provider === 'qwen3-tts';
   return {
     baseDelayMs: parsePositiveInteger(
       process.env.TEACHING_VOICE_BUSY_RETRY_BASE_MS,
       DEFAULT_BUSY_RETRY_BASE_MS,
     ),
     maxRetries: parsePositiveInteger(
-      process.env.TEACHING_VOICE_BUSY_MAX_RETRIES,
-      DEFAULT_BUSY_RETRY_MAX_RETRIES,
+      qwen ? process.env.QWEN3_TTS_BUSY_MAX_RETRIES : process.env.TEACHING_VOICE_BUSY_MAX_RETRIES,
+      qwen ? DEFAULT_QWEN_BUSY_MAX_RETRIES : DEFAULT_BUSY_RETRY_MAX_RETRIES,
     ),
     maxWaitMs: parsePositiveInteger(
-      process.env.TEACHING_VOICE_BUSY_MAX_WAIT_MS,
-      DEFAULT_BUSY_RETRY_MAX_WAIT_MS,
+      qwen ? process.env.QWEN3_TTS_BUSY_MAX_WAIT_MS : process.env.TEACHING_VOICE_BUSY_MAX_WAIT_MS,
+      qwen ? DEFAULT_QWEN_BUSY_MAX_WAIT_MS : DEFAULT_BUSY_RETRY_MAX_WAIT_MS,
     ),
   };
 }
 
-function busyRetryDelayMs(attempt: number): number {
-  const { baseDelayMs } = busyRetryConfig();
+function busyRetryDelayMs(attempt: number, provider?: unknown): number {
+  const { baseDelayMs } = busyRetryConfig(provider);
   return Math.min(baseDelayMs * 2 ** Math.max(0, attempt - 1), MAX_BUSY_RETRY_DELAY_MS);
 }
 
@@ -123,7 +126,7 @@ async function synthesizeWithBusyRetry<T>(
   metadata: Record<string, unknown>,
   operation: (attempt: number) => Promise<T>,
 ): Promise<T> {
-  const { maxRetries, maxWaitMs } = busyRetryConfig();
+  const { maxRetries, maxWaitMs } = busyRetryConfig(metadata.provider);
   const startedAt = Date.now();
   let attempt = 1;
 
@@ -143,7 +146,7 @@ async function synthesizeWithBusyRetry<T>(
       return result;
     } catch (error) {
       const durationMs = Date.now() - attemptStartedAt;
-      const retryDelayMs = busyRetryDelayMs(attempt);
+      const retryDelayMs = busyRetryDelayMs(attempt, metadata.provider);
       const busyWaitElapsedMs = Date.now() - startedAt;
       if (
         isProviderBusyError(error) &&

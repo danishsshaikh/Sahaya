@@ -25,9 +25,22 @@ describe('Qwen3-TTS Teaching Voice service scaffold', () => {
     expect(source).toContain('active_model.generate_voice_clone(');
     expect(source).toContain('prompt = profile.prompts.get(req.cloneMode)');
     expect(source).toContain('voice_clone_prompt=prompt');
+    expect(source).toContain('max_new_tokens=MAX_NEW_TOKENS');
+    expect(source).toContain('stopping_criteria=StoppingCriteriaList([stop_signal])');
     expect(source).toContain('subtype="PCM_16"');
     expect(source).not.toContain('chatterbox');
     expect(source).not.toContain('indicf5');
+  });
+
+  it('keeps the slot until bounded inference actually stops and logs safe timing metadata', () => {
+    expect(source).toContain('class GenerationStopSignal(StoppingCriteria):');
+    expect(source).toContain('async def wait_for_inference(');
+    expect(source).toContain('return await task');
+    expect(source).toContain('finally:\n        generation_queue.release()');
+    expect(source).toContain('Qwen3-TTS inference started');
+    expect(source).toContain('Qwen3-TTS inference completed');
+    expect(source).toContain('audioDurationSeconds=%.3f');
+    expect(source).not.toContain('text=%s');
   });
 
   it('queues profile creation and synthesis fairly instead of returning immediate busy', () => {
@@ -35,7 +48,7 @@ describe('Qwen3-TTS Teaching Voice service scaffold', () => {
     expect(source).toContain('self._waiters.append(token)');
     expect(source).toContain('self._waiters[0] is not token');
     expect(source).toContain('acquire_generation_slot("profile-registration")');
-    expect(source).toContain('acquire_generation_slot("synthesis")');
+    expect(source).toContain('asyncio.to_thread(acquire_generation_slot, "synthesis")');
     expect(source).toContain('QWEN3_TTS_QUEUE_WAIT_SECONDS');
     expect(source).not.toContain('generation_lock.acquire(blocking=False)');
   });

@@ -1,5 +1,6 @@
 import { getQwen3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
 import { runWithQwen3TtsCapacity } from '@/lib/server/qwen3-tts-capacity';
+import { concatenatePcmWav } from '@/lib/voice-comparison/audio';
 import {
   TeachingVoiceError,
   TeachingVoiceProviderOperationError,
@@ -35,7 +36,15 @@ async function request(
   const { baseUrl, timeoutMs } = getQwen3TtsPreviewServiceConfig();
   const execute = async () => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const callerSignal = init.signal;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     try {
       const response = await fetch(`${baseUrl}${endpoint}`, { ...init, signal: controller.signal });
       if (!response.ok) {
@@ -51,12 +60,14 @@ async function request(
         const message =
           response.status === 429
             ? 'Qwen3-TTS capacity remained busy. Retry this narration after the current generation finishes.'
-            : response.status === 503
-              ? 'Qwen3-TTS is unavailable. Check the Teaching Voice service health.'
-              : 'Qwen3-TTS could not generate audio.';
+            : response.status === 504
+              ? 'Qwen3-TTS generation timed out before complete audio was produced. Retry this narration segment.'
+              : response.status === 503
+                ? 'Qwen3-TTS is unavailable. Check the Teaching Voice service health.'
+                : 'Qwen3-TTS could not generate audio.';
         throw providerError(
           message,
-          response.status === 429 ? 429 : 502,
+          response.status === 429 ? 429 : response.status === 504 ? 504 : 502,
           endpoint,
           operation,
           response,
@@ -72,15 +83,18 @@ async function request(
         throw error;
       }
       throw providerError(
-        controller.signal.aborted
+        timedOut
           ? 'Qwen3-TTS generation timed out. Your saved Teaching Voice is unchanged.'
-          : 'Qwen3-TTS Teaching Voice service is unreachable.',
-        502,
+          : callerSignal?.aborted
+            ? 'Qwen3-TTS generation was cancelled. Your saved Teaching Voice is unchanged.'
+            : 'Qwen3-TTS Teaching Voice service is unreachable.',
+        timedOut ? 504 : 502,
         endpoint,
         operation,
       );
     } finally {
       clearTimeout(timer);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
     }
   };
   return operation === 'provider_registration' ||
@@ -88,6 +102,48 @@ async function request(
     operation === 'synthesis'
     ? runWithQwen3TtsCapacity(execute, init.signal ?? undefined)
     : execute();
+}
+
+export const DEFAULT_QWEN_SYNTHESIS_CHUNK_CHARACTERS = 220;
+
+function configuredChunkCharacters(): number {
+  const parsed = Number(process.env.QWEN3_TTS_CHUNK_CHARACTERS);
+  if (!Number.isFinite(parsed)) return DEFAULT_QWEN_SYNTHESIS_CHUNK_CHARACTERS;
+  return Math.max(80, Math.min(400, Math.floor(parsed)));
+}
+
+function lastBoundaryEnd(window: string, expression: RegExp): number | undefined {
+  let last: number | undefined;
+  for (const match of window.matchAll(expression)) {
+    last = (match.index ?? 0) + match[0].length;
+  }
+  return last;
+}
+
+/**
+ * Split a long Qwen request without rewriting it. Boundary whitespace stays in
+ * exactly one chunk, so concatenating the request strings recreates the input.
+ */
+export function splitQwenSynthesisTextPreservingText(
+  text: string,
+  maxCharacters = configuredChunkCharacters(),
+): string[] {
+  if (text.length <= maxCharacters) return [text];
+  const chunks: string[] = [];
+  let offset = 0;
+  while (text.length - offset > maxCharacters) {
+    const window = text.slice(offset, offset + maxCharacters);
+    const boundary =
+      lastBoundaryEnd(window, /[.!?](?:["'\u2019\u201d)\]]*)\s+/gu) ??
+      lastBoundaryEnd(window, /[;:,](?:["'\u2019\u201d)\]]*)\s+/gu) ??
+      lastBoundaryEnd(window, /\s+/gu) ??
+      maxCharacters;
+    const end = offset + Math.max(1, boundary);
+    chunks.push(text.slice(offset, end));
+    offset = end;
+  }
+  if (offset < text.length) chunks.push(text.slice(offset));
+  return chunks;
 }
 
 export class Qwen3TtsVoiceCloningProvider implements VoiceCloningProvider {
@@ -173,41 +229,46 @@ export class Qwen3TtsVoiceCloningProvider implements VoiceCloningProvider {
     if (input.language !== 'en') {
       throw new TeachingVoiceError('Qwen3-TTS currently supports English narration only.');
     }
-    const response = await request(
-      '/synthesize',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profileId: input.providerReferenceId,
-          text: input.text,
-          language: 'en',
-          cloneMode: 'speaker-embedding',
-        }),
-      },
-      operation,
-    );
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('audio/wav') && !contentType.includes('audio/x-wav')) {
-      throw providerError(
-        'Qwen3-TTS returned non-WAV audio.',
-        502,
+    const chunks = splitQwenSynthesisTextPreservingText(input.text);
+    const parts: Uint8Array[] = [];
+    for (const text of chunks) {
+      const response = await request(
         '/synthesize',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profileId: input.providerReferenceId,
+            text,
+            language: 'en',
+            cloneMode: 'speaker-embedding',
+          }),
+        },
         operation,
-        response,
       );
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('audio/wav') && !contentType.includes('audio/x-wav')) {
+        throw providerError(
+          'Qwen3-TTS returned non-WAV audio.',
+          502,
+          '/synthesize',
+          operation,
+          response,
+        );
+      }
+      const audio = new Uint8Array(await response.arrayBuffer());
+      if (audio.byteLength === 0) {
+        throw providerError(
+          'Qwen3-TTS returned empty audio.',
+          502,
+          '/synthesize',
+          operation,
+          response,
+        );
+      }
+      parts.push(audio);
     }
-    const audio = new Uint8Array(await response.arrayBuffer());
-    if (audio.byteLength === 0) {
-      throw providerError(
-        'Qwen3-TTS returned empty audio.',
-        502,
-        '/synthesize',
-        operation,
-        response,
-      );
-    }
-    return { audio, format: 'wav' };
+    return { audio: concatenatePcmWav(parts), format: 'wav' };
   }
 
   async deleteProfile(input: { providerReferenceId: string }): Promise<void> {

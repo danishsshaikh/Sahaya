@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -16,8 +17,9 @@ import numpy as np
 import soundfile as sf
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
+from transformers import StoppingCriteria, StoppingCriteriaList
 
 try:
     from qwen_tts import Qwen3TTSModel
@@ -78,8 +80,21 @@ class FairGenerationQueue:
             self._condition.notify_all()
 
 
-QUEUE_WAIT_SECONDS = max(1.0, float(os.getenv("QWEN3_TTS_QUEUE_WAIT_SECONDS", "120")))
+SYNTHESIS_REQUEST_DEADLINE_SECONDS = min(
+    165.0,
+    max(15.0, float(os.getenv("QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS", "165"))),
+)
+QUEUE_WAIT_SECONDS = min(
+    30.0, max(1.0, float(os.getenv("QWEN3_TTS_QUEUE_WAIT_SECONDS", "30")))
+)
 MAX_PENDING_GENERATIONS = max(1, int(os.getenv("QWEN3_TTS_MAX_PENDING", "64")))
+SYNTHESIS_RESPONSE_GRACE_SECONDS = min(
+    SYNTHESIS_REQUEST_DEADLINE_SECONDS - 1.0,
+    max(1.0, float(os.getenv("QWEN3_TTS_RESPONSE_GRACE_SECONDS", "5"))),
+)
+MAX_NEW_TOKENS = min(
+    2048, max(64, int(os.getenv("QWEN3_TTS_MAX_NEW_TOKENS", "512")))
+)
 generation_queue = FairGenerationQueue(MAX_PENDING_GENERATIONS)
 
 
@@ -146,10 +161,11 @@ class SynthesizeRequest(BaseModel):
     @field_validator("text")
     @classmethod
     def validate_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
+        if not value.strip():
             raise ValueError("preview text is required")
-        return text
+        # Preserve the exact chunk. The application deliberately assigns boundary
+        # whitespace to one chunk so joining every request recreates the source text.
+        return value
 
     @field_validator("language")
     @classmethod
@@ -185,9 +201,14 @@ def require_model() -> Any:
     return model
 
 
-def acquire_generation_slot(operation: str) -> None:
+def acquire_generation_slot(operation: str) -> float:
     waited_seconds = generation_queue.acquire(QUEUE_WAIT_SECONDS)
     if waited_seconds is None:
+        log.warning(
+            "Qwen3-TTS queue wait timed out operation=%s queueWaitSeconds=%.1f",
+            operation,
+            QUEUE_WAIT_SECONDS,
+        )
         raise HTTPException(
             status_code=429,
             detail="Qwen3-TTS queue wait timed out; retry this narration",
@@ -199,6 +220,45 @@ def acquire_generation_slot(operation: str) -> None:
             operation,
             round(waited_seconds * 1000),
         )
+    return waited_seconds
+
+
+class GenerationStopSignal(StoppingCriteria):
+    """Cooperatively stop autoregressive generation without releasing its GPU slot."""
+
+    def __init__(self, deadline: float, cancellation: threading.Event) -> None:
+        self.deadline = deadline
+        self.cancellation = cancellation
+        self.reason: str | None = None
+
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+        del input_ids, scores, kwargs
+        if self.cancellation.is_set():
+            self.reason = "caller-disconnected"
+            return True
+        if time.monotonic() >= self.deadline:
+            self.reason = "deadline-exceeded"
+            return True
+        return False
+
+
+async def wait_for_inference(
+    operation: Any,
+    request: Request,
+    stop_signal: GenerationStopSignal,
+) -> Any:
+    """Keep awaiting the worker after disconnect so its model slot stays accurate."""
+
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    disconnect_logged = False
+    while not task.done():
+        done, _ = await asyncio.wait({task}, timeout=0.25)
+        if task in done:
+            break
+        if not disconnect_logged and await request.is_disconnected():
+            stop_signal.cancellation.set()
+            disconnect_logged = True
+    return await task
 
 
 def load_model() -> None:
@@ -216,7 +276,15 @@ def load_model() -> None:
             local_files_only=True,
         )
         model_error = None
-        log.info("Qwen3-TTS model loaded model=%s device=cuda:0", MODEL_ID)
+        log.info(
+            "Qwen3-TTS model loaded model=%s device=cuda:0 attention=%s "
+            "queueWaitSeconds=%.1f requestDeadlineSeconds=%.1f maxNewTokens=%d",
+            MODEL_ID,
+            ATTENTION_IMPLEMENTATION,
+            QUEUE_WAIT_SECONDS,
+            SYNTHESIS_REQUEST_DEADLINE_SECONDS,
+            MAX_NEW_TOKENS,
+        )
     except Exception as exc:  # pragma: no cover - depends on prepared GPU runtime
         model = None
         model_error = type(exc).__name__
@@ -238,6 +306,10 @@ def health() -> dict[str, Any]:
         "modelLoaded": model is not None,
         "model": MODEL_ID,
         "device": "cuda:0",
+        "attentionImplementation": ATTENTION_IMPLEMENTATION,
+        "queueWaitSeconds": QUEUE_WAIT_SECONDS,
+        "synthesisDeadlineSeconds": SYNTHESIS_REQUEST_DEADLINE_SECONDS,
+        "maxNewTokens": MAX_NEW_TOKENS,
         "profileCount": profile_count,
         "error": model_error,
     }
@@ -327,7 +399,8 @@ def serialize_wav(waveform: Any, sample_rate: int) -> bytes:
 
 
 @app.post("/synthesize")
-def synthesize(req: SynthesizeRequest) -> Response:
+async def synthesize(req: SynthesizeRequest, request: Request) -> Response:
+    request_started_at = time.monotonic()
     active_model = require_model()
     with state_lock:
         profile = profiles.get(req.profileId)
@@ -337,45 +410,110 @@ def synthesize(req: SynthesizeRequest) -> Response:
     if prompt is None:
         raise HTTPException(status_code=404, detail="voice clone mode is not registered")
     validate_reference(str(profile.reference_audio))
-    acquire_generation_slot("synthesis")
+    queue_wait_seconds = await asyncio.to_thread(acquire_generation_slot, "synthesis")
+    cancellation = threading.Event()
+    inference_deadline = (
+        request_started_at
+        + SYNTHESIS_REQUEST_DEADLINE_SECONDS
+        - SYNTHESIS_RESPONSE_GRACE_SECONDS
+    )
+    stop_signal = GenerationStopSignal(inference_deadline, cancellation)
+    inference_started_at = time.monotonic()
+    log.info(
+        "Qwen3-TTS inference started profileId=%s cloneMode=%s textChars=%d "
+        "queueWaitMs=%d maxNewTokens=%d attention=%s",
+        req.profileId,
+        req.cloneMode,
+        len(req.text),
+        round(queue_wait_seconds * 1000),
+        MAX_NEW_TOKENS,
+        ATTENTION_IMPLEMENTATION,
+    )
     try:
-        with torch.inference_mode():
-            waveforms, sample_rate = active_model.generate_voice_clone(
-                text=req.text,
-                language="English",
-                voice_clone_prompt=prompt,
+        if await request.is_disconnected():
+            cancellation.set()
+            raise HTTPException(status_code=499, detail="Qwen3-TTS caller disconnected")
+
+        def run_inference() -> Any:
+            with torch.inference_mode():
+                return active_model.generate_voice_clone(
+                    text=req.text,
+                    language="English",
+                    voice_clone_prompt=prompt,
+                    max_new_tokens=MAX_NEW_TOKENS,
+                    stopping_criteria=StoppingCriteriaList([stop_signal]),
+                )
+
+        waveforms, sample_rate = await wait_for_inference(run_inference, request, stop_signal)
+        inference_duration_seconds = time.monotonic() - inference_started_at
+        if stop_signal.reason == "caller-disconnected":
+            log.warning(
+                "Qwen3-TTS inference cancelled profileId=%s cloneMode=%s textChars=%d "
+                "inferenceMs=%d reason=caller-disconnected",
+                req.profileId,
+                req.cloneMode,
+                len(req.text),
+                round(inference_duration_seconds * 1000),
+            )
+            raise HTTPException(status_code=499, detail="Qwen3-TTS caller disconnected")
+        if stop_signal.reason == "deadline-exceeded" or time.monotonic() >= inference_deadline:
+            log.warning(
+                "Qwen3-TTS inference timed out profileId=%s cloneMode=%s textChars=%d "
+                "inferenceMs=%d maxNewTokens=%d",
+                req.profileId,
+                req.cloneMode,
+                len(req.text),
+                round(inference_duration_seconds * 1000),
+                MAX_NEW_TOKENS,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail="Qwen3-TTS inference timed out before complete audio was produced",
             )
         if waveforms is None or len(waveforms) == 0:
             raise ValueError("model returned no audio")
         payload = serialize_wav(waveforms[0], int(sample_rate))
+        waveform = waveforms[0]
+        if torch.is_tensor(waveform):
+            audio_samples = int(waveform.numel())
+        else:
+            audio_samples = int(np.asarray(waveform).size)
+        audio_duration_seconds = audio_samples / int(sample_rate)
         log.info(
-            "Qwen3-TTS preview completed profileId=%s cloneMode=%s textChars=%d outputBytes=%d",
+            "Qwen3-TTS inference completed profileId=%s cloneMode=%s textChars=%d "
+            "inferenceMs=%d audioDurationSeconds=%.3f outputBytes=%d",
             req.profileId,
             req.cloneMode,
             len(req.text),
+            round(inference_duration_seconds * 1000),
+            audio_duration_seconds,
             len(payload),
         )
         return Response(content=payload, media_type="audio/wav")
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == 499 and stop_signal.reason is None:
+            log.warning(
+                "Qwen3-TTS inference cancelled profileId=%s cloneMode=%s textChars=%d "
+                "inferenceMs=%d reason=caller-disconnected-before-start",
+                req.profileId,
+                req.cloneMode,
+                len(req.text),
+                round((time.monotonic() - inference_started_at) * 1000),
+            )
         raise
     except Exception as exc:
         log.error(
-            "Qwen3-TTS synthesis failed profileId=%s errorType=%s",
+            "Qwen3-TTS inference failed profileId=%s cloneMode=%s textChars=%d "
+            "inferenceMs=%d errorType=%s",
             req.profileId,
+            req.cloneMode,
+            len(req.text),
+            round((time.monotonic() - inference_started_at) * 1000),
             type(exc).__name__,
         )
         raise HTTPException(status_code=500, detail="voice synthesis failed") from None
     finally:
         generation_queue.release()
-
-
-@app.delete("/profiles/{profile_id}")
-def delete_profile(profile_id: str) -> dict[str, bool]:
-    if not PROFILE_ID_PATTERN.fullmatch(profile_id):
-        raise HTTPException(status_code=400, detail="invalid profile ID")
-    with state_lock:
-        profiles.pop(profile_id, None)
-    return {"ok": True}
 
 
 if __name__ == "__main__":

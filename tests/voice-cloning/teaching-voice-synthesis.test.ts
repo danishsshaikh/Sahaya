@@ -228,7 +228,7 @@ describe('profile-specific synthesis and recovery', () => {
   it('bounds provider-busy retries by elapsed wait time', async () => {
     vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
     vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '20');
-    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_WAIT_MS', '2');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_WAIT_MS', '1');
     mocks.synthesize.mockRejectedValue(busyError());
 
     await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 429 });
@@ -374,6 +374,39 @@ describe('profile-specific synthesis and recovery', () => {
     });
     expect(mocks.synthesize).toHaveBeenCalledTimes(2);
     expect(mocks.processQwenAudio).toHaveBeenCalledOnce();
+  });
+
+  it('does not spend the generic twenty-retry budget on a persistently busy Qwen worker', async () => {
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    profile = { ...profile, activeEngine: 'qwen3-tts' };
+    mocks.synthesize.mockRejectedValue(busyError('qwen3-tts'));
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 429 });
+
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
+  });
+
+  it('does not enhance or persist a deadline-stopped partial Qwen result', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts', qwenEnhancementMode: 'resemble-enhance' };
+    mocks.synthesize.mockRejectedValue(
+      new TeachingVoiceProviderOperationError(
+        'Qwen3-TTS generation timed out before complete audio was produced.',
+        504,
+        {
+          provider: 'qwen3-tts',
+          endpoint: '/synthesize',
+          operation: 'synthesis',
+          providerStatus: 504,
+        },
+      ),
+    );
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 504 });
+
+    expect(mocks.synthesize).toHaveBeenCalledOnce();
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
   });
 
   it('recreates a Qwen speaker prompt after service restart without overwriting Chatterbox IDs', async () => {

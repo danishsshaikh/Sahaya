@@ -43,7 +43,9 @@ export function isQwen3TtsClassroomEnabled(): boolean {
 export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs: number } {
   return {
     baseUrl: (process.env.QWEN3_TTS_BASE_URL || 'http://127.0.0.1:8771').trim().replace(/\/$/, ''),
-    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 1000, 900000)),
+    // The Python worker has a hard 165-second request deadline. Keep transport
+    // waiting outside that boundary so it receives the worker's terminal 504.
+    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 180000, 900000)),
   };
 }
 

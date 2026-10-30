@@ -59,16 +59,41 @@ QWEN3_TTS_PREVIEW_ENABLED=true
 QWEN3_TTS_CLASSROOM_ENABLED=true
 QWEN3_TTS_BASE_URL=http://127.0.0.1:8771
 QWEN3_TTS_TIMEOUT_MS=180000
-# Optional: bounded FIFO wait at the model boundary (defaults shown).
-QWEN3_TTS_QUEUE_WAIT_SECONDS=120
+# Application-side exact-text chunk limit and bounded model service controls
+# (defaults shown).
+QWEN3_TTS_CHUNK_CHARACTERS=220
+QWEN3_TTS_QUEUE_WAIT_SECONDS=30
 QWEN3_TTS_MAX_PENDING=64
+QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS=165
+QWEN3_TTS_RESPONSE_GRACE_SECONDS=5
+QWEN3_TTS_MAX_NEW_TOKENS=512
+QWEN3_TTS_BUSY_MAX_RETRIES=1
+QWEN3_TTS_BUSY_MAX_WAIT_MS=90000
 ```
 
 Every profile-registration and synthesis request shares this one FIFO model
-slot. The wait happens inside the service instead of returning an immediate
-busy response, so queued Sahaya jobs do not spend their retry budget merely
-waiting for an earlier generation. The queue wait remains bounded; a timed-out
-request returns `429` with `Retry-After` and can be retried explicitly.
+slot. Sahaya's in-process FIFO wait happens before the HTTP deadline begins.
+The Python queue covers other application processes and has its own bounded
+30-second admission wait. Keep `QWEN3_TTS_TIMEOUT_MS` above the service request
+deadline so the service can return a useful `504` instead of leaving an
+unobserved generation running after the adapter has stopped waiting.
+The service caps queue wait at 30 seconds and its total synthesis deadline at
+165 seconds even if stale deployment variables still contain larger values.
+
+Narration over the configured chunk limit is split at sentence, clause, or word
+boundaries without trimming or rewriting its characters. Chunk requests are
+admitted separately for fairness. Their PCM16 WAV data is concatenated in the
+original order without inserted silence, then Sahaya runs the requested
+Resemble Enhance pass once on the complete result. No partial set of chunks is
+persisted.
+
+Each inference passes an explicit `max_new_tokens` cap and a wall-clock stopping
+criterion to upstream Qwen generation. A deadline or disconnected caller asks
+generation to stop at the next autoregressive step; partial audio is discarded.
+The generation slot remains owned until the model call has actually returned.
+A hard CUDA/kernel hang cannot be safely killed from the Python thread; that
+case remains an operator-visible service fault rather than a falsely released
+GPU lock.
 
 The simplified homepage Teaching Voice workflow requires every relevant gate:
 `QWEN3_TTS_PREVIEW_ENABLED=true`, `QWEN3_TTS_CLASSROOM_ENABLED=true`,
