@@ -2,10 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   synthesize: vi.fn(),
+  persistArtifact: vi.fn(),
+  cleanupArtifacts: vi.fn(),
+  findArtifact: vi.fn(),
+  readArtifact: vi.fn(),
 }));
 
 vi.mock('@/lib/voice-cloning/synthesis', () => ({
   synthesizeFacultyVoice: mocks.synthesize,
+}));
+
+vi.mock('@/lib/voice-cloning/teaching-voice-artifacts', () => ({
+  cleanupTeachingVoiceArtifacts: mocks.cleanupArtifacts,
+  findTeachingVoiceArtifactByIdempotencyKey: mocks.findArtifact,
+  persistTeachingVoiceArtifact: mocks.persistArtifact,
+  readTeachingVoiceArtifact: mocks.readArtifact,
+  teachingVoiceArtifactSnapshot: vi.fn(),
+  TeachingVoiceArtifactInvalidError: class TeachingVoiceArtifactInvalidError extends Error {},
 }));
 
 import { clearResourceJobQueueForTests } from '@/lib/server/resource-job-queue';
@@ -13,6 +26,7 @@ import {
   enqueueTeachingVoiceJob,
   readTeachingVoiceJob,
   readTeachingVoiceJobResult,
+  readTeachingVoiceJobResultDurably,
   type QueuedTeachingVoiceJobInput,
 } from '@/lib/voice-cloning/teaching-voice-jobs';
 
@@ -43,6 +57,10 @@ function input(audioId: string, text = `Narration ${audioId}`): QueuedTeachingVo
 beforeEach(() => {
   clearResourceJobQueueForTests();
   mocks.synthesize.mockReset();
+  mocks.persistArtifact.mockReset().mockResolvedValue({});
+  mocks.cleanupArtifacts.mockReset().mockResolvedValue(undefined);
+  mocks.findArtifact.mockReset().mockResolvedValue(null);
+  mocks.readArtifact.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -107,6 +125,70 @@ describe('Teaching Voice jobs', () => {
       job: { id: first.job.id, status: 'completed' },
     });
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mark enhanced audio completed until durable artifact storage succeeds', async () => {
+    const stored = deferred<object>();
+    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([7, 8]), format: 'wav' });
+    mocks.persistArtifact.mockReturnValue(stored.promise);
+
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_durable', 'Enhanced Qwen narration'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+
+    await vi.waitFor(() => expect(mocks.persistArtifact).toHaveBeenCalledOnce());
+    expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('running');
+    stored.resolve({});
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+  });
+
+  it('classifies durable audio storage failure without publishing completion', async () => {
+    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([7, 8]), format: 'wav' });
+    mocks.persistArtifact.mockRejectedValue(new Error('disk unavailable'));
+
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_store_failure', 'Enhanced Qwen narration'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')).toMatchObject({
+        status: 'failed',
+        errorCode: 'TTS_AUDIO_STORAGE_FAILED',
+      }),
+    );
+    expect(readTeachingVoiceJobResult(job.id, 'faculty-1')).toBeNull();
+  });
+
+  it('salvages a legacy completed in-memory result into durable storage on download', async () => {
+    const audio = new Uint8Array([7, 8]);
+    mocks.synthesize.mockResolvedValue({ audio, format: 'wav' });
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_legacy_recovery', 'Completed before durable storage'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+    mocks.persistArtifact.mockClear();
+    mocks.readArtifact.mockResolvedValue(null);
+
+    await expect(readTeachingVoiceJobResultDurably(job.id, 'faculty-1')).resolves.toEqual({
+      audio,
+      format: 'wav',
+    });
+    expect(mocks.persistArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: job.id, ownerId: 'faculty-1', audio }),
+    );
   });
 
   it('keeps distinct speech actions under distinct stable jobs', () => {

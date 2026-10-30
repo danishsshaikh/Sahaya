@@ -23,9 +23,9 @@ vi.mock('@/lib/voice-cloning/synthesis', () => ({
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 vi.mock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-  enqueueTeachingVoiceJob: mocks.enqueue,
-  readTeachingVoiceJob: mocks.read,
-  readTeachingVoiceJobResult: mocks.result,
+  enqueueTeachingVoiceJobDurably: mocks.enqueue,
+  readTeachingVoiceJobDurably: mocks.read,
+  readTeachingVoiceJobResultDurably: mocks.result,
   cancelTeachingVoiceJob: mocks.cancel,
   isValidTeachingVoiceJobId: () => true,
 }));

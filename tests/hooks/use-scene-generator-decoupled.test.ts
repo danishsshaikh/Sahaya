@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   mediaGeneration: vi.fn().mockResolvedValue(undefined),
   audioPut: vi.fn().mockResolvedValue(undefined),
   audioDelete: vi.fn().mockResolvedValue(undefined),
+  measureAudioDuration: vi.fn().mockReturnValue(1),
   logInfo: vi.fn(),
   stageSubscribers: new Set<(state: ReturnType<typeof makeStageState>) => void>(),
 }));
@@ -78,7 +79,9 @@ vi.mock('@/lib/voice-cloning/language', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/voice-cloning/language')>()),
   resolveTeachingVoiceLanguage: () => 'en',
 }));
-vi.mock('@/lib/audio/audio-duration', () => ({ measureAudioDuration: () => undefined }));
+vi.mock('@/lib/audio/audio-duration', () => ({
+  measureAudioDuration: mocks.measureAudioDuration,
+}));
 vi.mock('@/lib/i18n', () => ({ getClientTranslation: (key: string) => key }));
 vi.mock('@/lib/logger', () => ({
   createLogger: () => ({
@@ -232,6 +235,7 @@ describe('scene generator visual and narration pipelines', () => {
     mocks.mediaGeneration.mockClear();
     mocks.audioPut.mockClear();
     mocks.audioDelete.mockClear();
+    mocks.measureAudioDuration.mockReset().mockReturnValue(1);
     mocks.logInfo.mockClear();
     mocks.stageSubscribers.clear();
     container = document.createElement('div');
@@ -663,6 +667,67 @@ describe('scene generator visual and narration pipelines', () => {
 
     await expect(result).resolves.toBe('tts_s1_speech-1');
     expect(statusChecks).toBe(4);
+    expect(mocks.audioPut).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'tts_s1_speech-1',
+        format: 'wav',
+        duration: 1,
+      }),
+    );
+  });
+
+  it('surfaces a missing completed artifact without corrupting browser-backed narration', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/generate/tts') {
+          return Promise.resolve(
+            jsonResponse({
+              success: true,
+              async: true,
+              teachingVoiceProvider: 'qwen3-tts',
+              jobId: 'rq_missing_completed_artifact',
+              status: 'completed',
+              statusUrl: '/api/generate/tts/jobs/rq_missing_completed_artifact',
+              audioUrl: '/api/generate/tts/jobs/rq_missing_completed_artifact/audio',
+            }),
+          );
+        }
+        if (url === '/api/generate/tts/jobs/rq_missing_completed_artifact/audio') {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            statusText: 'Not Found',
+            json: async () => ({
+              success: false,
+              errorCode: 'TTS_AUDIO_ARTIFACT_MISSING',
+              error:
+                'The completed narration audio artifact is missing. Retry only this narration action.',
+            }),
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    await expect(
+      generateAndStoreTTS(
+        'tts_s1_speech-missing',
+        'Keep this exact narration text.',
+        'en',
+        undefined,
+        { maxRetries: 0 },
+        undefined,
+        'stage-1',
+        undefined,
+        0,
+        'scene-1',
+        undefined,
+        'outline-1',
+      ),
+    ).rejects.toThrow('missing. Retry only this narration action');
+    expect(mocks.audioPut).not.toHaveBeenCalled();
   });
 
   it('publishes the first completed IndicF5 clip before the second clip finishes', async () => {

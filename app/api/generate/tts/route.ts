@@ -31,7 +31,7 @@ import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
 import { resolveFacultyVoiceSelection } from '@/lib/voice-cloning/synthesis';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
-import { enqueueTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import { enqueueTeachingVoiceJobDurably } from '@/lib/voice-cloning/teaching-voice-jobs';
 import { normalizeTeachingVoiceLanguageId } from '@/lib/voice-cloning/language';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
           requestedLanguage ?? undefined,
         );
         if (providerId === 'chatterbox' || providerId === 'indicf5' || providerId === 'qwen3-tts') {
-          const { job } = enqueueTeachingVoiceJob({
+          const { job } = await enqueueTeachingVoiceJobDurably({
             providerId,
             ownerId: user.id,
             profileId: teacherVoiceProfileId,

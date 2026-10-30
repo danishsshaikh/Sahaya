@@ -205,7 +205,7 @@ describe('explicit cloned voice TTS routing', () => {
       synthesizeFacultyVoice,
     }));
     vi.doMock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-      enqueueTeachingVoiceJob,
+      enqueueTeachingVoiceJobDurably: enqueueTeachingVoiceJob,
     }));
     vi.doMock('@/lib/audio/tts-providers', () => ({
       generateTTS,
