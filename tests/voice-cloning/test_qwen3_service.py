@@ -187,6 +187,32 @@ class QwenServiceUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.calls[0]["stopping_criteria"]), 1)
         self.assertFalse(self.service.generation_queue._active)
 
+    def test_output_token_limit_is_identified_as_incomplete(self):
+        stop_signal = self.service.GenerationStopSignal(
+            time.monotonic() + 10.0,
+            threading.Event(),
+            3,
+        )
+
+        self.assertFalse(stop_signal(None, None))
+        self.assertFalse(stop_signal(None, None))
+        self.assertTrue(stop_signal(None, None))
+        self.assertEqual(stop_signal.reason, "output-token-limit")
+
+    async def test_output_token_limit_discards_partial_audio(self):
+        model = FakeModel(wait_for_stop=True)
+        self.service.model = model
+        original_max_new_tokens = self.service.MAX_NEW_TOKENS
+        self.service.MAX_NEW_TOKENS = 3
+        try:
+            with self.assertRaises(self.service.HTTPException) as caught:
+                await self.service.synthesize(self.request(), FakeRequest())
+            self.assertEqual(caught.exception.status_code, 504)
+            self.assertIn("output token limit", caught.exception.detail)
+            self.assertFalse(self.service.generation_queue._active)
+        finally:
+            self.service.MAX_NEW_TOKENS = original_max_new_tokens
+
     async def test_deadline_discards_partial_audio_and_holds_lock_until_inference_returns(self):
         model = FakeModel(wait_for_stop=True, finish_delay=0.08)
         self.service.model = model

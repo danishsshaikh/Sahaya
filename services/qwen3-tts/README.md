@@ -90,6 +90,8 @@ persisted.
 Each inference passes an explicit `max_new_tokens` cap and a wall-clock stopping
 criterion to upstream Qwen generation. A deadline or disconnected caller asks
 generation to stop at the next autoregressive step; partial audio is discarded.
+Reaching the output-token cap is also treated as an incomplete result and its
+partial waveform is discarded rather than enhanced or marked voiced.
 The generation slot remains owned until the model call has actually returned.
 A hard CUDA/kernel hang cannot be safely killed from the Python thread; that
 case remains an operator-visible service fault rather than a falsely released

@@ -27,6 +27,7 @@ describe('Qwen3-TTS Teaching Voice service scaffold', () => {
     expect(source).toContain('voice_clone_prompt=prompt');
     expect(source).toContain('max_new_tokens=MAX_NEW_TOKENS');
     expect(source).toContain('stopping_criteria=StoppingCriteriaList([stop_signal])');
+    expect(source).toContain('stop_signal.reason == "output-token-limit"');
     expect(source).toContain('subtype="PCM_16"');
     expect(source).not.toContain('chatterbox');
     expect(source).not.toContain('indicf5');

@@ -226,18 +226,29 @@ def acquire_generation_slot(operation: str) -> float:
 class GenerationStopSignal(StoppingCriteria):
     """Cooperatively stop autoregressive generation without releasing its GPU slot."""
 
-    def __init__(self, deadline: float, cancellation: threading.Event) -> None:
+    def __init__(
+        self,
+        deadline: float,
+        cancellation: threading.Event,
+        max_steps: int,
+    ) -> None:
         self.deadline = deadline
         self.cancellation = cancellation
+        self.max_steps = max_steps
+        self.observed_steps = 0
         self.reason: str | None = None
 
     def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
         del input_ids, scores, kwargs
+        self.observed_steps += 1
         if self.cancellation.is_set():
             self.reason = "caller-disconnected"
             return True
         if time.monotonic() >= self.deadline:
             self.reason = "deadline-exceeded"
+            return True
+        if self.observed_steps >= self.max_steps:
+            self.reason = "output-token-limit"
             return True
         return False
 
@@ -417,7 +428,7 @@ async def synthesize(req: SynthesizeRequest, request: Request) -> Response:
         + SYNTHESIS_REQUEST_DEADLINE_SECONDS
         - SYNTHESIS_RESPONSE_GRACE_SECONDS
     )
-    stop_signal = GenerationStopSignal(inference_deadline, cancellation)
+    stop_signal = GenerationStopSignal(inference_deadline, cancellation, MAX_NEW_TOKENS)
     inference_started_at = time.monotonic()
     log.info(
         "Qwen3-TTS inference started profileId=%s cloneMode=%s textChars=%d "
@@ -469,6 +480,20 @@ async def synthesize(req: SynthesizeRequest, request: Request) -> Response:
             raise HTTPException(
                 status_code=504,
                 detail="Qwen3-TTS inference timed out before complete audio was produced",
+            )
+        if stop_signal.reason == "output-token-limit":
+            log.warning(
+                "Qwen3-TTS output token limit reached profileId=%s cloneMode=%s textChars=%d "
+                "inferenceMs=%d maxNewTokens=%d",
+                req.profileId,
+                req.cloneMode,
+                len(req.text),
+                round(inference_duration_seconds * 1000),
+                MAX_NEW_TOKENS,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail="Qwen3-TTS reached its output token limit before complete audio was produced",
             )
         if waveforms is None or len(waveforms) == 0:
             raise ValueError("model returned no audio")
