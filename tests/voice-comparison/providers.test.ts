@@ -107,6 +107,44 @@ describe('Sarvam voice cloning preview provider', () => {
     expect(body.get('speech_sample_rate')).toBeNull();
   });
 
+  it('synthesizes a Bulbul preset without a cloned voice or local service', async () => {
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          request_id: 'req-sarvam-preset',
+          audios: [Buffer.from(wav).toString('base64')],
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      new SarvamVoiceCloningPreviewProvider(config).synthesizePreset({
+        speaker: 'shubh',
+        text: 'Exact classroom narration.',
+        language: 'en',
+      }),
+    ).resolves.toMatchObject({ audio: wav, requestId: 'req-sarvam-preset', format: 'wav' });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.sarvam.test/text-to-speech');
+    expect(init.headers).toEqual({
+      'api-subscription-key': 'sarvam-secret',
+      'content-type': 'application/json',
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      text: 'Exact classroom narration.',
+      language_code: 'en-IN',
+      speaker: 'shubh',
+      model: 'bulbul:v3',
+      output_audio_codec: 'wav',
+      speech_sample_rate: 24000,
+      pace: 1,
+    });
+  });
+
   it('does not operate without explicit server configuration', async () => {
     const provider = new SarvamVoiceCloningPreviewProvider({ ...config, enabled: false });
     await expect(

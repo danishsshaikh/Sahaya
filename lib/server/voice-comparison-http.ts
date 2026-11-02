@@ -17,7 +17,7 @@ export class ExternalVoiceProviderError extends TeachingVoiceError {
     readonly code: ExternalVoiceProviderErrorCode,
     readonly metadata: {
       provider: Extract<VoiceComparisonProviderId, 'sarvam' | 'bodhan'>;
-      operation: 'voice_creation' | 'preview_generation';
+      operation: 'voice_creation' | 'preview_generation' | 'preset_generation';
       providerStatus?: number;
       providerCode?: string;
       requestId?: string;

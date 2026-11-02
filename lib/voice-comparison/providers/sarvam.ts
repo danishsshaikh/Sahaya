@@ -1,4 +1,9 @@
-import { SARVAM_LANGUAGE_CODES } from '@/lib/voice-comparison/catalog';
+import {
+  isSarvamPresetVoice,
+  SARVAM_LANGUAGE_CODES,
+  SARVAM_TTS_LANGUAGE_CODES,
+  SARVAM_TTS_MODEL,
+} from '@/lib/voice-comparison/catalog';
 import { MAX_COMPARISON_AUDIO_BYTES, readWavMetadata } from '@/lib/voice-comparison/audio';
 import type { VoiceComparisonLanguageCode } from '@/lib/voice-comparison/types';
 import {
@@ -28,7 +33,10 @@ interface SarvamSynthesisResponse {
   audio?: unknown;
   request_id?: unknown;
   audio_duration?: unknown;
+  audios?: unknown;
 }
+
+type SarvamOperation = 'voice_creation' | 'preview_generation' | 'preset_generation';
 
 export interface SarvamVoiceCreationResult {
   voiceId: string;
@@ -206,10 +214,65 @@ export class SarvamVoiceCloningPreviewProvider {
     };
   }
 
+  async synthesizePreset(input: {
+    speaker: string;
+    text: string;
+    language: VoiceComparisonLanguageCode;
+    signal?: AbortSignal;
+  }): Promise<SarvamSynthesisResult> {
+    if (!this.isConfigured()) throw new TeachingVoiceError('Sarvam AI is not configured.', 503);
+    const languageCode = SARVAM_TTS_LANGUAGE_CODES[input.language];
+    if (!languageCode) {
+      throw new TeachingVoiceError('Sarvam Bulbul does not support this language.');
+    }
+    if (!isSarvamPresetVoice(input.speaker)) {
+      throw new TeachingVoiceError('Select a supported Sarvam Bulbul voice.');
+    }
+    if (input.text.length < 1 || input.text.length > 2500) {
+      throw new TeachingVoiceError('Sarvam Bulbul narration must contain 1 to 2500 characters.');
+    }
+    const response = await this.request(
+      '/text-to-speech',
+      () => ({
+        method: 'POST',
+        headers: {
+          'api-subscription-key': this.config.apiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: input.text,
+          language_code: languageCode,
+          speaker: input.speaker,
+          model: SARVAM_TTS_MODEL,
+          output_audio_codec: 'wav',
+          speech_sample_rate: 24000,
+          pace: 1,
+        }),
+      }),
+      'preset_generation',
+      input.signal,
+      true,
+    );
+    const body = (await responseJson(response)) as SarvamSynthesisResponse | null;
+    if (!response.ok) this.throwProviderError(response, body, 'preset_generation');
+    const encoded = Array.isArray(body?.audios) ? body.audios[0] : undefined;
+    const audio = decodeAudio(encoded);
+    return {
+      audio,
+      format: 'wav',
+      durationSeconds: readWavMetadata(audio).durationSeconds,
+      ...(typeof body?.request_id === 'string'
+        ? { requestId: body.request_id }
+        : requestIdFromResponse(response)
+          ? { requestId: requestIdFromResponse(response) }
+          : {}),
+    };
+  }
+
   private async request(
     endpoint: string,
     init: () => RequestInit,
-    operation: 'voice_creation' | 'preview_generation',
+    operation: SarvamOperation,
     signal: AbortSignal | undefined,
     retryRateLimit: boolean,
   ): Promise<Response> {
@@ -234,11 +297,7 @@ export class SarvamVoiceCloningPreviewProvider {
     }
   }
 
-  private throwProviderError(
-    response: Response,
-    body: unknown,
-    operation: 'voice_creation' | 'preview_generation',
-  ): never {
+  private throwProviderError(response: Response, body: unknown, operation: SarvamOperation): never {
     const mapped = providerStatusMessage('Sarvam AI', response.status);
     throw new ExternalVoiceProviderError(mapped.message, mapped.status, 'SARVAM_UPSTREAM_ERROR', {
       provider: 'sarvam',

@@ -31,6 +31,25 @@ export function getSarvamVoiceCloningConfig(): ExternalVoiceProviderConfig {
   };
 }
 
+export function getSarvamTtsConfig(): ExternalVoiceProviderConfig {
+  return {
+    enabled: envFlag('SARVAM_TTS_ENABLED', envFlag('SARVAM_VOICE_CLONING_ENABLED')),
+    apiKey: process.env.SARVAM_API_KEY?.trim() || '',
+    baseUrl: baseUrl('SARVAM_API_BASE_URL', 'https://api.sarvam.ai'),
+    timeoutMs: boundedInteger('SARVAM_TIMEOUT_MS', 120000, 1000, 300000),
+    maxConcurrency: boundedInteger('SARVAM_MAX_CONCURRENCY', 1, 1, 4),
+  };
+}
+
+export function externalVoiceProviderUnavailableReason(
+  providerName: string,
+  config: ExternalVoiceProviderConfig,
+): string | undefined {
+  if (!config.enabled) return `${providerName} is disabled on this deployment.`;
+  if (!config.apiKey) return `${providerName} credentials are not configured on this server.`;
+  return undefined;
+}
+
 export function getBodhanTtsConfig(): ExternalVoiceProviderConfig {
   return {
     enabled: envFlag('BODHAN_TTS_ENABLED'),

@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   generatePreview: vi.fn(),
   getBootstrap: vi.fn(),
   requireProfile: vi.fn(),
   findCurrentProfile: vi.fn(),
+  listProfiles: vi.fn(),
   enhance: vi.fn(),
   readEntries: vi.fn(),
   readCache: vi.fn(),
@@ -25,7 +26,11 @@ vi.mock('@/lib/voice-cloning/resemble-enhance', () => ({
 }));
 vi.mock('@/lib/voice-cloning/storage', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/voice-cloning/storage')>();
-  return { ...original, findCurrentVoiceProfile: mocks.findCurrentProfile };
+  return {
+    ...original,
+    findCurrentVoiceProfile: mocks.findCurrentProfile,
+    listVoiceProfiles: mocks.listProfiles,
+  };
 });
 vi.mock('@/lib/server/voice-comparison-cache', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/server/voice-comparison-cache')>();
@@ -50,6 +55,29 @@ import {
 } from '@/lib/server/course-narration';
 import { TeachingVoiceError } from '@/lib/voice-cloning/types';
 
+function pcmWav(): Uint8Array {
+  const bytes = new Uint8Array(48);
+  const view = new DataView(bytes.buffer);
+  bytes.set(new TextEncoder().encode('RIFF'), 0);
+  view.setUint32(4, 40, true);
+  bytes.set(new TextEncoder().encode('WAVEfmt '), 8);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 24000, true);
+  view.setUint32(28, 48000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  bytes.set(new TextEncoder().encode('data'), 36);
+  view.setUint32(40, 4, true);
+  return bytes;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
 describe('course narration provider routing', () => {
   beforeEach(() => {
     mocks.generatePreview.mockReset().mockResolvedValue({
@@ -62,6 +90,7 @@ describe('course narration provider routing', () => {
     mocks.getBootstrap.mockReset();
     mocks.requireProfile.mockReset();
     mocks.findCurrentProfile.mockReset().mockResolvedValue(null);
+    mocks.listProfiles.mockReset().mockResolvedValue([]);
     mocks.readEntries.mockReset().mockResolvedValue([]);
     mocks.readCache.mockReset().mockResolvedValue(null);
     mocks.writeCache.mockReset().mockResolvedValue(undefined);
@@ -91,6 +120,43 @@ describe('course narration provider routing', () => {
     );
     expect(mocks.enhance).not.toHaveBeenCalled();
     expect(Buffer.from(result.audio.base64, 'base64').toString()).toBe('provider-bytes');
+  });
+
+  it('routes Sarvam Bulbul preset narration without requiring a Teaching Voice profile', async () => {
+    const wav = pcmWav();
+    vi.stubEnv('SARVAM_TTS_ENABLED', 'true');
+    vi.stubEnv('SARVAM_API_KEY', 'server-only-secret');
+    vi.stubEnv('SARVAM_API_BASE_URL', 'https://api.sarvam.test');
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          request_id: 'req-preset',
+          audios: [Buffer.from(wav).toString('base64')],
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await synthesizeCourseNarration({
+      ownerId: 'owner-1',
+      stageId: 'course-1',
+      providerId: 'sarvam',
+      text: 'Exact preset narration.',
+      language: 'en',
+      voice: 'shubh',
+      enhancementMode: 'standard',
+    });
+
+    expect(result).toMatchObject({
+      providerId: 'sarvam',
+      voiceType: 'preset',
+      voice: 'shubh',
+      processingMode: 'raw-provider-output',
+    });
+    expect(Buffer.from(result.audio.base64, 'base64')).toEqual(Buffer.from(wav));
+    expect(mocks.generatePreview).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('routes Ming course narration through the shared fixed adapter without enhancement', async () => {
@@ -236,6 +302,25 @@ describe('course narration provider routing', () => {
 
     expect(bootstrap.profile).toBeUndefined();
     expect(bootstrap.providers.map((provider) => provider.id)).toContain('bodhan');
+  });
+
+  it('offers configured Sarvam preset voices without any saved Teaching Voice profile', async () => {
+    vi.stubEnv('SARVAM_TTS_ENABLED', 'true');
+    vi.stubEnv('SARVAM_API_KEY', 'server-only-secret');
+
+    const bootstrap = await getCourseNarrationBootstrap({
+      ownerId: 'owner-1',
+      stageId: 'course-without-profile',
+      language: 'en',
+    });
+
+    expect(bootstrap.profile).toBeUndefined();
+    expect(bootstrap.providers.find(({ id }) => id === 'sarvam')).toMatchObject({
+      configured: true,
+      available: true,
+      courseNarrationEnabled: true,
+    });
+    expect(bootstrap.sarvamVoices?.[0]).toEqual({ id: 'shubh', name: 'Shubh' });
   });
 
   it('uses the same current ready profile lookup as Customize Voice for an older course', async () => {

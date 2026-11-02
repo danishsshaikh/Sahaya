@@ -51,6 +51,11 @@ export interface VoiceComparisonPresetVoice {
   recordedLanguageLabel: string;
 }
 
+export interface VoiceComparisonApiVoice {
+  id: string;
+  name: string;
+}
+
 export interface VoiceComparisonProviderCapability {
   id: VoiceComparisonProviderId;
   name: string;
@@ -79,6 +84,9 @@ export interface VoiceComparisonProviderAvailability extends VoiceComparisonProv
   sarvamReferenceProvenance?: 'original-upload' | 'processed-reference' | 'unknown';
   sarvamRawReferenceAvailable?: boolean;
   sarvamCanCreateRawClone?: boolean;
+  sarvamPresetLanguages?: VoiceComparisonLanguageCode[];
+  sarvamPresetAvailable?: boolean;
+  sarvamCloneAvailable?: boolean;
 }
 
 export interface VoiceComparisonPreviewRequest {
@@ -130,6 +138,8 @@ export interface VoiceComparisonBootstrap {
   providers: VoiceComparisonProviderAvailability[];
   languages: VoiceComparisonLanguage[];
   bodhanVoices: VoiceComparisonPresetVoice[];
+  /** Server-approved Sarvam Bulbul speakers. Never contains credentials or cloned voice IDs. */
+  sarvamVoices?: VoiceComparisonApiVoice[];
   bodhanStyles: string[];
   savedPreviews: VoiceComparisonPreviewResult[];
   /** Owner-safe profile summary; remote provider voice identifiers are omitted. */

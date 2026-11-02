@@ -271,6 +271,35 @@ describe('course narration production route compatibility', () => {
     );
   });
 
+  it('allows a Sarvam preset voice without requiring a saved Teaching Voice clone', async () => {
+    mocks.resolveProfile.mockResolvedValueOnce(null);
+
+    const response = await POST(
+      request('POST', {
+        stageId: 'course-1',
+        sceneId: 'scene-1',
+        actionId: 'speech-1',
+        providerId: 'sarvam',
+        language: 'en',
+        voice: 'shubh',
+        text: '  Exact persisted text.  ',
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerId: 'owner-1',
+        stageId: 'course-1',
+        profileId: undefined,
+        providerId: 'sarvam',
+        language: 'en',
+        voice: 'shubh',
+        text: '  Exact persisted text.  ',
+      }),
+    );
+  });
+
   it('rejects stale transcripts without scheduling provider work', async () => {
     const response = await POST(
       request('POST', {

@@ -1,6 +1,7 @@
 import type {
   VoiceComparisonLanguage,
   VoiceComparisonLanguageCode,
+  VoiceComparisonApiVoice,
   VoiceComparisonPresetVoice,
   VoiceComparisonProviderCapability,
   VoiceComparisonProviderId,
@@ -46,6 +47,67 @@ export const SARVAM_LANGUAGE_CODES: Partial<Record<VoiceComparisonLanguageCode, 
   ta: 'ta-IN',
   te: 'te-IN',
 };
+
+/** Bulbul v3 preset TTS language coverage, separate from Instant Voice Cloning. */
+export const SARVAM_TTS_LANGUAGE_CODES: Partial<Record<VoiceComparisonLanguageCode, string>> = {
+  bn: 'bn-IN',
+  en: 'en-IN',
+  gu: 'gu-IN',
+  hi: 'hi-IN',
+  kn: 'kn-IN',
+  ml: 'ml-IN',
+  mr: 'mr-IN',
+  or: 'od-IN',
+  pa: 'pa-IN',
+  ta: 'ta-IN',
+  te: 'te-IN',
+};
+
+export const SARVAM_TTS_MODEL = 'bulbul:v3';
+
+export const SARVAM_VOICES: VoiceComparisonApiVoice[] = [
+  'shubh',
+  'aditya',
+  'ritu',
+  'priya',
+  'neha',
+  'rahul',
+  'pooja',
+  'rohan',
+  'simran',
+  'kavya',
+  'amit',
+  'dev',
+  'ishita',
+  'shreya',
+  'ratan',
+  'varun',
+  'manan',
+  'sumit',
+  'roopa',
+  'kabir',
+  'aayan',
+  'ashutosh',
+  'advait',
+  'anand',
+  'tanya',
+  'tarun',
+  'sunny',
+  'mani',
+  'gokul',
+  'vijay',
+  'shruti',
+  'suhani',
+  'mohit',
+  'kavitha',
+  'rehan',
+  'soham',
+  'rupali',
+].map((id) => ({ id, name: `${id[0].toUpperCase()}${id.slice(1)}` }));
+
+export function isSarvamPresetVoice(value: unknown): value is string {
+  return typeof value === 'string' && SARVAM_VOICES.some(({ id }) => id === value);
+}
 
 const BODHAN_RECORDED_VOICES: Array<[VoiceComparisonLanguageCode, string, string, string?]> = [
   ['as', 'Prastuti', 'Ankur'],
@@ -144,7 +206,7 @@ export const VOICE_COMPARISON_PROVIDERS: VoiceComparisonProviderCapability[] = [
     voiceType: 'cloned',
     supportedLanguages: ALL_SARVAM_LANGUAGES,
     supportsCloning: true,
-    supportsPresetVoices: false,
+    supportsPresetVoices: true,
     supportsEnhancement: false,
     supportsClassroom: false,
     supportsPreview: true,
