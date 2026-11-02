@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   BODHAN_VOICES,
   SARVAM_LANGUAGE_CODES,
-  SARVAM_TTS_LANGUAGE_CODES,
-  SARVAM_VOICES,
   VOICE_COMPARISON_PROVIDERS,
 } from '@/lib/voice-comparison/catalog';
 
@@ -30,14 +28,11 @@ describe('voice comparison provider catalog', () => {
     expect(SARVAM_LANGUAGE_CODES.ur).toBeUndefined();
   });
 
-  it('keeps Bulbul preset coverage separate from voice-cloning coverage', () => {
-    expect(Object.keys(SARVAM_TTS_LANGUAGE_CODES)).toHaveLength(11);
-    expect(SARVAM_TTS_LANGUAGE_CODES.en).toBe('en-IN');
-    expect(SARVAM_TTS_LANGUAGE_CODES.as).toBeUndefined();
-    expect(SARVAM_VOICES).toContainEqual({ id: 'shubh', name: 'Shubh' });
+  it('keeps Sarvam classified as voice cloning rather than preset TTS', () => {
     expect(VOICE_COMPARISON_PROVIDERS.find(({ id }) => id === 'sarvam')).toMatchObject({
       supportsCloning: true,
-      supportsPresetVoices: true,
+      supportsPresetVoices: false,
+      voiceType: 'cloned',
     });
   });
 });

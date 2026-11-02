@@ -107,13 +107,14 @@ describe('Sarvam voice cloning preview provider', () => {
     expect(body.get('speech_sample_rate')).toBeNull();
   });
 
-  it('synthesizes a Bulbul preset without a cloned voice or local service', async () => {
+  it('synthesizes a cloned voice from the exact inline reference bytes', async () => {
+    const reference = pcmWav();
     const wav = pcmWav();
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          request_id: 'req-sarvam-preset',
-          audios: [Buffer.from(wav).toString('base64')],
+          request_id: 'req-sarvam-inline',
+          audio_b64: Buffer.from(wav).toString('base64'),
         }),
         { headers: { 'content-type': 'application/json' } },
       ),
@@ -121,28 +122,49 @@ describe('Sarvam voice cloning preview provider', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(
-      new SarvamVoiceCloningPreviewProvider(config).synthesizePreset({
-        speaker: 'shubh',
+      new SarvamVoiceCloningPreviewProvider(config).synthesize({
+        referenceAudio: {
+          bytes: reference,
+          mimeType: 'audio/wav',
+          durationSeconds: 12,
+        },
         text: 'Exact classroom narration.',
         language: 'en',
       }),
-    ).resolves.toMatchObject({ audio: wav, requestId: 'req-sarvam-preset', format: 'wav' });
+    ).resolves.toMatchObject({ audio: wav, requestId: 'req-sarvam-inline', format: 'wav' });
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://api.sarvam.test/text-to-speech');
-    expect(init.headers).toEqual({
-      'api-subscription-key': 'sarvam-secret',
-      'content-type': 'application/json',
-    });
-    expect(JSON.parse(String(init.body))).toEqual({
-      text: 'Exact classroom narration.',
-      language_code: 'en-IN',
-      speaker: 'shubh',
-      model: 'bulbul:v3',
-      output_audio_codec: 'wav',
-      speech_sample_rate: 24000,
-      pace: 1,
-    });
+    expect(url).toBe('https://api.sarvam.test/voices/clone');
+    expect(init.headers).toEqual({ 'api-subscription-key': 'sarvam-secret' });
+    const form = init.body as FormData;
+    expect(form.get('voice_id')).toBeNull();
+    expect(form.get('ref_text')).toBeNull();
+    expect(form.get('text')).toBe('Exact classroom narration.');
+    const uploaded = form.get('ref_audio') as File;
+    expect(uploaded.name).toBe('reference.wav');
+    expect(
+      createHash('sha256')
+        .update(Buffer.from(await uploaded.arrayBuffer()))
+        .digest('hex'),
+    ).toBe(createHash('sha256').update(reference).digest('hex'));
+  });
+
+  it('rejects an oversized inline reference before calling Sarvam', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      new SarvamVoiceCloningPreviewProvider(config).synthesize({
+        referenceAudio: {
+          bytes: pcmWav(),
+          mimeType: 'audio/wav',
+          durationSeconds: 15.01,
+        },
+        text: 'Exact classroom narration.',
+        language: 'en',
+      }),
+    ).rejects.toThrow(/no longer than 15 seconds/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not operate without explicit server configuration', async () => {

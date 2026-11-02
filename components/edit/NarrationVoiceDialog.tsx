@@ -45,8 +45,6 @@ interface NarrationProviderChoice {
   description: string;
 }
 
-const SARVAM_SAVED_CLONE_OPTION = 'saved-sarvam-clone';
-
 class NarrationPersistenceError extends Error {
   override readonly name = 'NarrationPersistenceError';
 }
@@ -96,7 +94,7 @@ function profileSupportsProvider(
   profile: PublicVoiceProfile | null,
   providerId: CourseNarrationSelection['providerId'],
 ): boolean {
-  if (providerId === 'bodhan' || providerId === 'sarvam') return true;
+  if (providerId === 'bodhan') return true;
   if (!profile?.compatibleProviders?.includes(providerId)) return false;
   return true;
 }
@@ -107,6 +105,9 @@ function providerDisabledReason(
   profile: PublicVoiceProfile | null,
 ): string | null {
   if (!provider.configured) return provider.unavailableReason ?? 'Not configured.';
+  if (!provider.available) {
+    return provider.unavailableReason ?? 'Unavailable for the selected Teaching Voice.';
+  }
   if (!provider.courseNarrationEnabled) {
     return 'Experimental course narration is disabled on this deployment.';
   }
@@ -142,7 +143,6 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     useState<CourseNarrationSelection['providerId']>('chatterbox');
   const [language, setLanguage] = useState<VoiceComparisonLanguageCode>('en');
   const [voice, setVoice] = useState('');
-  const [sarvamVoice, setSarvamVoice] = useState('');
   const [style, setStyle] = useState('educational lecture');
   const [enhancementMode, setEnhancementMode] =
     useState<CourseNarrationEnhancementMode>('resemble-enhance');
@@ -188,7 +188,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                 enhancementMode: undefined,
                 description: candidate.experimental
                   ? candidate.id === 'sarvam'
-                    ? 'Cloud API voices'
+                    ? 'Cloned Teaching Voice'
                     : 'Experimental'
                   : candidate.voiceType === 'preset'
                     ? 'Preset voice'
@@ -199,21 +199,13 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     [bootstrap?.providers],
   );
   const matchingVoices = useMemo(() => bootstrap?.bodhanVoices ?? [], [bootstrap?.bodhanVoices]);
-  const matchingSarvamVoices = useMemo(
-    () => bootstrap?.sarvamVoices ?? [],
-    [bootstrap?.sarvamVoices],
-  );
-  const sarvamUsesSavedClone = providerId === 'sarvam' && sarvamVoice === SARVAM_SAVED_CLONE_OPTION;
   const selection: CourseNarrationSelection | null = provider
     ? {
         providerId,
         providerName: narrationProviderName(provider, enhancementMode),
-        ...(profile && providerId !== 'bodhan' && (providerId !== 'sarvam' || sarvamUsesSavedClone)
-          ? { profileId: profile.id }
-          : {}),
+        ...(profile && providerId !== 'bodhan' ? { profileId: profile.id } : {}),
         language,
         ...(providerId === 'bodhan' ? { voice, style } : {}),
-        ...(providerId === 'sarvam' && !sarvamUsesSavedClone ? { voice: sarvamVoice } : {}),
         ...(provider.supportsEnhancement ? { enhancementMode } : {}),
         experimental: provider.experimental,
       }
@@ -295,6 +287,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         (candidate) =>
           candidate.id === preferredSelection?.providerId &&
           candidate.configured &&
+          candidate.available &&
           candidate.courseNarrationEnabled &&
           candidate.supportedLanguages.includes(initialLanguage) &&
           profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
@@ -304,6 +297,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
             (candidate) =>
               candidate.id === body.narration?.profile?.activeEngine &&
               candidate.configured &&
+              candidate.available &&
               candidate.courseNarrationEnabled &&
               candidate.supportedLanguages.includes(initialLanguage) &&
               profileSupportsProvider(body.narration?.profile ?? null, candidate.id),
@@ -341,24 +335,6 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
           ? preferredSelection.style
           : (body.narration.bodhanStyles[0] ?? 'educational lecture'),
       );
-      const sarvamProvider = body.narration.providers.find(
-        (candidate) => candidate.id === 'sarvam',
-      );
-      const preferredSarvamPreset =
-        preferredSelection?.providerId === 'sarvam' &&
-        preferredSelection.voice &&
-        sarvamProvider?.sarvamPresetAvailable &&
-        body.narration.sarvamVoices?.some((candidate) => candidate.id === preferredSelection.voice)
-          ? preferredSelection.voice
-          : undefined;
-      setSarvamVoice(
-        preferredSarvamPreset ??
-          (sarvamProvider?.sarvamCloneAvailable
-            ? SARVAM_SAVED_CLONE_OPTION
-            : sarvamProvider?.sarvamPresetAvailable
-              ? (body.narration.sarvamVoices?.[0]?.id ?? '')
-              : ''),
-      );
     };
     void load().catch((caught: unknown) => {
       if ((caught as { name?: string }).name !== 'AbortError') {
@@ -374,20 +350,12 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     candidate: VoiceComparisonProviderAvailability,
     mode: CourseNarrationEnhancementMode,
     selectedProfile: PublicVoiceProfile | null = profile,
-    selectedSarvamVoice: string = sarvamVoice,
   ): CourseNarrationSelection => ({
     providerId: candidate.id,
     providerName: narrationProviderName(candidate, mode),
-    ...(selectedProfile &&
-    candidate.id !== 'bodhan' &&
-    (candidate.id !== 'sarvam' || selectedSarvamVoice === SARVAM_SAVED_CLONE_OPTION)
-      ? { profileId: selectedProfile.id }
-      : {}),
+    ...(selectedProfile && candidate.id !== 'bodhan' ? { profileId: selectedProfile.id } : {}),
     language,
     ...(candidate.id === 'bodhan' ? { voice, style } : {}),
-    ...(candidate.id === 'sarvam' && selectedSarvamVoice !== SARVAM_SAVED_CLONE_OPTION
-      ? { voice: selectedSarvamVoice }
-      : {}),
     ...(candidate.supportsEnhancement ? { enhancementMode: mode } : {}),
     experimental: candidate.experimental,
   });
@@ -417,20 +385,9 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     const mode = candidate.id === 'qwen3-tts' ? (selectedMode ?? 'resemble-enhance') : 'standard';
     setProviderId(candidate.id);
     setEnhancementMode(mode);
-    const selectedSarvamVoice =
-      candidate.id === 'sarvam'
-        ? candidate.sarvamCloneAvailable
-          ? SARVAM_SAVED_CLONE_OPTION
-          : candidate.sarvamPresetAvailable
-            ? (matchingSarvamVoices[0]?.id ?? '')
-            : ''
-        : sarvamVoice;
-    if (candidate.id === 'sarvam') setSarvamVoice(selectedSarvamVoice);
     setPreview(null);
     setError(null);
-    void persistPreferredSelection(
-      selectionForProvider(candidate, mode, profile, selectedSarvamVoice),
-    ).catch((caught) => {
+    void persistPreferredSelection(selectionForProvider(candidate, mode)).catch((caught) => {
       setError(
         caught instanceof Error
           ? caught.message
@@ -473,6 +430,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         selectedProvider = bootstrap?.providers.find(
           (candidate) =>
             candidate.configured &&
+            candidate.available &&
             candidate.courseNarrationEnabled &&
             candidate.supportedLanguages.includes(language) &&
             profileSupportsProvider(selected, candidate.id),
@@ -489,6 +447,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
           selected,
         );
       }
+      setLoadAttempt((attempt) => attempt + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The selected voice could not be saved.');
     } finally {
@@ -542,17 +501,6 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
       setVoice(preferred);
     }
   }, [matchingVoices, providerId, voice]);
-
-  useEffect(() => {
-    if (providerId !== 'sarvam' || !provider) return;
-    const presetLanguageSupported = provider.sarvamPresetLanguages?.includes(language) ?? false;
-    if (
-      sarvamVoice !== SARVAM_SAVED_CLONE_OPTION &&
-      (!provider.sarvamPresetAvailable || !presetLanguageSupported)
-    ) {
-      setSarvamVoice(provider.sarvamCloneAvailable ? SARVAM_SAVED_CLONE_OPTION : '');
-    }
-  }, [language, provider, providerId, sarvamVoice]);
 
   useEffect(() => () => controller.current?.abort(), []);
 
@@ -679,10 +627,7 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
             selection.providerId === 'bodhan'
               ? (matchingVoices.find((candidate) => candidate.id === selection.voice)?.name ??
                 selection.voice)
-              : selection.providerId === 'sarvam' && selection.voice
-                ? (matchingSarvamVoices.find((candidate) => candidate.id === selection.voice)
-                    ?.name ?? selection.voice)
-                : profile?.displayName,
+              : profile?.displayName,
           language: selection.language,
           settings: {
             ...(selection.voice ? { voice: selection.voice } : {}),
@@ -831,11 +776,11 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
     : undefined;
   const compatible = Boolean(
     provider?.configured &&
+    provider.available &&
     provider.courseNarrationEnabled &&
     provider.supportedLanguages.includes(language) &&
     profileSupportsProvider(profile, providerId) &&
-    (providerId !== 'bodhan' || voice) &&
-    (providerId !== 'sarvam' || sarvamVoice),
+    (providerId !== 'bodhan' || voice),
   );
   const eligibleProfiles = (bootstrap?.profiles ?? []).filter((candidate) =>
     bootstrap?.providers.some(
@@ -844,7 +789,6 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
         engine.courseNarrationEnabled &&
         engine.supportedLanguages.includes(language) &&
         engine.id !== 'bodhan' &&
-        engine.id !== 'sarvam' &&
         profileSupportsProvider(candidate, engine.id),
     ),
   );
@@ -977,47 +921,6 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
                       ))}
                     </select>
                   </label>
-                ) : providerId === 'sarvam' ? (
-                  <label className="space-y-1 text-xs font-medium">
-                    Sarvam voice
-                    <select
-                      aria-label="Sarvam voice"
-                      value={sarvamVoice}
-                      disabled={loading}
-                      onChange={(event) => {
-                        const selectedVoice = event.target.value;
-                        setSarvamVoice(selectedVoice);
-                        if (provider) {
-                          void persistPreferredSelection(
-                            selectionForProvider(provider, enhancementMode, profile, selectedVoice),
-                          ).catch((caught) => {
-                            setError(
-                              caught instanceof Error
-                                ? caught.message
-                                : 'The Sarvam voice selection could not be saved.',
-                            );
-                          });
-                        }
-                      }}
-                      className="h-9 w-full rounded-md border bg-background px-2 text-sm font-normal"
-                    >
-                      {provider?.sarvamCloneAvailable ? (
-                        <option value={SARVAM_SAVED_CLONE_OPTION}>Saved Sarvam clone</option>
-                      ) : null}
-                      {matchingSarvamVoices.map((candidate) => (
-                        <option
-                          key={candidate.id}
-                          value={candidate.id}
-                          disabled={
-                            !provider?.sarvamPresetAvailable ||
-                            !(provider.sarvamPresetLanguages?.includes(language) ?? false)
-                          }
-                        >
-                          {candidate.name} · Bulbul v3
-                        </option>
-                      ))}
-                    </select>
-                  </label>
                 ) : (
                   <label className="space-y-1 text-xs font-medium">
                     Faculty voice
@@ -1082,9 +985,9 @@ export function NarrationVoiceDialog({ open, onOpenChange, sceneId }: NarrationV
 
               {providerId === 'sarvam' ? (
                 <p className="rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-                  {sarvamUsesSavedClone
-                    ? 'Uses the existing saved Sarvam clone and raw provider output. Sahaya will not create a new clone or process the returned audio.'
-                    : 'Uses a Sarvam Bulbul API voice. No local model or Teaching Voice clone is required.'}
+                  {provider?.sarvamNarrationMode === 'saved-voice-id'
+                    ? 'Uses the existing saved Sarvam clone for this Teaching Voice. Sahaya will not create or replace a remote clone.'
+                    : 'Uses the exact original recording from this Teaching Voice as an inline Sarvam reference. Sahaya will not create a remote clone or process the reference or returned audio.'}
                 </p>
               ) : null}
               {providerId === 'sarvam' || providerId === 'bodhan' ? (

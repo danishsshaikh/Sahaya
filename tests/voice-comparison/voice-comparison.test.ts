@@ -200,6 +200,7 @@ describe('voice comparison coordinator', () => {
       await import('@/lib/server/voice-comparison');
     const result = await generateVoiceComparisonPreview({
       ownerId: original.ownerId,
+      allowSarvamInlineReference: true,
       request: {
         profileId: original.id,
         providerId: 'sarvam',
@@ -210,6 +211,7 @@ describe('voice comparison coordinator', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/voices/clone');
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('voice_id')).toBe('svc-legacy1234');
+    expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('ref_audio')).toBeNull();
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('text')).toBe(' Unchanged text. ');
     expect(result.referenceProvenance).toBe('processed-reference');
     const bootstrap = await getVoiceComparisonBootstrap(
@@ -221,6 +223,103 @@ describe('voice comparison coordinator', () => {
       requiresExternalConsent: false,
       sarvamReferenceProvenance: 'processed-reference',
     });
+  });
+
+  it('uses exact original reference bytes inline without creating a remote clone', async () => {
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    const originalBytes = pcmWav();
+    const originalRecording = await storage.writeOriginalRecording(original.id, original.ownerId, {
+      bytes: originalBytes,
+      mimeType: 'audio/wav',
+      fileName: 'original.wav',
+    });
+    await storage.writeVoiceProfile({
+      ...original,
+      referenceAudioKey,
+      originalRecording,
+    });
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ audio_b64: Buffer.from(wav).toString('base64') }), {
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req-inline' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview, resolveSarvamCourseNarrationAvailability } =
+      await import('@/lib/server/voice-comparison');
+
+    const availability = await resolveSarvamCourseNarrationAvailability(
+      (await storage.readVoiceProfile(original.id, original.ownerId)) as VoiceProfile,
+    );
+    expect(availability).toMatchObject({
+      available: true,
+      externalVoiceReady: false,
+      sarvamNarrationMode: 'inline-reference',
+    });
+    const result = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      allowSarvamInlineReference: true,
+      request: {
+        profileId: original.id,
+        providerId: 'sarvam',
+        text: 'Exact inline cloned narration.',
+        language: 'en',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.sarvam.test/voices/clone');
+    const form = init.body as FormData;
+    expect(form.get('voice_id')).toBeNull();
+    expect(form.get('ref_text')).toBeNull();
+    expect(form.get('text')).toBe('Exact inline cloned narration.');
+    expect(Buffer.from(await (form.get('ref_audio') as File).arrayBuffer())).toEqual(
+      Buffer.from(originalBytes),
+    );
+    expect(result).toMatchObject({
+      voiceType: 'cloned',
+      referenceProvenance: 'original-upload',
+      processingMode: 'raw-provider-output',
+      providerRequestId: 'req-inline',
+    });
+    const stored = await storage.readVoiceProfile(original.id, original.ownerId);
+    expect(stored?.sarvamVoice).toBeUndefined();
+    expect(stored?.sarvamRawVoice).toBeUndefined();
+  });
+
+  it('reports an actionable error when neither a saved clone nor original reference exists', async () => {
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    await expect(
+      generateVoiceComparisonPreview({
+        ownerId: original.ownerId,
+        allowSarvamInlineReference: true,
+        request: {
+          profileId: original.id,
+          providerId: 'sarvam',
+          text: 'Exact cloned narration.',
+          language: 'en',
+        },
+      }),
+    ).rejects.toThrow(/original recording (?:was not retained|has no retained)/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('restores the deployed pre-metadata Sarvam cache entry for the same owned profile', async () => {
@@ -810,7 +909,7 @@ describe('voice comparison coordinator', () => {
     expect(bootstrap.providers.find(({ id }) => id === 'sarvam')).toMatchObject({
       configured: false,
       available: false,
-      unavailableReason: 'Not configured',
+      unavailableReason: 'Sarvam AI is disabled on this deployment.',
     });
     expect(bootstrap.providers.find(({ id }) => id === 'chatterbox')).toMatchObject({
       configured: true,

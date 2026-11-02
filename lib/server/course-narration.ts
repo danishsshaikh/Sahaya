@@ -2,14 +2,11 @@ import { Buffer } from 'node:buffer';
 import {
   BODHAN_STYLES,
   BODHAN_VOICES,
-  SARVAM_TTS_LANGUAGE_CODES,
-  SARVAM_VOICES,
   VOICE_COMPARISON_LANGUAGES,
   VOICE_COMPARISON_PROVIDERS,
   getVoiceComparisonProvider,
   isBodhanStyle,
   isBodhanVoice,
-  isSarvamPresetVoice,
 } from '@/lib/voice-comparison/catalog';
 import {
   concatenatePcmWav,
@@ -17,19 +14,18 @@ import {
   splitSpeechTextPreservingText,
 } from '@/lib/voice-comparison/audio';
 import { BodhanIndicSpeakPreviewProvider } from '@/lib/voice-comparison/providers/bodhan';
-import { SarvamVoiceCloningPreviewProvider } from '@/lib/voice-comparison/providers/sarvam';
 import type {
   VoiceComparisonBootstrap,
   VoiceComparisonLanguageCode,
   VoiceComparisonPreviewRequest,
   VoiceComparisonPreviewResult,
   VoiceComparisonProviderId,
-  VoiceComparisonProviderAvailability,
 } from '@/lib/voice-comparison/types';
 import {
   generateVoiceComparisonPreview,
   getVoiceComparisonBootstrap,
   requireOwnedReadyProfile,
+  resolveSarvamCourseNarrationAvailability,
 } from '@/lib/server/voice-comparison';
 import {
   createVoiceComparisonCacheKey,
@@ -39,9 +35,7 @@ import {
 } from '@/lib/server/voice-comparison-cache';
 import {
   externalVoiceProviderConfigured,
-  externalVoiceProviderUnavailableReason,
   getBodhanTtsConfig,
-  getSarvamTtsConfig,
 } from '@/lib/server/voice-comparison-config';
 import { runControlledVoicePreview } from '@/lib/server/voice-comparison-control';
 import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
@@ -49,37 +43,6 @@ import { TeachingVoiceError, toPublicVoiceProfile } from '@/lib/voice-cloning/ty
 import { findCurrentVoiceProfile, listVoiceProfiles } from '@/lib/voice-cloning/storage';
 import { enhanceGeneratedVoiceAudio } from '@/lib/voice-cloning/resemble-enhance';
 import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
-
-const SARVAM_TTS_LANGUAGES = Object.keys(
-  SARVAM_TTS_LANGUAGE_CODES,
-) as VoiceComparisonLanguageCode[];
-
-function courseNarrationProviders(
-  providers: VoiceComparisonProviderAvailability[],
-): VoiceComparisonProviderAvailability[] {
-  return providers.map((provider) => {
-    if (provider.id !== 'sarvam') return provider;
-    const config = getSarvamTtsConfig();
-    const presetUnavailableReason = externalVoiceProviderUnavailableReason('Sarvam AI', config);
-    const presetAvailable = !presetUnavailableReason;
-    const cloneAvailable = provider.configured && provider.externalVoiceReady === true;
-    const available = presetAvailable || cloneAvailable;
-    return {
-      ...provider,
-      configured: available,
-      available,
-      supportedLanguages: cloneAvailable ? provider.supportedLanguages : SARVAM_TTS_LANGUAGES,
-      sarvamPresetLanguages: SARVAM_TTS_LANGUAGES,
-      sarvamPresetAvailable: presetAvailable,
-      sarvamCloneAvailable: cloneAvailable,
-      courseNarrationEnabled:
-        provider.supportsCourseNarration === true && isExperimentalCourseNarrationEnabled(),
-      ...(!available && presetUnavailableReason
-        ? { unavailableReason: presetUnavailableReason }
-        : { unavailableReason: undefined }),
-    };
-  });
-}
 
 export async function getCourseNarrationBootstrap(input: {
   ownerId: string;
@@ -99,25 +62,25 @@ export async function getCourseNarrationBootstrap(input: {
   if (profile) {
     const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, profile);
     const publicProfile = toPublicVoiceProfile(profile);
+    const sarvamAvailability = await resolveSarvamCourseNarrationAvailability(profile);
     return {
       ...bootstrap,
-      providers: courseNarrationProviders(bootstrap.providers),
+      providers: bootstrap.providers.map((provider) =>
+        provider.id === 'sarvam' ? { ...provider, ...sarvamAvailability } : provider,
+      ),
       savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
         right.generatedAt.localeCompare(left.generatedAt),
       ),
       ...(publicProfile ? { profile: publicProfile } : {}),
       profiles,
-      sarvamVoices: SARVAM_VOICES,
     };
   }
   if (ownedProfiles[0]) {
     const bootstrap = await getVoiceComparisonBootstrap(input.ownerId, ownedProfiles[0]);
     return {
       ...bootstrap,
-      providers: courseNarrationProviders(bootstrap.providers),
       profile: undefined,
       profiles,
-      sarvamVoices: SARVAM_VOICES,
       savedPreviews: [...coursePreviews, ...bootstrap.savedPreviews].sort((left, right) =>
         right.generatedAt.localeCompare(left.generatedAt),
       ),
@@ -125,113 +88,31 @@ export async function getCourseNarrationBootstrap(input: {
   }
   const bodhanConfigured = externalVoiceProviderConfigured(getBodhanTtsConfig());
   return {
-    providers: courseNarrationProviders(
-      VOICE_COMPARISON_PROVIDERS.map((provider) => {
-        const presetAvailable = provider.id === 'bodhan' && bodhanConfigured;
-        return {
-          ...provider,
-          configured: presetAvailable,
-          available: presetAvailable,
-          courseNarrationEnabled:
-            provider.supportsCourseNarration &&
-            (!provider.experimental || isExperimentalCourseNarrationEnabled()),
-          ...(presetAvailable
-            ? {}
-            : {
-                unavailableReason:
-                  provider.id === 'bodhan'
-                    ? 'Not configured'
-                    : 'Select an existing Teaching Voice profile.',
-              }),
-        };
-      }),
-    ),
+    providers: VOICE_COMPARISON_PROVIDERS.map((provider) => {
+      const presetAvailable = provider.id === 'bodhan' && bodhanConfigured;
+      return {
+        ...provider,
+        configured: presetAvailable,
+        available: presetAvailable,
+        courseNarrationEnabled:
+          provider.supportsCourseNarration &&
+          (!provider.experimental || isExperimentalCourseNarrationEnabled()),
+        ...(presetAvailable
+          ? {}
+          : {
+              unavailableReason:
+                provider.id === 'bodhan'
+                  ? 'Not configured'
+                  : 'Select an existing Teaching Voice profile.',
+            }),
+      };
+    }),
     languages: VOICE_COMPARISON_LANGUAGES,
     bodhanVoices: BODHAN_VOICES,
     bodhanStyles: [...BODHAN_STYLES],
-    sarvamVoices: SARVAM_VOICES,
     savedPreviews: coursePreviews,
     profiles,
   };
-}
-
-async function generateSarvamPresetCourseAudio(input: {
-  ownerId: string;
-  stageId: string;
-  text: string;
-  language: VoiceComparisonLanguageCode;
-  voice?: string;
-  signal?: AbortSignal;
-}): Promise<VoiceComparisonPreviewResult> {
-  if (!input.text.trim()) throw new TeachingVoiceError('Narration text is empty.');
-  if (!isSarvamPresetVoice(input.voice)) {
-    throw new TeachingVoiceError('Select a supported Sarvam Bulbul voice.');
-  }
-  if (!SARVAM_TTS_LANGUAGE_CODES[input.language]) {
-    throw new TeachingVoiceError('Sarvam Bulbul does not support the selected language.');
-  }
-  const config = getSarvamTtsConfig();
-  const unavailableReason = externalVoiceProviderUnavailableReason('Sarvam AI', config);
-  if (unavailableReason) throw new TeachingVoiceError(unavailableReason, 503);
-  const cacheKey = createVoiceComparisonCacheKey({
-    ownerId: input.ownerId,
-    stageId: input.stageId,
-    providerId: 'sarvam',
-    model: 'bulbul:v3',
-    language: input.language,
-    voice: input.voice,
-    text: input.text,
-    outputCodec: 'wav',
-    purpose: 'course-narration-sarvam-preset-v1',
-  });
-  const cached = await readVoiceComparisonCache(input.ownerId, cacheKey);
-  if (cached) return cached;
-  return runControlledVoicePreview({
-    providerId: 'sarvam',
-    requestKey: `course-narration:${input.ownerId}:${cacheKey}`,
-    concurrency: config.maxConcurrency,
-    task: async () => {
-      const secondCached = await readVoiceComparisonCache(input.ownerId, cacheKey);
-      if (secondCached) return secondCached;
-      const startedAt = Date.now();
-      const generated = await new SarvamVoiceCloningPreviewProvider(config).synthesizePreset({
-        speaker: input.voice!,
-        text: input.text,
-        language: input.language,
-        signal: input.signal,
-      });
-      const generatedAt = new Date().toISOString();
-      const result: VoiceComparisonPreviewResult = {
-        profileId: `course:${input.stageId}`,
-        providerId: 'sarvam',
-        providerName: 'Sarvam AI',
-        voiceType: 'preset',
-        language: input.language,
-        voice: input.voice,
-        audio: {
-          format: 'wav',
-          base64: Buffer.from(generated.audio).toString('base64'),
-          createdAt: generatedAt,
-        },
-        durationSeconds: generated.durationSeconds,
-        generationLatencyMs: Date.now() - startedAt,
-        generatedAt,
-        cached: false,
-        cacheKey,
-        processingMode: 'raw-provider-output',
-        outputCodec: 'wav',
-        ...(generated.requestId ? { providerRequestId: generated.requestId } : {}),
-        chunked: false,
-        request: {
-          text: input.text,
-          language: input.language,
-          voice: input.voice,
-        },
-      };
-      await writeVoiceComparisonCache(input.ownerId, result);
-      return result;
-    },
-  });
 }
 
 export async function resolveCourseNarrationProfile(input: {
@@ -368,9 +249,6 @@ export async function synthesizeCourseNarration(input: {
     throw new TeachingVoiceError('Experimental course narration is disabled.', 403);
   }
   if (input.providerId === 'bodhan') return generateBodhanCourseAudio(input);
-  if (input.providerId === 'sarvam' && isSarvamPresetVoice(input.voice)) {
-    return generateSarvamPresetCourseAudio(input);
-  }
   if (!input.profileId) throw new TeachingVoiceError('Select an existing Teaching Voice profile.');
   const request: VoiceComparisonPreviewRequest = {
     profileId: input.profileId,
@@ -380,13 +258,14 @@ export async function synthesizeCourseNarration(input: {
     ...(input.voice ? { voice: input.voice } : {}),
     ...(input.style ? { style: input.style } : {}),
   };
-  // In particular, no Sarvam consent/create flags are passed here: course narration
-  // may reuse an existing clone, but can never create or replace one implicitly.
+  // No Sarvam create flags are passed here. Course narration reuses a saved
+  // clone or uploads the exact original reference inline, and never creates a voice.
   const raw = await generateVoiceComparisonPreview({
     ownerId: input.ownerId,
     request,
     signal: input.signal,
     preserveTextChunks: true,
+    allowSarvamInlineReference: input.providerId === 'sarvam',
   });
   const enhancementMode =
     input.enhancementMode === 'resemble-enhance' ? 'resemble-enhance' : 'standard';

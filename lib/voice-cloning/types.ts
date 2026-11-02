@@ -511,6 +511,10 @@ export function compatibleVoiceProviders(profile: VoiceProfile): VoiceLibraryPro
       'audio/ogg',
       'audio/ogg;codecs=opus',
       'audio/aac',
+      'audio/mulaw',
+      'audio/alaw',
+      'audio/l16',
+      'audio/linear16',
     ].includes(sarvamReferenceMime);
   if (sarvamReferenceSupported || profile.sarvamRawVoice || profile.sarvamVoice) {
     compatible.push('sarvam');

@@ -42,8 +42,6 @@ import { NarrationVoiceDialog } from '@/components/edit/NarrationVoiceDialog';
 import {
   BODHAN_STYLES,
   BODHAN_VOICES,
-  SARVAM_VOICES,
-  SARVAM_TTS_LANGUAGE_CODES,
   VOICE_COMPARISON_LANGUAGES,
   VOICE_COMPARISON_PROVIDERS,
 } from '@/lib/voice-comparison/catalog';
@@ -58,9 +56,10 @@ const roots: Root[] = [];
 function providerBootstrap(
   language: VoiceComparisonLanguageCode,
   activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
-  sarvamReady = true,
+  sarvamMode: 'saved-voice-id' | 'inline-reference' | 'missing' = 'saved-voice-id',
   sarvamConfigured = true,
 ) {
+  const sarvamCompatible = sarvamMode !== 'missing';
   const currentProfile = {
     id: `current-${language}-profile`,
     displayName: 'Current Teaching Voice',
@@ -75,13 +74,13 @@ function providerBootstrap(
     profileVersion: 1,
     compatibleProviders:
       language === 'hi'
-        ? sarvamReady
+        ? sarvamCompatible
           ? (['indicf5', 'sarvam'] as const)
           : (['indicf5'] as const)
-        : sarvamReady
+        : sarvamCompatible
           ? (['chatterbox', 'qwen3-tts', 'ming3-tts', 'sarvam'] as const)
           : (['chatterbox', 'qwen3-tts', 'ming3-tts'] as const),
-    ...(sarvamReady
+    ...(sarvamMode === 'saved-voice-id'
       ? {
           sarvamVoice: {
             ready: true as const,
@@ -102,25 +101,22 @@ function providerBootstrap(
     providers: VOICE_COMPARISON_PROVIDERS.map((provider) => ({
       ...provider,
       configured: provider.id === 'sarvam' ? sarvamConfigured : true,
-      available: provider.id === 'sarvam' ? sarvamConfigured : true,
+      available: provider.id === 'sarvam' ? sarvamConfigured && sarvamCompatible : true,
       courseNarrationEnabled: true,
       ...(provider.id === 'sarvam'
         ? {
-            sarvamPresetLanguages: Object.keys(
-              SARVAM_TTS_LANGUAGE_CODES,
-            ) as VoiceComparisonLanguageCode[],
-            sarvamPresetAvailable: sarvamConfigured,
-            sarvamCloneAvailable: sarvamConfigured && sarvamReady,
+            sarvamNarrationMode: sarvamMode === 'missing' ? undefined : sarvamMode,
           }
         : {}),
       ...(provider.id === 'sarvam' && !sarvamConfigured
         ? { unavailableReason: 'Sarvam AI credentials are not configured on this server.' }
-        : {}),
+        : provider.id === 'sarvam' && !sarvamCompatible
+          ? { unavailableReason: 'The selected Teaching Voice has no usable Sarvam reference.' }
+          : {}),
     })),
     languages: VOICE_COMPARISON_LANGUAGES,
     bodhanVoices: BODHAN_VOICES,
     bodhanStyles: [...BODHAN_STYLES],
-    sarvamVoices: SARVAM_VOICES,
     savedPreviews: [],
     profile: currentProfile,
     profiles: [currentProfile, previousProfile],
@@ -144,7 +140,7 @@ async function mount(
   language: VoiceComparisonLanguageCode,
   narration?: CourseNarrationState,
   activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
-  sarvamReady = true,
+  sarvamMode: 'saved-voice-id' | 'inline-reference' | 'missing' = 'saved-voice-id',
   sarvamConfigured = true,
 ) {
   store.state.stage = {
@@ -161,7 +157,7 @@ async function mount(
       actions: [{ id: 'speech-1', type: 'speech', text: 'Exact existing narration.' }],
     },
   ];
-  const bootstrap = providerBootstrap(language, activeEngine, sarvamReady, sarvamConfigured);
+  const bootstrap = providerBootstrap(language, activeEngine, sarvamMode, sarvamConfigured);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       const body = JSON.parse(String(init.body)) as {
@@ -281,8 +277,8 @@ describe('Narration Voice provider controls', () => {
     expect(engineButton(host, 'Qwen3-TTS (Original)').disabled).toBe(true);
   });
 
-  it('selects a Sarvam Bulbul API voice without a cloned Teaching Voice profile', async () => {
-    const { host, fetchMock } = await mount('en', undefined, undefined, false, true);
+  it('selects Sarvam inline cloning with the current Teaching Voice and no preset control', async () => {
+    const { host, fetchMock } = await mount('en', undefined, undefined, 'inline-reference', true);
     const sarvam = engineButton(host, 'Sarvam AI');
     expect(sarvam.disabled).toBe(false);
 
@@ -293,13 +289,12 @@ describe('Narration Voice provider controls', () => {
         preferredSelection: {
           providerId: 'sarvam',
           language: 'en',
-          voice: 'shubh',
+          profileId: 'current-en-profile',
         },
       },
     });
-    const sarvamSelect = host.querySelector('select[aria-label="Sarvam voice"]');
-    expect(sarvamSelect).not.toBeNull();
-    expect((sarvamSelect as HTMLSelectElement).value).toBe('shubh');
+    expect(host.querySelector('select[aria-label="Sarvam voice"]')).toBeNull();
+    expect(host.textContent).toContain('exact original recording');
 
     act(() => engineButton(host, 'Preview This Scene').click());
     await flush();
@@ -311,14 +306,24 @@ describe('Narration Voice provider controls', () => {
     expect(request).toMatchObject({
       providerId: 'sarvam',
       language: 'en',
-      voice: 'shubh',
+      profileId: 'current-en-profile',
       text: 'Exact existing narration.',
     });
-    expect(request.profileId).toBeUndefined();
+    expect(request).not.toHaveProperty('voice');
+  });
+
+  it('shows why the selected Teaching Voice cannot be used by Sarvam', async () => {
+    const { host } = await mount('en', undefined, undefined, 'missing', true);
+    const sarvam = engineButton(host, 'Sarvam AI');
+
+    expect(sarvam.disabled).toBe(true);
+    expect(sarvam.textContent).toContain(
+      'The selected Teaching Voice has no usable Sarvam reference.',
+    );
   });
 
   it('shows the server reason when Sarvam credentials are unavailable', async () => {
-    const { host } = await mount('en', undefined, undefined, false, false);
+    const { host } = await mount('en', undefined, undefined, 'saved-voice-id', false);
     const sarvam = engineButton(host, 'Sarvam AI');
 
     expect(sarvam.disabled).toBe(true);

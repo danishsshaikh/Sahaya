@@ -271,9 +271,7 @@ describe('course narration production route compatibility', () => {
     );
   });
 
-  it('allows a Sarvam preset voice without requiring a saved Teaching Voice clone', async () => {
-    mocks.resolveProfile.mockResolvedValueOnce(null);
-
+  it('routes Sarvam narration with the owner-resolved Teaching Voice profile', async () => {
     const response = await POST(
       request('POST', {
         stageId: 'course-1',
@@ -281,7 +279,6 @@ describe('course narration production route compatibility', () => {
         actionId: 'speech-1',
         providerId: 'sarvam',
         language: 'en',
-        voice: 'shubh',
         text: '  Exact persisted text.  ',
       }),
     );
@@ -291,10 +288,9 @@ describe('course narration production route compatibility', () => {
       expect.objectContaining({
         ownerId: 'owner-1',
         stageId: 'course-1',
-        profileId: undefined,
+        profileId: 'vcp_qwen',
         providerId: 'sarvam',
         language: 'en',
-        voice: 'shubh',
         text: '  Exact persisted text.  ',
       }),
     );

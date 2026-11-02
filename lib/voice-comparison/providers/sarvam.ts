@@ -1,9 +1,4 @@
-import {
-  isSarvamPresetVoice,
-  SARVAM_LANGUAGE_CODES,
-  SARVAM_TTS_LANGUAGE_CODES,
-  SARVAM_TTS_MODEL,
-} from '@/lib/voice-comparison/catalog';
+import { SARVAM_LANGUAGE_CODES } from '@/lib/voice-comparison/catalog';
 import { MAX_COMPARISON_AUDIO_BYTES, readWavMetadata } from '@/lib/voice-comparison/audio';
 import type { VoiceComparisonLanguageCode } from '@/lib/voice-comparison/types';
 import {
@@ -33,10 +28,9 @@ interface SarvamSynthesisResponse {
   audio?: unknown;
   request_id?: unknown;
   audio_duration?: unknown;
-  audios?: unknown;
 }
 
-type SarvamOperation = 'voice_creation' | 'preview_generation' | 'preset_generation';
+type SarvamOperation = 'voice_creation' | 'preview_generation';
 
 export interface SarvamVoiceCreationResult {
   voiceId: string;
@@ -59,7 +53,14 @@ const SARVAM_REFERENCE_MIME_TYPES = new Map<string, { type: string; extension: s
   ['audio/ogg', { type: 'audio/ogg', extension: 'opus' }],
   ['audio/ogg;codecs=opus', { type: 'audio/ogg', extension: 'opus' }],
   ['audio/aac', { type: 'audio/aac', extension: 'aac' }],
+  ['audio/mulaw', { type: 'audio/mulaw', extension: 'mulaw' }],
+  ['audio/alaw', { type: 'audio/alaw', extension: 'alaw' }],
+  ['audio/l16', { type: 'audio/l16', extension: 'l16' }],
+  ['audio/linear16', { type: 'audio/linear16', extension: 'linear16' }],
 ]);
+
+export const SARVAM_INLINE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
+export const SARVAM_INLINE_REFERENCE_MAX_SECONDS = 15;
 
 export function sarvamReferenceUploadType(mimeType: string) {
   return SARVAM_REFERENCE_MIME_TYPES.get(mimeType.trim().toLowerCase()) ?? null;
@@ -166,7 +167,12 @@ export class SarvamVoiceCloningPreviewProvider {
   }
 
   async synthesize(input: {
-    voiceId: string;
+    voiceId?: string;
+    referenceAudio?: {
+      bytes: Uint8Array;
+      mimeType: string;
+      durationSeconds: number;
+    };
     text: string;
     language: VoiceComparisonLanguageCode;
     signal?: AbortSignal;
@@ -177,11 +183,51 @@ export class SarvamVoiceCloningPreviewProvider {
     if (input.text.length < 1 || input.text.length > 1000) {
       throw new TeachingVoiceError('Sarvam AI preview segments must contain 1 to 1000 characters.');
     }
+    if (Boolean(input.voiceId) === Boolean(input.referenceAudio)) {
+      throw new TeachingVoiceError(
+        'Sarvam AI requires exactly one saved clone or authorized reference recording.',
+      );
+    }
+    const uploadType = input.referenceAudio
+      ? sarvamReferenceUploadType(input.referenceAudio.mimeType)
+      : null;
+    if (input.referenceAudio) {
+      if (!uploadType) {
+        throw new TeachingVoiceError(
+          'The original Teaching Voice recording format is not supported by Sarvam AI.',
+        );
+      }
+      if (
+        input.referenceAudio.bytes.byteLength === 0 ||
+        input.referenceAudio.bytes.byteLength > SARVAM_INLINE_REFERENCE_MAX_BYTES
+      ) {
+        throw new TeachingVoiceError(
+          'Sarvam AI inline voice cloning requires a reference recording no larger than 10 MB.',
+        );
+      }
+      if (
+        !Number.isFinite(input.referenceAudio.durationSeconds) ||
+        input.referenceAudio.durationSeconds <= 0 ||
+        input.referenceAudio.durationSeconds > SARVAM_INLINE_REFERENCE_MAX_SECONDS
+      ) {
+        throw new TeachingVoiceError(
+          'Sarvam AI inline voice cloning requires a reference recording no longer than 15 seconds.',
+        );
+      }
+    }
     const response = await this.request(
       '/voices/clone',
       () => {
         const form = new FormData();
-        form.set('voice_id', input.voiceId);
+        if (input.voiceId) {
+          form.set('voice_id', input.voiceId);
+        } else if (input.referenceAudio && uploadType) {
+          form.set(
+            'ref_audio',
+            new Blob([Buffer.from(input.referenceAudio.bytes)], { type: uploadType.type }),
+            `reference.${uploadType.extension}`,
+          );
+        }
         form.set('text', input.text);
         form.set('language_code', languageCode);
         form.set('output_audio_codec', 'wav');
@@ -206,61 +252,6 @@ export class SarvamVoiceCloningPreviewProvider {
       audio,
       format: 'wav',
       durationSeconds: parsedDuration,
-      ...(typeof body?.request_id === 'string'
-        ? { requestId: body.request_id }
-        : requestIdFromResponse(response)
-          ? { requestId: requestIdFromResponse(response) }
-          : {}),
-    };
-  }
-
-  async synthesizePreset(input: {
-    speaker: string;
-    text: string;
-    language: VoiceComparisonLanguageCode;
-    signal?: AbortSignal;
-  }): Promise<SarvamSynthesisResult> {
-    if (!this.isConfigured()) throw new TeachingVoiceError('Sarvam AI is not configured.', 503);
-    const languageCode = SARVAM_TTS_LANGUAGE_CODES[input.language];
-    if (!languageCode) {
-      throw new TeachingVoiceError('Sarvam Bulbul does not support this language.');
-    }
-    if (!isSarvamPresetVoice(input.speaker)) {
-      throw new TeachingVoiceError('Select a supported Sarvam Bulbul voice.');
-    }
-    if (input.text.length < 1 || input.text.length > 2500) {
-      throw new TeachingVoiceError('Sarvam Bulbul narration must contain 1 to 2500 characters.');
-    }
-    const response = await this.request(
-      '/text-to-speech',
-      () => ({
-        method: 'POST',
-        headers: {
-          'api-subscription-key': this.config.apiKey,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: input.text,
-          language_code: languageCode,
-          speaker: input.speaker,
-          model: SARVAM_TTS_MODEL,
-          output_audio_codec: 'wav',
-          speech_sample_rate: 24000,
-          pace: 1,
-        }),
-      }),
-      'preset_generation',
-      input.signal,
-      true,
-    );
-    const body = (await responseJson(response)) as SarvamSynthesisResponse | null;
-    if (!response.ok) this.throwProviderError(response, body, 'preset_generation');
-    const encoded = Array.isArray(body?.audios) ? body.audios[0] : undefined;
-    const audio = decodeAudio(encoded);
-    return {
-      audio,
-      format: 'wav',
-      durationSeconds: readWavMetadata(audio).durationSeconds,
       ...(typeof body?.request_id === 'string'
         ? { requestId: body.request_id }
         : requestIdFromResponse(response)
