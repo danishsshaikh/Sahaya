@@ -1,6 +1,6 @@
-# Ming 3.0 TTS 0.5B preview service
+# Ming 3.0 TTS 0.5B Teaching Voice service
 
-This is an isolated, loopback-only service for experimental English Teaching Voice previews. It
+This is an isolated service for English Teaching Voice enrollment, previews, and narration. It
 uses the official `inclusionAI/Ming-3.0-tts-0.5b` inference implementation and does not alter the
 Qwen3-TTS or Chatterbox environments.
 
@@ -47,6 +47,12 @@ The official project currently documents successful testing on H800 80 GB and H2
 but does not publish a minimum or expected VRAM figure for the 0.5B model. Do not infer VRAM from the
 checkpoint download size. Measure it on an otherwise safely available GPU.
 
+For Docker, the same pinned source checkout and downloaded model can be passed through
+`MING3_TTS_SOURCE_DIR` and `MING3_TTS_MODEL_DIR`, then started with
+`docker compose --profile gpu-ming up --build --wait`. The profile exposes port 8773 only on the
+private Compose inference network and shares the app's owner-scoped voice storage at the identical
+absolute path. See the root README for NVIDIA prerequisites and safe verification commands.
+
 ## Start and validate
 
 Select an idle GPU without changing global CUDA configuration. Process-scoped
@@ -66,7 +72,8 @@ python service.py
 curl --fail http://127.0.0.1:8773/health
 ```
 
-Then configure Sahaya with `MING3_TTS_PREVIEW_ENABLED=true` and the loopback service URL. The app
+Then configure Sahaya with `MING3_TTS_PREVIEW_ENABLED=true` and the service URL. A process running
+directly on the host uses loopback; the Docker app uses `http://ming3-tts:8773`. The app
 registers only an owner-scoped opaque profile ID, sends one English synthesis request, and stores the
 returned WAV only in the existing owner-scoped comparison cache. The reference transcript and
 preview text are not written to service logs.

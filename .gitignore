@@ -71,6 +71,7 @@ next-env.d.ts
 # generated data
 /data
 /logs
+/.models
 
 # docs
 /docs

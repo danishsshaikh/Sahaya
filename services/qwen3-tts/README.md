@@ -1,17 +1,24 @@
 # Qwen3-TTS 1.7B Teaching Voice Service
 
-This localhost-only service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a selectable
+This private service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a selectable
 Teaching Voice engine and preview option. It does not enroll or replace a Teaching
 Voice profile. Sahaya supplies the existing private reference WAV and its exact saved
 transcript, and stores engine selection separately from the enrollment provider.
 
-The service uses the already validated POC checkout, Python environment, and cached
-model. It sets `local_files_only=True`; the startup command also forces Hugging Face
-and Transformers offline mode so deployment cannot download another model.
+The service requires an explicitly pinned Qwen checkout and a pre-downloaded model. It sets
+`local_files_only=True`; the startup command also forces Hugging Face and Transformers offline mode
+so deployment cannot download another model.
 
-## Start On GPU 1
+The root Compose file accepts those paths as `QWEN3_TTS_SOURCE_DIR` and
+`QWEN3_TTS_MODEL_DIR`. `docker compose --profile gpu-qwen up --build --wait` builds the isolated
+runtime, mounts the model read-only, and exposes port 8771 only on the private inference network.
+The Docker app uses `http://qwen3-tts:8771`; use loopback only when Sahaya and this service run
+directly on the same host.
 
-From the deployed Sahaya repository root, run one persistent process:
+## Start directly on a selected GPU
+
+From the deployed Sahaya repository root, run one persistent process. The paths below are examples;
+replace them with the reviewed checkout and environment prepared for that host:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \

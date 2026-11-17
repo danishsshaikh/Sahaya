@@ -23,6 +23,7 @@ server-providers*.yml
 
 # misc
 assets
+.models
 *.md
 *.pdf
 *.pem
