@@ -5,6 +5,7 @@ import {
   getChatterboxDefaultModelVariant,
   isQwen3TtsClassroomEnabled,
   isQwen3TtsPreviewEnabled,
+  isMing3TtsPreviewEnabled,
   isVoiceEnhancementAllowed,
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
@@ -60,6 +61,7 @@ import {
   currentQwen3TtsPreview,
   generateQwen3TtsModelPreview,
 } from '@/lib/server/qwen3-tts-preview';
+import { activateMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const log = createLogger('VoiceCloningProfileAPI');
 
@@ -330,6 +332,38 @@ export async function PATCH(req: NextRequest) {
         'GENERATION_FAILED',
         error instanceof TeachingVoiceError ? error.status : 500,
         error instanceof TeachingVoiceError ? error.message : 'Teaching Voice generation failed',
+      );
+    }
+  }
+
+  if (body.action === 'activate-ming') {
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Teaching Voice is not ready for generation');
+    }
+    if (!isMing3TtsPreviewEnabled()) {
+      return apiError(
+        'PROVIDER_DISABLED',
+        503,
+        'Ming 3.0 TTS is unavailable because the Ming service is not enabled',
+      );
+    }
+    try {
+      const next = await activateMing3TeachingVoice(profile, user.id, {
+        allowPreReadyProfile: profile.status === 'preview-ready',
+      });
+      return apiSuccess({
+        profile: publicVoiceProfile(next),
+        previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError
+          ? error.message
+          : 'Ming Teaching Voice generation failed',
       );
     }
   }

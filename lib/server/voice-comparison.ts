@@ -16,7 +16,6 @@ import {
   splitSpeechTextPreservingText,
 } from '@/lib/voice-comparison/audio';
 import { BodhanIndicSpeakPreviewProvider } from '@/lib/voice-comparison/providers/bodhan';
-import { Ming3TtsPreviewProvider } from '@/lib/voice-comparison/providers/ming3';
 import {
   SARVAM_INLINE_REFERENCE_MAX_BYTES,
   SARVAM_INLINE_REFERENCE_MAX_SECONDS,
@@ -71,6 +70,7 @@ import {
 import { createLogger } from '@/lib/logger';
 import { isExperimentalCourseNarrationEnabled } from '@/lib/config/feature-flags';
 import { validateVoiceClipDecodability } from '@/lib/voice-cloning/audio-validation';
+import { synthesizeMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const SARVAM_CONSENT_VERSION = 'sarvam-external-voice-raw-v2';
 const SARVAM_RAW_PROCESSING_MODE = 'raw-provider-output-v1';
@@ -365,13 +365,6 @@ function voiceComparisonCacheKey(input: {
               }
           : null,
   });
-}
-
-function mingServiceProfileId(profile: VoiceProfile): string {
-  return `ming_${createHash('sha256')
-    .update(`${profile.ownerId}\0${profile.id}\0${profile.profileVersion}`)
-    .digest('hex')
-    .slice(0, 32)}`;
 }
 
 function validLegacySarvamRegistration(profile: VoiceProfile): SarvamVoiceRegistration | null {
@@ -720,49 +713,9 @@ async function generateProviderAudio(input: {
     };
   }
   if (request.providerId === 'ming3-tts') {
-    if (!request.text.trim()) throw new TeachingVoiceError('Enter text to compare.');
-    if (request.text.length > 1000) {
-      throw new TeachingVoiceError(
-        'Ming 3.0 TTS preview is limited to 1000 characters for one direct model request.',
-      );
-    }
-    if (!profile.referenceText?.trim()) {
-      throw new TeachingVoiceError(
-        'Ming 3.0 TTS requires the saved English reference audio and transcript.',
-      );
-    }
-    let reference: Awaited<ReturnType<typeof resolveAuthorizedProfileReference>>;
-    try {
-      reference = await resolveAuthorizedProfileReference({
-        ownerId: profile.ownerId,
-        profileId: profile.id,
-        preferOriginalMimeTypes: [
-          'audio/wav',
-          'audio/x-wav',
-          'audio/flac',
-          'audio/ogg',
-          'audio/opus',
-        ],
-      });
-    } catch {
-      throw new TeachingVoiceError(
-        'Ming 3.0 TTS requires a readable voice reference in your authorized profile storage.',
-      );
-    }
-    const provider = new Ming3TtsPreviewProvider();
-    const serviceProfileId = mingServiceProfileId(profile);
-    await provider.registerProfile(
-      {
-        profileId: serviceProfileId,
-        referenceAudioPath: reference.path,
-        referenceText: profile.referenceText,
-      },
-      input.signal,
-    );
-    const result = await provider.synthesize({
-      profileId: serviceProfileId,
+    const result = await synthesizeMing3TeachingVoice({
+      profile,
       text: request.text,
-      language: 'en',
       signal: input.signal,
     });
     const conditioningMode =
@@ -779,7 +732,7 @@ async function generateProviderAudio(input: {
         : {}),
       ...(conditioningMode ? { conditioningMode } : {}),
       ...(result.generationConfig ? { generationConfig: result.generationConfig } : {}),
-      referenceProvenance: reference.provenance,
+      referenceProvenance: result.referenceProvenance,
       chunked: false,
     };
   }

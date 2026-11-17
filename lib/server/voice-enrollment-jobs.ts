@@ -47,6 +47,7 @@ import {
   isVoiceEnhancementAllowed,
 } from '@/lib/voice-cloning/config';
 import { activateEnhancedQwenTeachingVoice } from '@/lib/server/qwen3-tts-preview';
+import { activateMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -73,7 +74,7 @@ export interface VoiceEnrollmentJob {
   completedAt?: number;
   languageId?: string;
   provider?: 'chatterbox' | 'indicf5';
-  workflow?: 'provider-default' | 'enhanced-qwen';
+  workflow?: 'provider-default' | 'enhanced-qwen' | 'ming-default';
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
@@ -99,7 +100,7 @@ interface VoiceEnrollmentInput {
   referenceText?: string;
   recording: IncomingVoiceClip;
   enrollmentSource: 'microphone' | 'audio-import';
-  workflow: 'provider-default' | 'enhanced-qwen';
+  workflow: 'provider-default' | 'enhanced-qwen' | 'ming-default';
 }
 
 const TERMINAL_JOB_TTL_MS = 30 * 60 * 1000;
@@ -328,7 +329,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
   ownerUserId: string;
   languageId: string;
   provider: 'chatterbox' | 'indicf5';
-  workflow: 'provider-default' | 'enhanced-qwen';
+  workflow: 'provider-default' | 'enhanced-qwen' | 'ming-default';
 }): { job: VoiceEnrollmentJob; reused: boolean } {
   const now = nowMs();
   cleanupVoiceEnrollmentJobs(now);
@@ -529,6 +530,27 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       originalRecordingRetained: true,
       originalRecordingMimeType: input.recording.mimeType,
     });
+
+    if (input.workflow === 'ming-default') {
+      currentPhase = 'provider_registration';
+      updateJob(input.attemptId, { phase: currentPhase });
+      const readyProfile = await activateMing3TeachingVoice(profile, input.ownerUserId, {
+        allowPreReadyProfile: true,
+      });
+      currentPhase = 'finalizing';
+      updateJob(input.attemptId, { phase: currentPhase });
+      log.info('Ming Teaching Voice enrolled', {
+        attemptId: input.attemptId,
+        profileId,
+        operation: 'enroll',
+        status: readyProfile.status,
+        language: input.languageId,
+        provider: 'ming3-tts',
+        durationMs: nowMs() - startedAt,
+        qualityDecision: normalizedReference.qualityDecision.severity,
+      });
+      return readyProfile;
+    }
 
     if (input.workflow === 'enhanced-qwen') {
       currentPhase = 'preview_generation';
@@ -731,9 +753,12 @@ export async function parseVoiceEnrollmentForm(
     throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
   }
   const providerId = newTeachingVoiceProvider(languageId);
+  const requestedWorkflow = formData.get('workflow');
   const workflow =
-    formData.get('workflow') === 'enhanced-qwen' ? 'enhanced-qwen' : 'provider-default';
-  if (workflow === 'enhanced-qwen' && languageId !== 'en') {
+    requestedWorkflow === 'enhanced-qwen' || requestedWorkflow === 'ming-default'
+      ? requestedWorkflow
+      : 'provider-default';
+  if ((workflow === 'enhanced-qwen' || workflow === 'ming-default') && languageId !== 'en') {
     throw new TeachingVoiceError('The simplified Teaching Voice workflow requires English audio.');
   }
   const enrollmentSource =
@@ -750,7 +775,7 @@ export async function parseVoiceEnrollmentForm(
       );
     }
     referenceText ||= undefined;
-    if (workflow === 'enhanced-qwen' && !referenceText) {
+    if ((workflow === 'enhanced-qwen' || workflow === 'ming-default') && !referenceText) {
       throw new TeachingVoiceError(
         'Generate or enter an accurate transcript for the uploaded audio before creating the voice.',
       );

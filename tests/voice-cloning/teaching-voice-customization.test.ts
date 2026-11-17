@@ -13,7 +13,6 @@ const roots: Root[] = [];
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const original = { format: 'wav', base64: 'b3JpZ2luYWw=', createdAt: '2026-10-29T00:00:00Z' };
-const enhanced = { format: 'wav', base64: 'ZW5oYW5jZA==', createdAt: '2026-10-29T00:00:01Z' };
 
 function profile(ready = false): PublicVoiceProfile {
   return {
@@ -23,21 +22,10 @@ function profile(ready = false): PublicVoiceProfile {
     language: 'en',
     languageId: 'en',
     status: 'ready',
-    activeEngine: ready ? 'qwen3-tts' : 'chatterbox',
+    activeEngine: ready ? 'ming3-tts' : 'chatterbox',
     enhancementMode: 'standard',
-    qwenEnhancementMode: ready ? 'resemble-enhance' : 'standard',
-    ...(ready
-      ? {
-          qwenPreview: {
-            previewModel: 'qwen3-tts-1.7b-base',
-            qwenCloneMode: 'speaker-embedding',
-            enhancementMode: 'resemble-enhance',
-            preview: original,
-            comparison: { original, enhanced },
-            previewText: 'Welcome to the course.',
-          },
-        }
-      : {}),
+    qwenEnhancementMode: 'standard',
+    ...(ready ? { preview: original } : {}),
     createdAt: '2026-10-26T00:00:00Z',
     updatedAt: '2026-10-29T00:00:00Z',
     consentTimestamp: '2026-10-26T00:00:00Z',
@@ -107,7 +95,7 @@ afterEach(() => {
 });
 
 describe('simplified Teaching Voice journey', () => {
-  it('records once and submits the approved paragraph through the enhanced workflow', async () => {
+  it('records once and submits the approved paragraph through the Ming workflow', async () => {
     class FakeMediaRecorder {
       static isTypeSupported = vi.fn(() => true);
       state: RecordingState = 'inactive';
@@ -156,12 +144,12 @@ describe('simplified Teaching Voice journey', () => {
       ([input]) => String(input) === '/api/voice-cloning/enrollment',
     );
     const body = enrollment?.[1]?.body as FormData;
-    expect(body.get('workflow')).toBe('enhanced-qwen');
+    expect(body.get('workflow')).toBe('ming-default');
     expect(body.get('enrollmentSource')).toBe('microphone');
     expect(body.get('phraseId')).toBe('teaching-paragraph');
     expect(String(body.get('referenceText'))).toContain('Today we will take a simple idea');
     expect(stopTrack).toHaveBeenCalledOnce();
-    expect(host.textContent).toContain('Voice ready');
+    expect(host.textContent).toContain('Ming 3.0 TTS 0.5B ready');
   });
 
   it('upgrades an existing authorized profile with one Generate Voice action', async () => {
@@ -181,16 +169,16 @@ describe('simplified Teaching Voice journey', () => {
     const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
     expect(JSON.parse(String(patch?.[1]?.body))).toEqual({
       profileId: PROFILE_ID,
-      action: 'activate-enhanced-qwen',
+      action: 'activate-ming',
     });
-    expect(host.textContent).toContain('Voice ready');
+    expect(host.textContent).toContain('Ming 3.0 TTS 0.5B ready');
     expect(host.querySelector('[aria-label="Teaching Voice sample"]')).not.toBeNull();
     expect(
       JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
     ).toMatchObject({
       enabled: true,
       profileId: PROFILE_ID,
-      enhancementMode: 'resemble-enhance',
+      enhancementMode: 'standard',
     });
   });
 
@@ -211,7 +199,7 @@ describe('simplified Teaching Voice journey', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('uploads, explicitly transcribes, permits correction, and submits one enhanced workflow', async () => {
+  it('uploads, explicitly transcribes, permits correction, and submits one Ming workflow', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       if (String(input) === '/api/transcription') {
         return response({ success: true, text: 'Automatic transcript' });
@@ -252,7 +240,7 @@ describe('simplified Teaching Voice journey', () => {
     );
     const body = enrollment?.[1]?.body;
     expect(body).toBeInstanceOf(FormData);
-    expect((body as FormData).get('workflow')).toBe('enhanced-qwen');
+    expect((body as FormData).get('workflow')).toBe('ming-default');
     expect((body as FormData).get('referenceText')).toBe('Corrected exact transcript');
     const uploaded = (body as FormData).get('recording');
     expect(uploaded).toBeInstanceOf(File);
@@ -260,6 +248,6 @@ describe('simplified Teaching Voice journey', () => {
     expect(new Uint8Array(await (uploaded as File).arrayBuffer())).toEqual(
       new Uint8Array(await file.arrayBuffer()),
     );
-    expect(host.textContent).toContain('Voice ready');
+    expect(host.textContent).toContain('Ming 3.0 TTS 0.5B ready');
   });
 });

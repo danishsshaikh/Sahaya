@@ -4,7 +4,7 @@ export type VoiceSettingsPreset = 'natural' | 'accent-test' | 'expressive' | 'cu
 export type VoiceEnhancementMode = 'standard' | 'resemble-enhance';
 export type VoicePreviewModel = 'chatterbox-v3' | 'qwen3-tts-1.7b-base';
 export type Qwen3TtsCloneMode = 'speaker-embedding' | 'icl';
-export type TeachingVoiceEngine = 'chatterbox' | 'qwen3-tts' | 'indicf5';
+export type TeachingVoiceEngine = 'chatterbox' | 'qwen3-tts' | 'ming3-tts' | 'indicf5';
 export type VoiceEnrollmentSource = 'microphone' | 'audio-import';
 export type VoiceLibraryProviderId =
   | 'chatterbox'
@@ -267,7 +267,10 @@ export function resolveVoiceProfileActiveEngine(profile: {
 }): TeachingVoiceEngine {
   const provider = resolveVoiceProfileProvider(profile);
   if (provider === 'indicf5') return 'indicf5';
-  return profile.activeEngine === 'qwen3-tts' ? 'qwen3-tts' : 'chatterbox';
+  if (profile.activeEngine === 'qwen3-tts' || profile.activeEngine === 'ming3-tts') {
+    return profile.activeEngine;
+  }
+  return 'chatterbox';
 }
 
 export function resolveVoiceProfileQwenEnhancementMode(profile: {

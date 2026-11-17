@@ -65,10 +65,56 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   clearResourceJobQueueForTests();
 });
 
 describe('Teaching Voice jobs', () => {
+  it('serializes Ming jobs on the Ming resource without changing other provider queues', async () => {
+    const first = deferred<{ audio: Uint8Array; format: string }>();
+    mocks.synthesize
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ audio: new Uint8Array([2]), format: 'wav' });
+    const mingInput = {
+      ...input('tts_ming_1', 'First Ming narration'),
+      providerId: 'ming3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+
+    const firstJob = enqueueTeachingVoiceJob(mingInput).job;
+    const secondJob = enqueueTeachingVoiceJob({
+      ...mingInput,
+      audioId: 'tts_ming_2',
+      text: 'Second Ming narration',
+    }).job;
+
+    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(1));
+    expect(firstJob.resourceKey).toBe('teaching-voice:ming3-tts');
+    expect(readTeachingVoiceJob(secondJob.id, 'faculty-1')).toMatchObject({
+      status: 'queued',
+      jobsAhead: 1,
+    });
+    first.resolve({ audio: new Uint8Array([1]), format: 'wav' });
+    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(2));
+    expect(mocks.synthesize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerId: 'ming3-tts', text: 'Second Ming narration' }),
+    );
+  });
+
+  it('separates Ming artifacts when the configured conditioning mode changes', () => {
+    const ming = {
+      ...input('tts_ming_mode', 'Same exact Ming narration'),
+      providerId: 'ming3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'acoustic-reference');
+    const acoustic = createTeachingVoiceIdempotencyKey(ming);
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'speaker-embedding-only');
+    expect(createTeachingVoiceIdempotencyKey(ming)).not.toBe(acoustic);
+  });
+
   it('keeps Original and Enhanced Qwen artifacts under different idempotency identities', () => {
     const qwen = {
       ...input('tts_qwen_mode', 'Same exact Qwen narration'),

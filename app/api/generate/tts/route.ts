@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
       stageId?: string;
       outlineId?: string;
       sceneId?: string;
-      teachingVoiceProviderId?: 'qwen3-tts';
+      teachingVoiceProviderId?: 'qwen3-tts' | 'ming3-tts';
       teachingVoiceEnhancementMode?: VoiceEnhancementMode;
     };
     ttsProviderId = body.ttsProviderId;
@@ -86,7 +86,8 @@ export async function POST(req: NextRequest) {
           : undefined;
     if (
       body.teachingVoiceProviderId !== undefined &&
-      body.teachingVoiceProviderId !== 'qwen3-tts'
+      body.teachingVoiceProviderId !== 'qwen3-tts' &&
+      body.teachingVoiceProviderId !== 'ming3-tts'
     ) {
       return apiError('INVALID_REQUEST', 400, 'Unsupported course Teaching Voice provider.');
     }
@@ -97,7 +98,9 @@ export async function POST(req: NextRequest) {
       return apiError('INVALID_REQUEST', 400, 'Unsupported Qwen narration audio mode.');
     }
     const teachingVoiceProviderId =
-      body.teachingVoiceProviderId === 'qwen3-tts' ? 'qwen3-tts' : undefined;
+      body.teachingVoiceProviderId === 'qwen3-tts' || body.teachingVoiceProviderId === 'ming3-tts'
+        ? body.teachingVoiceProviderId
+        : undefined;
     const teachingVoiceEnhancementMode = isVoiceEnhancementMode(body.teachingVoiceEnhancementMode)
       ? body.teachingVoiceEnhancementMode
       : undefined;
@@ -128,7 +131,12 @@ export async function POST(req: NextRequest) {
           requestedLanguage ?? undefined,
           teachingVoiceProviderId,
         );
-        if (providerId === 'chatterbox' || providerId === 'indicf5' || providerId === 'qwen3-tts') {
+        if (
+          providerId === 'chatterbox' ||
+          providerId === 'indicf5' ||
+          providerId === 'qwen3-tts' ||
+          providerId === 'ming3-tts'
+        ) {
           const { job } = await enqueueTeachingVoiceJobDurably({
             providerId,
             ownerId: user.id,

@@ -168,6 +168,31 @@ describe('Teaching Voice async TTS routes', () => {
     );
   });
 
+  it('routes a course-scoped Ming request through the durable Ming queue', async () => {
+    mocks.resolveSelection.mockResolvedValue({ providerId: 'ming3-tts', synthesisLanguage: 'en' });
+    mocks.enqueue.mockReturnValue({
+      job: { ...snapshot(), resourceKey: 'teaching-voice:ming3-tts' },
+      reused: false,
+    });
+
+    const response = await POST(
+      postRequest('en', {
+        teachingVoiceProviderId: 'ming3-tts',
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(mocks.resolveSelection).toHaveBeenCalledWith(
+      'vcp_faculty',
+      'faculty-a',
+      'en',
+      'ming3-tts',
+    );
+    expect(mocks.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'ming3-tts', language: 'en' }),
+    );
+  });
+
   it('rejects prose in the Teaching Voice language transport', async () => {
     const response = await POST(postRequest('Deliver the entire course in Hindi'));
     expect(response.status).toBe(400);

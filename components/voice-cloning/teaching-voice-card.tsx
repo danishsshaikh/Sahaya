@@ -82,17 +82,28 @@ function phaseForEnrollment(phase?: VoiceEnrollmentResponse['phase']): BusyPhase
   return 'generating';
 }
 
-function enhancedSample(profile: PublicVoiceProfile | null) {
-  return profile?.qwenPreview?.comparison.enhanced;
+function teachingVoiceSample(profile: PublicVoiceProfile | null) {
+  if (profile?.activeEngine === 'qwen3-tts') {
+    return profile.qwenEnhancementMode === 'resemble-enhance'
+      ? profile.qwenPreview?.comparison.enhanced
+      : profile.qwenPreview?.comparison.original;
+  }
+  return profile?.preview;
 }
 
 function isReady(profile: PublicVoiceProfile | null): profile is PublicVoiceProfile {
-  return Boolean(
-    profile?.status === 'ready' &&
-    profile.activeEngine === 'qwen3-tts' &&
-    profile.qwenEnhancementMode === 'resemble-enhance' &&
-    enhancedSample(profile),
-  );
+  return Boolean(profile?.status === 'ready' && teachingVoiceSample(profile));
+}
+
+function teachingVoiceEngineLabel(profile: PublicVoiceProfile): string {
+  if (profile.activeEngine === 'ming3-tts') return 'Ming 3.0 TTS 0.5B';
+  if (profile.activeEngine === 'qwen3-tts') {
+    return profile.qwenEnhancementMode === 'resemble-enhance'
+      ? 'Qwen3-TTS (Enhanced)'
+      : 'Qwen3-TTS (Original)';
+  }
+  if (profile.activeEngine === 'indicf5') return 'IndicF5';
+  return 'Chatterbox V3';
 }
 
 export function TeachingVoiceCard({
@@ -123,7 +134,7 @@ export function TeachingVoiceCard({
   const selectedProfileIdRef = useRef(selectedProfileId);
   const onSelectedProfileIdChangeRef = useRef(onSelectedProfileIdChange);
 
-  const sample = enhancedSample(profile);
+  const sample = teachingVoiceSample(profile);
   const ready = isReady(profile);
   const persistedSelection = profile ? readTeachingVoiceSelection('en') : undefined;
   const intentionallyDisabled = profile
@@ -159,7 +170,11 @@ export function TeachingVoiceCard({
   );
 
   const activateReadyProfile = (next: PublicVoiceProfile) => {
-    activateTeachingVoiceSelection('en', next.id, 'resemble-enhance');
+    activateTeachingVoiceSelection(
+      'en',
+      next.id,
+      next.activeEngine === 'qwen3-tts' ? (next.qwenEnhancementMode ?? 'standard') : 'standard',
+    );
     selectedProfileIdRef.current = next.id;
     onSelectedProfileIdChangeRef.current(next.id);
   };
@@ -462,7 +477,7 @@ export function TeachingVoiceCard({
         await fetch('/api/voice-cloning/profile', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profileId: profile.id, action: 'activate-enhanced-qwen' }),
+          body: JSON.stringify({ profileId: profile.id, action: 'activate-ming' }),
         }),
       );
       if (!data.profile) throw new Error('Voice generation returned no saved voice.');
@@ -497,7 +512,7 @@ export function TeachingVoiceCard({
     try {
       const formData = new FormData();
       formData.set('attemptId', attemptId);
-      formData.set('workflow', 'enhanced-qwen');
+      formData.set('workflow', 'ming-default');
       formData.set('consent', 'true');
       formData.set('displayName', 'My Teaching Voice');
       formData.set('language', 'en');
@@ -563,7 +578,9 @@ export function TeachingVoiceCard({
           {!profileLoading && ready && !editing ? (
             <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
               <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
-              {intentionallyDisabled && !selected ? 'Voice ready, narration is off' : 'Voice ready'}
+              {intentionallyDisabled && !selected
+                ? `${teachingVoiceEngineLabel(profile)} ready, narration is off`
+                : `${teachingVoiceEngineLabel(profile)} ready`}
             </p>
           ) : null}
         </div>

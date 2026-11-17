@@ -701,8 +701,10 @@ export async function generateAndStoreTTS(
   const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
   const preferredNarrationSelection = stage?.narration?.preferredSelection;
   const teachingVoiceProviderId =
-    teacherVoiceProfileId && preferredNarrationSelection?.providerId === 'qwen3-tts'
-      ? 'qwen3-tts'
+    teacherVoiceProfileId &&
+    (preferredNarrationSelection?.providerId === 'qwen3-tts' ||
+      preferredNarrationSelection?.providerId === 'ming3-tts')
+      ? preferredNarrationSelection.providerId
       : undefined;
   const teachingVoiceEnhancementMode =
     teachingVoiceProviderId === 'qwen3-tts'

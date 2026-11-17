@@ -1,5 +1,6 @@
 import {
   isQwen3TtsClassroomEnabled,
+  isMing3TtsPreviewEnabled,
   isVoiceCloningServerEnabled,
   isVoiceEnhancementAllowed,
 } from '@/lib/voice-cloning/config';
@@ -33,6 +34,7 @@ import {
   TeachingVoiceProviderOperationError,
   type VoiceEnhancementMode,
 } from '@/lib/voice-cloning/types';
+import { synthesizeMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const log = createLogger('VoiceCloningSynthesis');
 
@@ -105,20 +107,21 @@ function resolveSynthesisLanguage(
   providerId: string,
   requestedLanguage?: string,
 ): string {
-  if (providerId !== 'qwen3-tts') {
+  if (providerId !== 'qwen3-tts' && providerId !== 'ming3-tts') {
     return validateTeachingVoiceLanguage(
       profile,
       providerId === 'chatterbox' ? resolveVoiceProfileLanguageId(profile) : requestedLanguage,
     );
   }
+  const providerName = providerId === 'ming3-tts' ? 'Ming 3.0 TTS' : 'Qwen3-TTS';
   if (resolveVoiceProfileReferenceLanguage(profile) !== 'en') {
-    throw new TeachingVoiceError('Qwen3-TTS requires an English reference recording.');
+    throw new TeachingVoiceError(`${providerName} requires an English reference recording.`);
   }
   if (requestedLanguage && resolveTeachingVoiceLanguage(requestedLanguage) !== 'en') {
-    throw new TeachingVoiceError('Qwen3-TTS currently supports English narration only.');
+    throw new TeachingVoiceError(`${providerName} currently supports English narration only.`);
   }
   if (!profile.referenceText?.trim()) {
-    throw new TeachingVoiceError('Qwen3-TTS requires the saved reference transcript.');
+    throw new TeachingVoiceError(`${providerName} requires the saved reference transcript.`);
   }
   return 'en';
 }
@@ -206,7 +209,7 @@ export async function resolveFacultyVoiceSelection(
   profileId: string,
   ownerId: string,
   requestedLanguage?: string,
-  requestedProviderId?: 'qwen3-tts',
+  requestedProviderId?: 'qwen3-tts' | 'ming3-tts',
 ): Promise<{ providerId: string; synthesisLanguage?: string }> {
   if (!isVoiceCloningServerEnabled()) {
     throw new TeachingVoiceError('Voice cloning is disabled.', 403);
@@ -218,6 +221,12 @@ export async function resolveFacultyVoiceSelection(
   const providerId = requestedProviderId ?? resolveVoiceProfileActiveEngine(profile);
   if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
     throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
+  }
+  if (providerId === 'ming3-tts' && !isMing3TtsPreviewEnabled()) {
+    throw new TeachingVoiceError(
+      'Ming 3.0 TTS is unavailable because the Ming service is not enabled.',
+      503,
+    );
   }
   const synthesisLanguage = resolveSynthesisLanguage(profile, providerId, requestedLanguage);
   return {
@@ -239,7 +248,7 @@ export async function synthesizeFacultyVoice(input: {
   text: string;
   language?: string;
   queueJobId?: string;
-  providerId?: 'qwen3-tts';
+  providerId?: 'qwen3-tts' | 'ming3-tts';
   qwenEnhancementMode?: VoiceEnhancementMode;
 }): Promise<{ audio: Uint8Array; format: string }> {
   if (!isVoiceCloningServerEnabled()) {
@@ -259,10 +268,29 @@ export async function synthesizeFacultyVoice(input: {
   if (providerId === 'qwen3-tts' && !isQwen3TtsClassroomEnabled()) {
     throw new TeachingVoiceError('Qwen3-TTS classroom narration is disabled.', 503);
   }
-  if (providerId !== 'qwen3-tts' && !profile.providerReferenceId) {
+  if (providerId === 'ming3-tts' && !isMing3TtsPreviewEnabled()) {
+    throw new TeachingVoiceError(
+      'Ming 3.0 TTS is unavailable because the Ming service is not enabled.',
+      503,
+    );
+  }
+  if (providerId !== 'qwen3-tts' && providerId !== 'ming3-tts' && !profile.providerReferenceId) {
     throw new TeachingVoiceError('Voice profile is not ready.');
   }
   const language = resolveSynthesisLanguage(profile, providerId, input.language);
+  if (providerId === 'ming3-tts') {
+    const metadata = {
+      profileId: profile.id,
+      provider: providerId,
+      textLength: input.text.length,
+      language,
+      ...(input.queueJobId ? { queueJobId: input.queueJobId } : {}),
+    };
+    const result = await synthesizeWithBusyRetry(metadata, () =>
+      synthesizeMing3TeachingVoice({ profile, text: input.text }),
+    );
+    return { audio: result.audio, format: result.format };
+  }
   const qwenEnhancementRequested =
     providerId === 'qwen3-tts' &&
     (input.qwenEnhancementMode ?? resolveVoiceProfileQwenEnhancementMode(profile)) ===

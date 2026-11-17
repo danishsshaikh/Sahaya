@@ -11,14 +11,16 @@ import {
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
 import { createLogger } from '@/lib/logger';
 import type { VoiceEnhancementMode } from '@/lib/voice-cloning/types';
+import { getMing3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
 
 const log = createLogger('TeachingVoiceJobs');
 
 export const CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:chatterbox';
 export const INDICF5_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:indicf5';
 export const QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:qwen3-tts';
+export const MING3_TTS_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:ming3-tts';
 
-export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5' | 'qwen3-tts';
+export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5' | 'qwen3-tts' | 'ming3-tts';
 
 export interface TeachingVoiceJobResult {
   audio: Uint8Array;
@@ -74,6 +76,10 @@ export function createTeachingVoiceIdempotencyKey(
   input: TeachingVoiceJobInput & { providerId?: QueuedTeachingVoiceProvider },
 ): string {
   const textHash = createHash('sha256').update(input.text).digest('hex');
+  const mingConditioningMode =
+    input.providerId === 'ming3-tts'
+      ? getMing3TtsPreviewServiceConfig().conditioningMode
+      : undefined;
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -88,6 +94,7 @@ export function createTeachingVoiceIdempotencyKey(
         ...(input.providerId === 'qwen3-tts'
           ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
           : {}),
+        ...(mingConditioningMode ? { mingConditioningMode } : {}),
         textHash,
       }),
     )
@@ -97,7 +104,12 @@ export function createTeachingVoiceIdempotencyKey(
 function resourceKeyForProvider(providerId: QueuedTeachingVoiceProvider): string {
   if (providerId === 'indicf5') return INDICF5_TEACHING_VOICE_RESOURCE_KEY;
   if (providerId === 'qwen3-tts') return QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY;
+  if (providerId === 'ming3-tts') return MING3_TTS_TEACHING_VOICE_RESOURCE_KEY;
   return CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY;
+}
+
+function concurrencyForProvider(providerId: QueuedTeachingVoiceProvider): number {
+  return providerId === 'ming3-tts' ? getMing3TtsPreviewServiceConfig().maxConcurrency : 1;
 }
 
 export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
@@ -114,10 +126,13 @@ export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
     ...(input.providerId === 'qwen3-tts'
       ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
       : {}),
+    ...(input.providerId === 'ming3-tts'
+      ? { mingConditioningMode: getMing3TtsPreviewServiceConfig().conditioningMode }
+      : {}),
   };
   return getResourceJobQueue().enqueue<TeachingVoiceJobResult>({
     resourceKey: resourceKeyForProvider(input.providerId),
-    concurrency: 1,
+    concurrency: concurrencyForProvider(input.providerId),
     ownerId: input.ownerId,
     idempotencyKey,
     metadata,
@@ -130,10 +145,12 @@ export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
           text: input.text,
           language: input.language,
           queueJobId: jobId,
-          ...(input.providerId === 'qwen3-tts'
+          ...(input.providerId === 'qwen3-tts' || input.providerId === 'ming3-tts'
             ? {
-                providerId: 'qwen3-tts' as const,
-                qwenEnhancementMode: input.qwenEnhancementMode,
+                providerId: input.providerId,
+                ...(input.providerId === 'qwen3-tts'
+                  ? { qwenEnhancementMode: input.qwenEnhancementMode }
+                  : {}),
               }
             : {}),
         });

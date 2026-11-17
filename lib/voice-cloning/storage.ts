@@ -159,6 +159,8 @@ export async function resolveAuthorizedProfileReference(input: {
   ownerId: string;
   profileId: string;
   preferOriginalMimeTypes?: readonly string[];
+  /** Enrollment/activation may prepare a provider preview before the profile becomes ready. */
+  allowPreReady?: boolean;
 }): Promise<{
   path: string;
   provenance: 'original-upload' | 'processed-reference';
@@ -167,7 +169,11 @@ export async function resolveAuthorizedProfileReference(input: {
     safeProfileId(input.profileId),
     safeOwnerId(input.ownerId),
   );
-  if (!profile || profile.ownerId !== input.ownerId || profile.status !== 'ready') {
+  const allowedStatus =
+    profile?.status === 'ready' ||
+    (input.allowPreReady === true &&
+      (profile?.status === 'processing' || profile?.status === 'preview-ready'));
+  if (!profile || profile.ownerId !== input.ownerId || !allowedStatus) {
     throw new Error('Voice profile is not ready or does not belong to this owner');
   }
   const profileDir = getVoiceProfileDir(profile.id, profile.ownerId);

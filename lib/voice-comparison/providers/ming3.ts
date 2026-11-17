@@ -154,7 +154,7 @@ export class Ming3TtsPreviewProvider {
           conditioningMode: this.config.conditioningMode,
         }),
       },
-      'preview_generation',
+      'synthesis',
       input.signal,
     );
     const audio = new Uint8Array(await response.arrayBuffer());
@@ -169,7 +169,7 @@ export class Ming3TtsPreviewProvider {
           'Ming 3.0 TTS did not confirm speaker-only conditioning.',
           502,
           '/synthesize',
-          'preview_generation',
+          'synthesis',
           response,
         );
       }
@@ -193,7 +193,7 @@ export class Ming3TtsPreviewProvider {
         'Ming 3.0 TTS returned invalid WAV audio.',
         502,
         '/synthesize',
-        'preview_generation',
+        'synthesis',
         response,
       );
     }

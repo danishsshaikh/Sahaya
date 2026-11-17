@@ -19,11 +19,17 @@ const mocks = vi.hoisted(() => ({
   processQwenAudio: vi.fn(),
   masterAudio: vi.fn(),
   enhancementAllowed: vi.fn(),
+  mingEnabled: vi.fn(),
+  synthesizeMing: vi.fn(),
 }));
 vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceCloningServerEnabled: () => true,
   isQwen3TtsClassroomEnabled: () => true,
+  isMing3TtsPreviewEnabled: mocks.mingEnabled,
   isVoiceEnhancementAllowed: mocks.enhancementAllowed,
+}));
+vi.mock('@/lib/server/ming3-tts', () => ({
+  synthesizeMing3TeachingVoice: mocks.synthesizeMing,
 }));
 vi.mock('@/lib/voice-cloning/storage', () => ({
   readVoiceProfile: mocks.read,
@@ -49,6 +55,13 @@ beforeEach(() => {
   mocks.masterAudio.mockReset();
   mocks.enhancementAllowed.mockReset();
   mocks.enhancementAllowed.mockReturnValue(true);
+  mocks.mingEnabled.mockReturnValue(true);
+  mocks.synthesizeMing.mockResolvedValue({
+    audio: new Uint8Array([3, 1, 4]),
+    format: 'wav',
+    durationSeconds: 1,
+    referenceProvenance: 'processed-reference',
+  });
   profile = {
     id: 'vcp_example',
     ownerId: 'usr_example',
@@ -107,6 +120,35 @@ function busyError(provider: 'chatterbox' | 'qwen3-tts' = 'chatterbox') {
 }
 
 describe('profile-specific synthesis and recovery', () => {
+  it('routes a new Ming Teaching Voice through Ming without enhancement or fallback', async () => {
+    profile = { ...profile, activeEngine: 'ming3-tts' };
+
+    await expect(synthesizeFacultyVoice(request)).resolves.toEqual({
+      audio: new Uint8Array([3, 1, 4]),
+      format: 'wav',
+    });
+
+    expect(mocks.synthesizeMing).toHaveBeenCalledExactlyOnceWith({
+      profile,
+      text: request.text,
+    });
+    expect(mocks.resolve).not.toHaveBeenCalled();
+    expect(mocks.processAudio).not.toHaveBeenCalled();
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
+    expect(mocks.masterAudio).not.toHaveBeenCalled();
+  });
+
+  it('reports a disabled Ming service and never silently switches providers', async () => {
+    profile = { ...profile, activeEngine: 'ming3-tts' };
+    mocks.mingEnabled.mockReturnValue(false);
+
+    await expect(resolveFacultyVoiceSelection(profile.id, profile.ownerId, 'en')).rejects.toThrow(
+      'Ming service is not enabled',
+    );
+    expect(mocks.resolve).not.toHaveBeenCalled();
+    expect(mocks.synthesizeMing).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['chatterbox', 'en'],
     ['indicf5', 'hi'],

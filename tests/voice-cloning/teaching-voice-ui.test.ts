@@ -13,7 +13,8 @@ describe('simplified Teaching Voice faculty UI', () => {
     expect(source).toContain('Record Voice');
     expect(source).toContain('Upload Audio');
     expect(source).toContain('Generate Voice');
-    expect(source).toContain('Voice ready');
+    expect(source).toContain('Ming 3.0 TTS 0.5B');
+    expect(source).toContain('ready, narration is off');
     expect(source).not.toContain('Customize Voice');
     expect(source).not.toContain('Generate Preview');
     expect(source).not.toContain('VoiceComparisonPanel');
@@ -21,11 +22,11 @@ describe('simplified Teaching Voice faculty UI', () => {
     expect(source).not.toContain('Use These Settings');
   });
 
-  it('uses one explicit enhanced enrollment action and blocks duplicate requests', () => {
-    expect(source).toContain("formData.set('workflow', 'enhanced-qwen')");
+  it('uses one explicit Ming enrollment action and blocks duplicate requests', () => {
+    expect(source).toContain("formData.set('workflow', 'ming-default')");
     expect(source).toContain('requestInFlightRef.current');
     expect(source).toContain('applyCompletedProfile(data.profile)');
-    expect(source).toContain("action: 'activate-enhanced-qwen'");
+    expect(source).toContain("action: 'activate-ming'");
     expect(source).not.toContain("action: 'preview-model'");
     expect(source).not.toContain("action: 'accept-preview'");
   });

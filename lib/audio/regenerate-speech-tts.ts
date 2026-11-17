@@ -135,9 +135,11 @@ export async function regenerateSpeechAudio(
   const requestId = `tts_request_s${sceneOrder}_${action.id}`;
   const stage = useStageStore.getState().stage;
   const stageId = stage?.id;
+  const preferredSelection = stage?.narration?.preferredSelection;
+  const preferredProvider = preferredSelection?.providerId;
   const qwenMode =
-    stage?.narration?.preferredSelection?.providerId === 'qwen3-tts'
-      ? (stage.narration.preferredSelection.enhancementMode ?? 'resemble-enhance')
+    preferredProvider === 'qwen3-tts'
+      ? (preferredSelection?.enhancementMode ?? 'resemble-enhance')
       : null;
   // Regenerating narration calls the TTS provider and allocates a fresh pool
   // asset, so it is gated exactly like every other way generation starts. The
@@ -149,6 +151,7 @@ export async function regenerateSpeechAudio(
     action.id,
     text,
     language ?? null,
+    preferredProvider ?? null,
     qwenMode,
   ]);
   const existingFlight = speechRegenerationInFlight.get(flightKey);

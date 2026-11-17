@@ -78,6 +78,7 @@ function profileProviderName(profile: PublicVoiceProfile | null): string {
       ? 'Qwen3-TTS (Original)'
       : 'Qwen3-TTS (Enhanced)';
   }
+  if (profile.activeEngine === 'ming3-tts') return 'Ming 3.0 TTS 0.5B';
   if (profile.activeEngine === 'indicf5') return 'IndicF5';
   return 'Chatterbox V3';
 }

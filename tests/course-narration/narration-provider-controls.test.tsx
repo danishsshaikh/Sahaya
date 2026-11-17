@@ -55,7 +55,7 @@ const roots: Root[] = [];
 
 function providerBootstrap(
   language: VoiceComparisonLanguageCode,
-  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
+  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'ming3-tts' | 'indicf5',
   sarvamMode: 'saved-voice-id' | 'inline-reference' | 'missing' = 'saved-voice-id',
   sarvamConfigured = true,
 ) {
@@ -139,7 +139,7 @@ async function flush() {
 async function mount(
   language: VoiceComparisonLanguageCode,
   narration?: CourseNarrationState,
-  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'indicf5',
+  activeEngine?: 'chatterbox' | 'qwen3-tts' | 'ming3-tts' | 'indicf5',
   sarvamMode: 'saved-voice-id' | 'inline-reference' | 'missing' = 'saved-voice-id',
   sarvamConfigured = true,
 ) {
@@ -384,6 +384,31 @@ describe('Narration Voice provider controls', () => {
 
     expect(engineButton(host, 'Qwen3-TTS (Enhanced)').className).toContain('border-primary');
     expect(engineButton(host, 'Qwen3-TTS (Original)').className).not.toContain('border-primary');
+  });
+
+  it('defaults a new Ming Teaching Voice course to Ming without changing explicit courses', async () => {
+    const { host } = await mount('en', undefined, 'ming3-tts');
+    expect(engineButton(host, 'Ming 3.0 TTS 0.5B').className).toContain('border-primary');
+
+    const existingSelection: CourseNarrationState = {
+      schemaVersion: 1,
+      activeVersionId: 'original',
+      versions: [],
+      preferredSelection: {
+        providerId: 'qwen3-tts',
+        providerName: 'Qwen3-TTS (Original)',
+        profileId: 'current-en-profile',
+        language: 'en',
+        enhancementMode: 'standard',
+      },
+    };
+    const restored = await mount('en', existingSelection, 'ming3-tts');
+    expect(engineButton(restored.host, 'Qwen3-TTS (Original)').className).toContain(
+      'border-primary',
+    );
+    expect(engineButton(restored.host, 'Ming 3.0 TTS 0.5B').className).not.toContain(
+      'border-primary',
+    );
   });
 
   it('persists a previous saved voice for only this course and previews with that profile', async () => {

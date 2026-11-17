@@ -1,13 +1,14 @@
 # Teaching Voice Integration
 
 Each private, owner-scoped profile represents one reference language. The simplified
-English homepage workflow stores the authorized recording, generates a Qwen3-TTS
-1.7B sample, requires a successful Resemble Enhance result, and activates Qwen with
-that enhancement mode. Only after the enhanced sample is saved does the explicit
+English homepage workflow stores the authorized recording, prepares the existing
+Ming 3.0 TTS 0.5B reference, generates a Ming sample, and activates Ming. Only
+after that valid WAV sample is saved does the explicit
 Generate Voice action make that profile the account's active English voice. It
-does not generate an extra Chatterbox sample. Existing
-provider-specific and IndicF5 enrollment APIs remain available to their existing
-callers. Stored `profile.provider` remains the compatibility and lifecycle provider;
+does not generate extra Chatterbox or Qwen samples. Existing profiles retain their
+stored `activeEngine`, and existing course-specific selections remain authoritative.
+Existing provider-specific and IndicF5 enrollment APIs remain available to their
+existing callers. Stored `profile.provider` remains the compatibility and lifecycle provider;
 `activeEngine` and the engine-specific enhancement mode determine classroom synthesis.
 Unknown IDs fail and no provider fallback is permitted.
 
@@ -46,12 +47,12 @@ Hindi text with Hindi synthesis. These comparisons can affect pronunciation and
 do not guarantee a particular accent. Hindi/Marathi IndicF5 previews use
 Devanagari.
 
-Homepage re-recording or upload creates a new profile and preserves previous
-profiles and original recordings. An existing authorized English profile can be
-explicitly upgraded to enhanced Qwen without replacing its reference. Old JSON
-files without `referenceText` remain valid for Chatterbox, but cannot be upgraded
-to Qwen until an accurate transcript is available. IndicF5 profiles without the
-required transcript fail explicitly and need re-enrollment.
+Homepage re-recording or upload creates a new Ming-default profile and preserves
+previous profiles and original recordings. Advanced provider selection can still
+explicitly activate or use Qwen, Chatterbox, Ming, Sarvam, Bodhan, or IndicF5 where
+compatible. Old JSON files without `referenceText` remain valid for Chatterbox,
+but cannot be upgraded to Qwen until an accurate transcript is available. IndicF5
+profiles without the required transcript fail explicitly and need re-enrollment.
 
 ## Selecting An Existing Profile
 
@@ -89,6 +90,7 @@ application and Python services must see the same reference files.
 | --- | --- | --- | --- |
 | Chatterbox | `VOICE_CLONING_BASE_URL` | `VOICE_CLONING_TIMEOUT_MS` | 120000 ms |
 | IndicF5 | `http://127.0.0.1:8772` | `INDICF5_VOICE_CLONING_TIMEOUT_MS` | 900000 ms |
+| Ming 3.0 TTS 0.5B | `http://127.0.0.1:8773` | `MING3_TTS_TIMEOUT_MS` | 300000 ms |
 
 The IndicF5 URL can be overridden by `INDICF5_VOICE_CLONING_BASE_URL`.
 Transport and model-load failures are errors.
@@ -108,9 +110,11 @@ proxy timeout configuration; the isolated self-hosted GPU test must check its
 HTTP timeout limits. Increasing provider timeouts beyond it requires reviewing
 that allowance too. Teaching Voice speech actions within a scene are serial;
 Chatterbox classroom narration runs through an owner-scoped, idempotent,
-single-worker resource queue. Each completed clip is downloaded, attached, and
-persisted independently while later clips remain queued. IndicF5 retains its
-existing request behavior.
+single-worker resource queue. Ming classroom narration has its own resource queue,
+using the existing configured Ming concurrency, and keys retained artifacts by the
+configured acoustic-reference or speaker-embedding-only conditioning mode. Each
+completed clip is downloaded, attached, and persisted independently while later
+clips remain queued. IndicF5 retains its existing request behavior.
 
 ## Indic Text Boundary
 
