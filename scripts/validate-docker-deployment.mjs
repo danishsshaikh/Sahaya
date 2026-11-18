@@ -153,7 +153,47 @@ for (const key of ['SARVAM_API_KEY', 'BODHAN_API_KEY', 'OPENAI_API_KEY']) {
   );
 }
 
+const podmanManager = readFileSync('deploy/podman/sahaya-podman', 'utf8');
+const quadletInstaller = readFileSync('deploy/podman/install-quadlet.sh', 'utf8');
+const preflight = readFileSync('scripts/deployment-preflight.sh', 'utf8');
+for (const mode of ['basic', 'ming', 'gemma-ming', 'full']) {
+  invariant(podmanManager.includes(mode), `Podman manager is missing the ${mode} mode`);
+}
+for (const device of [
+  'PODMAN_GEMMA_GPU_DEVICE',
+  'PODMAN_MING_GPU_DEVICE',
+  'PODMAN_QWEN_GPU_DEVICE',
+]) {
+  invariant(preflight.includes(device), `preflight does not validate ${device}`);
+  invariant(exampleEnv.includes(device), `.env.example does not document ${device}`);
+}
+invariant(preflight.includes("*'=all'"), 'preflight must reject all-GPU CDI allocation');
+invariant(
+  podmanManager.includes('--network "$INFERENCE_NETWORK"') &&
+    podmanManager.includes('ensure_network "$INFERENCE_NETWORK" --internal'),
+  'Podman inference services must use an internal network',
+);
+invariant(
+  !podmanManager.includes('--privileged'),
+  'native Podman deployment must not use privileged containers',
+);
+invariant(
+  quadletInstaller.includes('Internal=true') &&
+    quadletInstaller.includes('quadlet_gpu_args') &&
+    quadletInstaller.includes('--device=$device'),
+  'Quadlet deployment must retain private networking and explicit CDI devices',
+);
+for (const document of [
+  'docs/GETTING_STARTED.md',
+  'docs/DEPLOY_WITH_DOCKER.md',
+  'docs/DEPLOY_WITH_PODMAN.md',
+  'docs/UNIVERSITY_DEPLOYMENT.md',
+  'docs/ARCHITECTURE.md',
+]) {
+  invariant(readFileSync(document, 'utf8').length > 500, `${document} is missing or incomplete`);
+}
+
 console.log(
-  'Docker deployment structure and newcomer documentation are valid ' +
-    '(app, persistence, and 3 private GPU services).',
+  'Docker/Podman deployment structure and newcomer documentation are valid ' +
+    '(app, persistence, private GPU services, CDI and Quadlet).',
 );

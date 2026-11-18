@@ -123,6 +123,43 @@ https://github.com/user-attachments/assets/8f3f1e5f-1468-4e93-8054-afeeea683a61
 
 ---
 
+## Sahaya container deployment
+
+This Sahaya branch extends OpenMAIC with authenticated Teaching Voice enrollment, cloned classroom
+narration, Ming as the default engine for new English Teaching Voices, Qwen Original/Enhanced,
+Sarvam cloned voices, and Bodhan Indic-Speak.
+
+New contributors and university administrators can choose either runtime:
+
+- **Docker:** existing Compose deployment for developers and Docker-based institutions.
+- **Podman:** native, rootless-first deployment for university Linux/GPU servers. Docker is not
+  required, and GPU assignment uses explicit NVIDIA CDI device names.
+
+Start with [the container getting-started guide](docs/GETTING_STARTED.md), then use the dedicated
+[Docker guide](docs/DEPLOY_WITH_DOCKER.md) or [Podman guide](docs/DEPLOY_WITH_PODMAN.md). University
+IT teams should also read the [administrator, privacy, backup, and recovery guide](docs/UNIVERSITY_DEPLOYMENT.md).
+The [architecture and provider matrix](docs/ARCHITECTURE.md) distinguishes implemented, optional,
+external, and not-yet-container-validated services.
+
+```bash
+cp .env.example .env
+chmod 600 .env
+
+# Docker, no local GPU
+scripts/deployment-preflight.sh --runtime docker --mode basic
+docker compose up --build --wait
+
+# Podman, no local GPU
+deploy/podman/sahaya-podman --mode basic preflight
+deploy/podman/sahaya-podman --mode basic build
+deploy/podman/sahaya-podman --mode basic start
+```
+
+Neither path starts local GPU models by default. Configuration validation does not prove real CUDA
+inference; perform an explicit authorized live test on the target server.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -327,6 +364,10 @@ Or manually:
 4. Deploy
 
 ### Docker Deployment
+
+For the short newcomer flow and runtime comparison, see
+[Sahaya container deployment](#sahaya-container-deployment). Podman users should follow the
+[native Podman guide](docs/DEPLOY_WITH_PODMAN.md); `podman compose` is not required.
 
 The default Compose stack is intentionally API-only: one Sahaya/OpenMAIC app
 container with durable server-owned data. It does not download or start a local
