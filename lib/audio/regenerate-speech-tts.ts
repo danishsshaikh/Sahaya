@@ -16,6 +16,8 @@ import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { isStaticVoiceEnabled } from '@/lib/config/feature-flags';
 
+const speechRegenerationInFlight = new Map<string, Promise<string | null>>();
+
 /** Legacy deterministic Dexie key used before pool allocation. */
 export function speechAudioId(sceneOrder: number, actionId: string): string {
   return `tts_s${sceneOrder}_${actionId}`;
@@ -131,19 +133,48 @@ export async function regenerateSpeechAudio(
   const text = action.text?.trim();
   if (!text || !action.id) return null;
   const requestId = `tts_request_s${sceneOrder}_${action.id}`;
-  const stageId = useStageStore.getState().stage?.id;
+  const stage = useStageStore.getState().stage;
+  const stageId = stage?.id;
+  const preferredSelection = stage?.narration?.preferredSelection;
+  const preferredProvider = preferredSelection?.providerId;
+  const qwenMode =
+    preferredProvider === 'qwen3-tts'
+      ? (preferredSelection?.enhancementMode ?? 'resemble-enhance')
+      : null;
   // Regenerating narration calls the TTS provider and allocates a fresh pool
   // asset, so it is gated exactly like every other way generation starts. The
   // surfaces withhold the control too; refusing here keeps the two one rule.
   if (!mayGenerateForStage(stageId)) return null;
-  const existingAudioId = await exclusivelyOwnedAudioId(action.audioId, stageId);
-  return generateAndStoreTTS(
-    requestId,
+  const flightKey = JSON.stringify([
+    stageId ?? null,
+    sceneOrder,
+    action.id,
     text,
-    language,
-    signal,
-    undefined,
-    existingAudioId,
-    stageId,
-  );
+    language ?? null,
+    preferredProvider ?? null,
+    qwenMode,
+  ]);
+  const existingFlight = speechRegenerationInFlight.get(flightKey);
+  if (existingFlight) return existingFlight;
+
+  const operation = (async () => {
+    const existingAudioId = await exclusivelyOwnedAudioId(action.audioId, stageId);
+    return generateAndStoreTTS(
+      requestId,
+      text,
+      language,
+      signal,
+      undefined,
+      existingAudioId,
+      stageId,
+    );
+  })();
+  speechRegenerationInFlight.set(flightKey, operation);
+  try {
+    return await operation;
+  } finally {
+    if (speechRegenerationInFlight.get(flightKey) === operation) {
+      speechRegenerationInFlight.delete(flightKey);
+    }
+  }
 }

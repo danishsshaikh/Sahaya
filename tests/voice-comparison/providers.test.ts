@@ -107,6 +107,66 @@ describe('Sarvam voice cloning preview provider', () => {
     expect(body.get('speech_sample_rate')).toBeNull();
   });
 
+  it('synthesizes a cloned voice from the exact inline reference bytes', async () => {
+    const reference = pcmWav();
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          request_id: 'req-sarvam-inline',
+          audio_b64: Buffer.from(wav).toString('base64'),
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      new SarvamVoiceCloningPreviewProvider(config).synthesize({
+        referenceAudio: {
+          bytes: reference,
+          mimeType: 'audio/wav',
+          durationSeconds: 12,
+        },
+        text: 'Exact classroom narration.',
+        language: 'en',
+      }),
+    ).resolves.toMatchObject({ audio: wav, requestId: 'req-sarvam-inline', format: 'wav' });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.sarvam.test/voices/clone');
+    expect(init.headers).toEqual({ 'api-subscription-key': 'sarvam-secret' });
+    const form = init.body as FormData;
+    expect(form.get('voice_id')).toBeNull();
+    expect(form.get('ref_text')).toBeNull();
+    expect(form.get('text')).toBe('Exact classroom narration.');
+    const uploaded = form.get('ref_audio') as File;
+    expect(uploaded.name).toBe('reference.wav');
+    expect(
+      createHash('sha256')
+        .update(Buffer.from(await uploaded.arrayBuffer()))
+        .digest('hex'),
+    ).toBe(createHash('sha256').update(reference).digest('hex'));
+  });
+
+  it('rejects an oversized inline reference before calling Sarvam', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      new SarvamVoiceCloningPreviewProvider(config).synthesize({
+        referenceAudio: {
+          bytes: pcmWav(),
+          mimeType: 'audio/wav',
+          durationSeconds: 15.01,
+        },
+        text: 'Exact classroom narration.',
+        language: 'en',
+      }),
+    ).rejects.toThrow(/no longer than 15 seconds/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('does not operate without explicit server configuration', async () => {
     const provider = new SarvamVoiceCloningPreviewProvider({ ...config, enabled: false });
     await expect(
@@ -125,6 +185,7 @@ describe('Ming 3.0 TTS preview provider', () => {
     baseUrl: 'http://127.0.0.1:8773',
     timeoutMs: 5000,
     maxConcurrency: 1,
+    conditioningMode: 'acoustic-reference' as const,
   };
 
   it('registers an English reference transcript and preserves synthesis text and WAV bytes', async () => {
@@ -146,6 +207,8 @@ describe('Ming 3.0 TTS preview provider', () => {
             'content-type': 'audio/wav',
             'x-request-id': 'req-ming',
             'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+            'x-ming-conditioning-mode': 'acoustic-reference',
+            'x-ming-generation-config': 'ming-0.5b-official-defaults-v1',
           },
         }),
       );
@@ -167,18 +230,72 @@ describe('Ming 3.0 TTS preview provider', () => {
     expect(result).toMatchObject({
       requestId: 'req-ming',
       referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      conditioningMode: 'acoustic-reference',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
     });
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
       profileId: 'ming_owner_profile',
       referenceAudioPath: '/private/owner/reference.wav',
       referenceText: ' Exact authorized transcript. ',
       referenceLanguage: 'en',
+      conditioningMode: 'acoustic-reference',
     });
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       profileId: 'ming_owner_profile',
       text,
       language: 'en',
+      conditioningMode: 'acoustic-reference',
     });
+  });
+
+  it('requests and requires confirmed speaker-embedding-only conditioning', async () => {
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(Buffer.from(wav), {
+        headers: {
+          'content-type': 'audio/wav',
+          'x-ming-conditioning-mode': 'speaker-embedding-only',
+          'x-reference-preparation': 'official-campplus-16khz-speaker-embedding-only',
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new Ming3TtsPreviewProvider({
+      ...config,
+      conditioningMode: 'speaker-embedding-only',
+    });
+
+    await expect(
+      provider.synthesize({ profileId: 'ming_owner_profile', text: 'Exact text.', language: 'en' }),
+    ).resolves.toMatchObject({
+      conditioningMode: 'speaker-embedding-only',
+      referenceTransformation: 'official-campplus-16khz-speaker-embedding-only',
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      profileId: 'ming_owner_profile',
+      text: 'Exact text.',
+      language: 'en',
+      conditioningMode: 'speaker-embedding-only',
+    });
+  });
+
+  it('rejects an old service that cannot confirm speaker-only conditioning', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(Buffer.from(pcmWav()), { headers: { 'content-type': 'audio/wav' } }),
+        ),
+    );
+    const provider = new Ming3TtsPreviewProvider({
+      ...config,
+      conditioningMode: 'speaker-embedding-only',
+    });
+
+    await expect(
+      provider.synthesize({ profileId: 'ming_owner_profile', text: 'Exact text.', language: 'en' }),
+    ).rejects.toThrow('did not confirm speaker-only conditioning');
   });
 
   it('reports a missing model service without falling back', async () => {

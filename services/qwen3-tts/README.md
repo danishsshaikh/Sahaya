@@ -1,17 +1,24 @@
 # Qwen3-TTS 1.7B Teaching Voice Service
 
-This localhost-only service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a selectable
+This private service adds `Qwen/Qwen3-TTS-12Hz-1.7B-Base` as a selectable
 Teaching Voice engine and preview option. It does not enroll or replace a Teaching
 Voice profile. Sahaya supplies the existing private reference WAV and its exact saved
 transcript, and stores engine selection separately from the enrollment provider.
 
-The service uses the already validated POC checkout, Python environment, and cached
-model. It sets `local_files_only=True`; the startup command also forces Hugging Face
-and Transformers offline mode so deployment cannot download another model.
+The service requires an explicitly pinned Qwen checkout and a pre-downloaded model. It sets
+`local_files_only=True`; the startup command also forces Hugging Face and Transformers offline mode
+so deployment cannot download another model.
 
-## Start On GPU 1
+The root Compose file accepts those paths as `QWEN3_TTS_SOURCE_DIR` and
+`QWEN3_TTS_MODEL_DIR`. `docker compose --profile gpu-qwen up --build --wait` builds the isolated
+runtime, mounts the model read-only, and exposes port 8771 only on the private inference network.
+The Docker app uses `http://qwen3-tts:8771`; use loopback only when Sahaya and this service run
+directly on the same host.
 
-From the deployed Sahaya repository root, run one persistent process:
+## Start directly on a selected GPU
+
+From the deployed Sahaya repository root, run one persistent process. The paths below are examples;
+replace them with the reviewed checkout and environment prepared for that host:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
@@ -59,17 +66,55 @@ QWEN3_TTS_PREVIEW_ENABLED=true
 QWEN3_TTS_CLASSROOM_ENABLED=true
 QWEN3_TTS_BASE_URL=http://127.0.0.1:8771
 QWEN3_TTS_TIMEOUT_MS=180000
+# Application-side exact-text chunk limit and bounded model service controls
+# (defaults shown).
+QWEN3_TTS_CHUNK_CHARACTERS=220
+QWEN3_TTS_QUEUE_WAIT_SECONDS=30
+QWEN3_TTS_MAX_PENDING=64
+QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS=165
+QWEN3_TTS_RESPONSE_GRACE_SECONDS=5
+QWEN3_TTS_MAX_NEW_TOKENS=512
+QWEN3_TTS_BUSY_MAX_RETRIES=1
+QWEN3_TTS_BUSY_MAX_WAIT_MS=90000
 ```
 
-Resemble Enhanced comparison additionally follows the existing preview gates:
-`VOICE_ENHANCEMENT_ENABLED=true` and `VOICE_ENHANCEMENT_PREVIEW_ENABLED=true`.
-`VOICE_ENHANCEMENT_CLASSROOM_ENABLED` remains independent and can stay `false`.
-Set it to `true` only when faculty should be able to select Enhanced Qwen audio for classroom
-narration. Original Qwen classroom audio does not require Resemble Enhance.
+Every profile-registration and synthesis request shares this one FIFO model
+slot. Sahaya's in-process FIFO wait happens before the HTTP deadline begins.
+The Python queue covers other application processes and has its own bounded
+30-second admission wait. Keep `QWEN3_TTS_TIMEOUT_MS` above the service request
+deadline so the service can return a useful `504` instead of leaving an
+unobserved generation running after the adapter has stopped waiting.
+The service caps queue wait at 30 seconds and its total synthesis deadline at
+165 seconds even if stale deployment variables still contain larger values.
 
-Qwen Original remains the selected preview by default. Enhanced is produced from the same Qwen
-waveform and remains optional. Unlike Chatterbox, Qwen's enhanced result is not passed through the
-Chatterbox-specific EQ, silence removal, compression, or loudness mastering preset.
+Narration over the configured chunk limit is split at sentence, clause, or word
+boundaries without trimming or rewriting its characters. Chunk requests are
+admitted separately for fairness. Their PCM16 WAV data is concatenated in the
+original order without inserted silence, then Sahaya runs the requested
+Resemble Enhance pass once on the complete result. No partial set of chunks is
+persisted.
+
+Each inference passes an explicit `max_new_tokens` cap and a wall-clock stopping
+criterion to upstream Qwen generation. A deadline or disconnected caller asks
+generation to stop at the next autoregressive step; partial audio is discarded.
+Reaching the output-token cap is also treated as an incomplete result and its
+partial waveform is discarded rather than enhanced or marked voiced.
+The generation slot remains owned until the model call has actually returned.
+A hard CUDA/kernel hang cannot be safely killed from the Python thread; that
+case remains an operator-visible service fault rather than a falsely released
+GPU lock.
+
+The simplified homepage Teaching Voice workflow requires every relevant gate:
+`QWEN3_TTS_PREVIEW_ENABLED=true`, `QWEN3_TTS_CLASSROOM_ENABLED=true`,
+`VOICE_ENHANCEMENT_ENABLED=true`, `VOICE_ENHANCEMENT_PREVIEW_ENABLED=true`, and
+`VOICE_ENHANCEMENT_CLASSROOM_ENABLED=true`. The profile is not marked ready if
+enhancement fails, and classroom narration does not silently fall back to original
+Qwen audio. Advanced comparison tools retain their explicit engine and output
+selection behavior.
+
+Enhanced is produced from the Qwen waveform. Unlike Chatterbox, the Qwen result is
+not passed through the Chatterbox-specific EQ, silence removal, compression, or
+loudness mastering preset before enhancement.
 
 The service currently accepts English reference transcripts and English preview
 text only. Sahaya deliberately uses the profile's reference language and saved

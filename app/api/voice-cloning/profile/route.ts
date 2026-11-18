@@ -5,6 +5,7 @@ import {
   getChatterboxDefaultModelVariant,
   isQwen3TtsClassroomEnabled,
   isQwen3TtsPreviewEnabled,
+  isMing3TtsPreviewEnabled,
   isVoiceEnhancementAllowed,
   isVoiceCloningServerEnabled,
 } from '@/lib/voice-cloning/config';
@@ -18,6 +19,7 @@ import {
 import {
   deleteVoiceProfileAssets,
   findCurrentVoiceProfile,
+  listVoiceProfiles,
   readVoiceProfile,
   writeVoiceProfile,
 } from '@/lib/voice-cloning/storage';
@@ -54,10 +56,12 @@ import {
   voiceEnrollmentResponse,
 } from '@/lib/server/voice-enrollment-jobs';
 import {
+  activateEnhancedQwenTeachingVoice,
   createQwen3TtsPreviewCacheKey,
   currentQwen3TtsPreview,
   generateQwen3TtsModelPreview,
 } from '@/lib/server/qwen3-tts-preview';
+import { activateMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const log = createLogger('VoiceCloningProfileAPI');
 
@@ -237,8 +241,13 @@ export async function GET(req: NextRequest) {
       getVoiceCloningProvider(resolveVoiceProfileProvider(profile));
       validateTeachingVoiceLanguage(profile, requested ?? undefined);
     }
+    const profiles =
+      params.get('library') === 'true'
+        ? await listVoiceProfiles(user.id, { readyOnly: true })
+        : undefined;
     return apiSuccess({
       profile: publicVoiceProfile(profile),
+      ...(profiles ? { profiles: profiles.map(publicVoiceProfile).filter(Boolean) } : {}),
       previewModels: availablePreviewModels(),
       qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
       qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
@@ -286,6 +295,7 @@ export async function PATCH(req: NextRequest) {
     previewTextLanguageId?: string;
     previewModel?: string;
     previewText?: string;
+    displayName?: string;
   };
   if (!body.profileId || !body.action) {
     return apiError('INVALID_REQUEST', 400, 'Invalid profile update');
@@ -293,6 +303,69 @@ export async function PATCH(req: NextRequest) {
   const profile = await readVoiceProfile(body.profileId, user.id);
   if (!profile || profile.ownerId !== user.id || profile.status === 'deleted') {
     return apiError('INVALID_REQUEST', 404, 'Voice profile not found');
+  }
+
+  if (body.action === 'rename') {
+    const displayName = body.displayName?.trim();
+    if (!displayName || displayName.length > 80) {
+      return apiError('INVALID_REQUEST', 400, 'Voice name must be between 1 and 80 characters');
+    }
+    const next = { ...profile, displayName, updatedAt: new Date().toISOString() };
+    await writeVoiceProfile(next);
+    return apiSuccess({ profile: publicVoiceProfile(next) });
+  }
+
+  if (body.action === 'activate-enhanced-qwen') {
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Teaching Voice is not ready for generation');
+    }
+    try {
+      const next = await activateEnhancedQwenTeachingVoice(profile, user.id);
+      return apiSuccess({
+        profile: publicVoiceProfile(next),
+        previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError ? error.message : 'Teaching Voice generation failed',
+      );
+    }
+  }
+
+  if (body.action === 'activate-ming') {
+    if (profile.status !== 'preview-ready' && profile.status !== 'ready') {
+      return apiError('INVALID_REQUEST', 400, 'Teaching Voice is not ready for generation');
+    }
+    if (!isMing3TtsPreviewEnabled()) {
+      return apiError(
+        'PROVIDER_DISABLED',
+        503,
+        'Ming 3.0 TTS is unavailable because the Ming service is not enabled',
+      );
+    }
+    try {
+      const next = await activateMing3TeachingVoice(profile, user.id, {
+        allowPreReadyProfile: profile.status === 'preview-ready',
+      });
+      return apiSuccess({
+        profile: publicVoiceProfile(next),
+        previewModels: availablePreviewModels(),
+        qwenClassroomEnabled: isQwen3TtsClassroomEnabled(),
+        qwenClassroomEnhancementAvailable: qwenClassroomEnhancementAvailable(),
+      });
+    } catch (error) {
+      return apiError(
+        'GENERATION_FAILED',
+        error instanceof TeachingVoiceError ? error.status : 500,
+        error instanceof TeachingVoiceError
+          ? error.message
+          : 'Ming Teaching Voice generation failed',
+      );
+    }
   }
 
   const previewModel = body.previewModel ?? 'chatterbox-v3';

@@ -2,17 +2,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   synthesize: vi.fn(),
+  persistArtifact: vi.fn(),
+  cleanupArtifacts: vi.fn(),
+  findArtifact: vi.fn(),
+  readArtifact: vi.fn(),
 }));
 
 vi.mock('@/lib/voice-cloning/synthesis', () => ({
   synthesizeFacultyVoice: mocks.synthesize,
 }));
 
+vi.mock('@/lib/voice-cloning/teaching-voice-artifacts', () => ({
+  cleanupTeachingVoiceArtifacts: mocks.cleanupArtifacts,
+  findTeachingVoiceArtifactByIdempotencyKey: mocks.findArtifact,
+  persistTeachingVoiceArtifact: mocks.persistArtifact,
+  readTeachingVoiceArtifact: mocks.readArtifact,
+  teachingVoiceArtifactSnapshot: vi.fn(),
+  TeachingVoiceArtifactInvalidError: class TeachingVoiceArtifactInvalidError extends Error {},
+}));
+
 import { clearResourceJobQueueForTests } from '@/lib/server/resource-job-queue';
 import {
+  createTeachingVoiceIdempotencyKey,
   enqueueTeachingVoiceJob,
   readTeachingVoiceJob,
   readTeachingVoiceJobResult,
+  readTeachingVoiceJobResultDurably,
   type QueuedTeachingVoiceJobInput,
 } from '@/lib/voice-cloning/teaching-voice-jobs';
 
@@ -43,13 +58,81 @@ function input(audioId: string, text = `Narration ${audioId}`): QueuedTeachingVo
 beforeEach(() => {
   clearResourceJobQueueForTests();
   mocks.synthesize.mockReset();
+  mocks.persistArtifact.mockReset().mockResolvedValue({});
+  mocks.cleanupArtifacts.mockReset().mockResolvedValue(undefined);
+  mocks.findArtifact.mockReset().mockResolvedValue(null);
+  mocks.readArtifact.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   clearResourceJobQueueForTests();
 });
 
-describe('IndicF5 Teaching Voice jobs', () => {
+describe('Teaching Voice jobs', () => {
+  it('serializes Ming jobs on the Ming resource without changing other provider queues', async () => {
+    const first = deferred<{ audio: Uint8Array; format: string }>();
+    mocks.synthesize
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ audio: new Uint8Array([2]), format: 'wav' });
+    const mingInput = {
+      ...input('tts_ming_1', 'First Ming narration'),
+      providerId: 'ming3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+
+    const firstJob = enqueueTeachingVoiceJob(mingInput).job;
+    const secondJob = enqueueTeachingVoiceJob({
+      ...mingInput,
+      audioId: 'tts_ming_2',
+      text: 'Second Ming narration',
+    }).job;
+
+    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(1));
+    expect(firstJob.resourceKey).toBe('teaching-voice:ming3-tts');
+    expect(readTeachingVoiceJob(secondJob.id, 'faculty-1')).toMatchObject({
+      status: 'queued',
+      jobsAhead: 1,
+    });
+    first.resolve({ audio: new Uint8Array([1]), format: 'wav' });
+    await vi.waitFor(() => expect(mocks.synthesize).toHaveBeenCalledTimes(2));
+    expect(mocks.synthesize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerId: 'ming3-tts', text: 'Second Ming narration' }),
+    );
+  });
+
+  it('separates Ming artifacts when the configured conditioning mode changes', () => {
+    const ming = {
+      ...input('tts_ming_mode', 'Same exact Ming narration'),
+      providerId: 'ming3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'acoustic-reference');
+    const acoustic = createTeachingVoiceIdempotencyKey(ming);
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'speaker-embedding-only');
+    expect(createTeachingVoiceIdempotencyKey(ming)).not.toBe(acoustic);
+  });
+
+  it('keeps Original and Enhanced Qwen artifacts under different idempotency identities', () => {
+    const qwen = {
+      ...input('tts_qwen_mode', 'Same exact Qwen narration'),
+      providerId: 'qwen3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+
+    expect(
+      createTeachingVoiceIdempotencyKey({ ...qwen, qwenEnhancementMode: 'standard' }),
+    ).not.toBe(
+      createTeachingVoiceIdempotencyKey({
+        ...qwen,
+        qwenEnhancementMode: 'resemble-enhance',
+      }),
+    );
+  });
+
   it('serializes several clips and keeps later clips queued', async () => {
     const first = deferred<{ audio: Uint8Array; format: string }>();
     const second = deferred<{ audio: Uint8Array; format: string }>();
@@ -109,6 +192,70 @@ describe('IndicF5 Teaching Voice jobs', () => {
     expect(mocks.synthesize).toHaveBeenCalledTimes(1);
   });
 
+  it('does not mark enhanced audio completed until durable artifact storage succeeds', async () => {
+    const stored = deferred<object>();
+    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([7, 8]), format: 'wav' });
+    mocks.persistArtifact.mockReturnValue(stored.promise);
+
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_durable', 'Enhanced Qwen narration'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+
+    await vi.waitFor(() => expect(mocks.persistArtifact).toHaveBeenCalledOnce());
+    expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('running');
+    stored.resolve({});
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+  });
+
+  it('classifies durable audio storage failure without publishing completion', async () => {
+    mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([7, 8]), format: 'wav' });
+    mocks.persistArtifact.mockRejectedValue(new Error('disk unavailable'));
+
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_store_failure', 'Enhanced Qwen narration'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')).toMatchObject({
+        status: 'failed',
+        errorCode: 'TTS_AUDIO_STORAGE_FAILED',
+      }),
+    );
+    expect(readTeachingVoiceJobResult(job.id, 'faculty-1')).toBeNull();
+  });
+
+  it('salvages a legacy completed in-memory result into durable storage on download', async () => {
+    const audio = new Uint8Array([7, 8]);
+    mocks.synthesize.mockResolvedValue({ audio, format: 'wav' });
+    const { job } = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_legacy_recovery', 'Completed before durable storage'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    });
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+    mocks.persistArtifact.mockClear();
+    mocks.readArtifact.mockResolvedValue(null);
+
+    await expect(readTeachingVoiceJobResultDurably(job.id, 'faculty-1')).resolves.toEqual({
+      audio,
+      format: 'wav',
+    });
+    expect(mocks.persistArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: job.id, ownerId: 'faculty-1', audio }),
+    );
+  });
+
   it('keeps distinct speech actions under distinct stable jobs', () => {
     mocks.synthesize.mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
     const first = enqueueTeachingVoiceJob(input('tts_action_1', 'Same text'));
@@ -140,5 +287,86 @@ describe('IndicF5 Teaching Voice jobs', () => {
         language: 'en',
       }),
     );
+  });
+
+  it('serializes several concurrent Qwen slide jobs in submission order', async () => {
+    const gates = [
+      deferred<{ audio: Uint8Array; format: string }>(),
+      deferred<{ audio: Uint8Array; format: string }>(),
+      deferred<{ audio: Uint8Array; format: string }>(),
+    ];
+    const started: string[] = [];
+    mocks.synthesize.mockImplementation((request: { text: string }) => {
+      const index = started.length;
+      started.push(request.text);
+      return gates[index].promise;
+    });
+    const jobs = ['First slide', 'Second slide', 'Third slide'].map(
+      (text, index) =>
+        enqueueTeachingVoiceJob({
+          ...input(`tts_qwen_${index}`, text),
+          providerId: 'qwen3-tts',
+          profileId: 'vcp_english',
+          language: 'en',
+          sceneId: `scene-${index}`,
+        }).job,
+    );
+
+    await vi.waitFor(() => expect(started).toEqual(['First slide']));
+    expect(readTeachingVoiceJob(jobs[1].id, 'faculty-1')).toMatchObject({
+      status: 'queued',
+      jobsAhead: 1,
+    });
+    gates[0].resolve({ audio: new Uint8Array([1]), format: 'wav' });
+    await vi.waitFor(() => expect(started).toEqual(['First slide', 'Second slide']));
+    gates[1].resolve({ audio: new Uint8Array([2]), format: 'wav' });
+    await vi.waitFor(() => expect(started).toEqual(['First slide', 'Second slide', 'Third slide']));
+    gates[2].resolve({ audio: new Uint8Array([3]), format: 'wav' });
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(jobs[2].id, 'faculty-1')?.status).toBe('completed'),
+    );
+  });
+
+  it('retries only a failed Qwen action and preserves completed action audio', async () => {
+    mocks.synthesize
+      .mockResolvedValueOnce({ audio: new Uint8Array([7]), format: 'wav' })
+      .mockRejectedValueOnce(new Error('Qwen capacity wait expired'))
+      .mockResolvedValueOnce({ audio: new Uint8Array([9]), format: 'wav' });
+    const completed = enqueueTeachingVoiceJob({
+      ...input('tts_qwen_complete', 'Completed action'),
+      providerId: 'qwen3-tts',
+      profileId: 'vcp_english',
+      language: 'en',
+    }).job;
+    const failedRequest = {
+      ...input('tts_qwen_failed', 'Retry only this action'),
+      providerId: 'qwen3-tts' as const,
+      profileId: 'vcp_english',
+      language: 'en',
+    };
+    const failed = enqueueTeachingVoiceJob(failedRequest).job;
+
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(failed.id, 'faculty-1')?.status).toBe('failed'),
+    );
+    expect(readTeachingVoiceJobResult(completed.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([7]),
+      format: 'wav',
+    });
+
+    const retry = enqueueTeachingVoiceJob(failedRequest);
+    expect(retry.reused).toBe(false);
+    expect(retry.job.id).not.toBe(failed.id);
+    await vi.waitFor(() =>
+      expect(readTeachingVoiceJob(retry.job.id, 'faculty-1')?.status).toBe('completed'),
+    );
+    expect(readTeachingVoiceJobResult(retry.job.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([9]),
+      format: 'wav',
+    });
+    expect(readTeachingVoiceJobResult(completed.id, 'faculty-1')).toEqual({
+      audio: new Uint8Array([7]),
+      format: 'wav',
+    });
   });
 });

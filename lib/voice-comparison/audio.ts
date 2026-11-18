@@ -186,3 +186,43 @@ export function splitSpeechText(text: string, maxChunkCharacters: number): strin
     throw new TeachingVoiceError('Comparison text requires too many segments.');
   return chunks;
 }
+
+/**
+ * Partition provider-bound narration without trimming, inserting, or replacing
+ * any character. Joining the returned chunks is always equal to the input.
+ */
+export function splitSpeechTextPreservingText(text: string, maxChunkCharacters: number): string[] {
+  if (!text.trim()) throw new TeachingVoiceError('Enter text to compare.');
+  if (text.length > MAX_COMPARISON_TEXT_CHARACTERS) {
+    throw new TeachingVoiceError(
+      `Comparison text must be ${MAX_COMPARISON_TEXT_CHARACTERS} characters or fewer.`,
+    );
+  }
+  if (text.length <= maxChunkCharacters) return [text];
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxChunkCharacters, text.length);
+    if (end < text.length) {
+      for (let boundary = end; boundary > start; boundary -= 1) {
+        if (/\s|[.!?।॥]/u.test(text[boundary - 1])) {
+          end = boundary;
+          break;
+        }
+      }
+    }
+    const chunk = text.slice(start, end);
+    if (!chunk.trim()) {
+      throw new TeachingVoiceError(
+        'Narration contains a whitespace-only segment that cannot be sent unchanged.',
+      );
+    }
+    chunks.push(chunk);
+    if (chunks.length > 8) {
+      throw new TeachingVoiceError('Comparison text requires too many segments.');
+    }
+    start = end;
+  }
+  return chunks;
+}

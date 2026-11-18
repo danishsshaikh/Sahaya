@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -200,6 +200,7 @@ describe('voice comparison coordinator', () => {
       await import('@/lib/server/voice-comparison');
     const result = await generateVoiceComparisonPreview({
       ownerId: original.ownerId,
+      allowSarvamInlineReference: true,
       request: {
         profileId: original.id,
         providerId: 'sarvam',
@@ -210,6 +211,7 @@ describe('voice comparison coordinator', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/voices/clone');
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('voice_id')).toBe('svc-legacy1234');
+    expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('ref_audio')).toBeNull();
     expect((fetchMock.mock.calls[0]?.[1]?.body as FormData).get('text')).toBe(' Unchanged text. ');
     expect(result.referenceProvenance).toBe('processed-reference');
     const bootstrap = await getVoiceComparisonBootstrap(
@@ -221,6 +223,103 @@ describe('voice comparison coordinator', () => {
       requiresExternalConsent: false,
       sarvamReferenceProvenance: 'processed-reference',
     });
+  });
+
+  it('uses exact original reference bytes inline without creating a remote clone', async () => {
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    const originalBytes = pcmWav();
+    const originalRecording = await storage.writeOriginalRecording(original.id, original.ownerId, {
+      bytes: originalBytes,
+      mimeType: 'audio/wav',
+      fileName: 'original.wav',
+    });
+    await storage.writeVoiceProfile({
+      ...original,
+      referenceAudioKey,
+      originalRecording,
+    });
+    const wav = pcmWav();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ audio_b64: Buffer.from(wav).toString('base64') }), {
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req-inline' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview, resolveSarvamCourseNarrationAvailability } =
+      await import('@/lib/server/voice-comparison');
+
+    const availability = await resolveSarvamCourseNarrationAvailability(
+      (await storage.readVoiceProfile(original.id, original.ownerId)) as VoiceProfile,
+    );
+    expect(availability).toMatchObject({
+      available: true,
+      externalVoiceReady: false,
+      sarvamNarrationMode: 'inline-reference',
+    });
+    const result = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      allowSarvamInlineReference: true,
+      request: {
+        profileId: original.id,
+        providerId: 'sarvam',
+        text: 'Exact inline cloned narration.',
+        language: 'en',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.sarvam.test/voices/clone');
+    const form = init.body as FormData;
+    expect(form.get('voice_id')).toBeNull();
+    expect(form.get('ref_text')).toBeNull();
+    expect(form.get('text')).toBe('Exact inline cloned narration.');
+    expect(Buffer.from(await (form.get('ref_audio') as File).arrayBuffer())).toEqual(
+      Buffer.from(originalBytes),
+    );
+    expect(result).toMatchObject({
+      voiceType: 'cloned',
+      referenceProvenance: 'original-upload',
+      processingMode: 'raw-provider-output',
+      providerRequestId: 'req-inline',
+    });
+    const stored = await storage.readVoiceProfile(original.id, original.ownerId);
+    expect(stored?.sarvamVoice).toBeUndefined();
+    expect(stored?.sarvamRawVoice).toBeUndefined();
+  });
+
+  it('reports an actionable error when neither a saved clone nor original reference exists', async () => {
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    await expect(
+      generateVoiceComparisonPreview({
+        ownerId: original.ownerId,
+        allowSarvamInlineReference: true,
+        request: {
+          profileId: original.id,
+          providerId: 'sarvam',
+          text: 'Exact cloned narration.',
+          language: 'en',
+        },
+      }),
+    ).rejects.toThrow(/original recording (?:was not retained|has no retained)/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('restores the deployed pre-metadata Sarvam cache entry for the same owned profile', async () => {
@@ -552,6 +651,8 @@ describe('voice comparison coordinator', () => {
           'content-type': 'audio/wav',
           'x-request-id': 'req-ming-owner',
           'x-reference-preparation': 'official-runtime-mono-resample-and-front-pad',
+          'x-ming-conditioning-mode': 'acoustic-reference',
+          'x-ming-generation-config': 'ming-0.5b-official-defaults-v1',
         },
       }),
     );
@@ -573,6 +674,8 @@ describe('voice comparison coordinator', () => {
       processingMode: 'model-native-output',
       referenceProvenance: 'original-upload',
       referenceTransformation: 'official-runtime-mono-resample-and-front-pad',
+      conditioningMode: 'acoustic-reference',
+      generationConfig: 'ming-0.5b-official-defaults-v1',
       chunked: false,
     });
     expect(duplicate.audio.base64).toBe(result.audio.base64);
@@ -581,12 +684,17 @@ describe('voice comparison coordinator', () => {
     const registration = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     const synthesis = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
     expect(registration).toMatchObject({
-      referenceAudioPath: retainedOriginal.key,
+      referenceAudioPath: await realpath(retainedOriginal.key),
       referenceText: original.referenceText,
       referenceLanguage: 'en',
     });
     expect(registration.profileId).toMatch(/^ming_[a-f0-9]{32}$/);
-    expect(synthesis).toEqual({ profileId: registration.profileId, text, language: 'en' });
+    expect(synthesis).toEqual({
+      profileId: registration.profileId,
+      text,
+      language: 'en',
+      conditioningMode: 'acoustic-reference',
+    });
     expect((await storage.readVoiceProfile(original.id, original.ownerId))?.provider).toBe(
       'chatterbox',
     );
@@ -594,6 +702,192 @@ describe('voice comparison coordinator', () => {
     const cached = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
     expect(cached.cached).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('never registers Ming with slash when legacy original-recording metadata has an empty key', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    vi.stubEnv('MING3_TTS_BASE_URL', 'http://ming.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({
+      ...original,
+      referenceAudioKey,
+      originalRecording: {
+        key: '',
+        mimeType: 'audio/wav',
+        byteLength: 0,
+        createdAt: '2026-10-26T00:00:00.000Z',
+      },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async (_url, init) => {
+        const registration = JSON.parse(String(init?.body)) as {
+          profileId: string;
+          referenceAudioPath: string;
+        };
+        expect(registration.referenceAudioPath).toBe(await realpath(referenceAudioKey));
+        expect(registration.referenceAudioPath).not.toBe('/');
+        return new Response(JSON.stringify({ providerReferenceId: registration.profileId }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      })
+      .mockResolvedValueOnce(
+        new Response(Buffer.from(pcmWav()), {
+          headers: {
+            'content-type': 'audio/wav',
+            'x-ming-conditioning-mode': 'acoustic-reference',
+          },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    await expect(
+      generateVoiceComparisonPreview({
+        ownerId: original.ownerId,
+        request: {
+          profileId: original.id,
+          providerId: 'ming3-tts',
+          text: 'Exact Ming regression text.',
+          language: 'en',
+        },
+      }),
+    ).resolves.toMatchObject({ referenceProvenance: 'processed-reference' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('separates Ming speaker-only previews from existing acoustic-reference cache entries', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    vi.stubEnv('MING3_TTS_BASE_URL', 'http://ming.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const wav = pcmWav();
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { profileId: string };
+      if (url.endsWith('/profiles')) {
+        return new Response(JSON.stringify({ providerReferenceId: body.profileId }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(Buffer.from(wav), {
+        headers: {
+          'content-type': 'audio/wav',
+          'x-ming-conditioning-mode':
+            process.env.MING3_TTS_CONDITIONING_MODE ?? 'acoustic-reference',
+        },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+    const request = {
+      profileId: original.id,
+      providerId: 'ming3-tts' as const,
+      text: 'Exact unchanged comparison text.',
+      language: 'en' as const,
+    };
+
+    const acoustic = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
+    const restored = await generateVoiceComparisonPreview({ ownerId: original.ownerId, request });
+    expect(restored.cacheKey).toBe(acoustic.cacheKey);
+    expect(restored.cached).toBe(true);
+
+    vi.stubEnv('MING3_TTS_CONDITIONING_MODE', 'speaker-embedding-only');
+    const speakerOnly = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request,
+    });
+    expect(speakerOnly.cacheKey).not.toBe(acoustic.cacheKey);
+    expect(speakerOnly.cached).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+      conditioningMode: 'speaker-embedding-only',
+      text: request.text,
+    });
+  });
+
+  it('restores the existing acoustic Ming cache identity unchanged', async () => {
+    vi.stubEnv('MING3_TTS_PREVIEW_ENABLED', 'true');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const cache = await import('@/lib/server/voice-comparison-cache');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({ ...original, referenceAudioKey });
+    const text = 'Restore the existing Ming preview.';
+    const existingKey = cache.createVoiceComparisonCacheKey({
+      ownerId: original.ownerId,
+      profileId: original.id,
+      profileVersion: original.profileVersion,
+      referenceAudioKey,
+      mingReferenceAudioKey: referenceAudioKey,
+      providerId: 'ming3-tts',
+      language: 'en',
+      text,
+      voice: null,
+      style: null,
+      sarvamVoiceId: null,
+      modelVariant: null,
+      generationSettings: null,
+      qwenCloneMode: null,
+      processingMode: 'official-model-runtime-v1',
+      outputCodec: 'wav',
+      providerGenerationParameters: {
+        task: 'TTS',
+        languageId: 'English',
+        useSpeakerEmbedding: true,
+        rawText: true,
+        modelDefaults: true,
+      },
+    });
+    await cache.writeVoiceComparisonCache(original.ownerId, {
+      profileId: original.id,
+      providerId: 'ming3-tts',
+      providerName: 'Ming 3.0 TTS 0.5B',
+      voiceType: 'cloned',
+      language: 'en',
+      audio: {
+        format: 'wav',
+        base64: Buffer.from(pcmWav()).toString('base64'),
+        createdAt: '2026-10-26T00:00:00.000Z',
+      },
+      durationSeconds: 1,
+      generationLatencyMs: 1,
+      generatedAt: '2026-10-26T00:00:00.000Z',
+      cached: false,
+      cacheKey: existingKey,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    const restored = await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request: {
+        profileId: original.id,
+        providerId: 'ming3-tts',
+        text,
+        language: 'en',
+      },
+    });
+
+    expect(restored.cached).toBe(true);
+    expect(restored.cacheKey).toBe(existingKey);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not expose or use another owner profile', async () => {
@@ -615,12 +909,81 @@ describe('voice comparison coordinator', () => {
     expect(bootstrap.providers.find(({ id }) => id === 'sarvam')).toMatchObject({
       configured: false,
       available: false,
-      unavailableReason: 'Not configured',
+      unavailableReason: 'Sarvam AI is disabled on this deployment.',
     });
     expect(bootstrap.providers.find(({ id }) => id === 'chatterbox')).toMatchObject({
       configured: true,
       available: true,
       supportsClassroom: true,
     });
+  });
+
+  it('keeps Chatterbox selectable for a Qwen-first profile before lazy registration', async () => {
+    const { getVoiceComparisonBootstrap } = await import('@/lib/server/voice-comparison');
+    const bootstrap = await getVoiceComparisonBootstrap('usr_owner', {
+      ...profile(),
+      providerReferenceId: undefined,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+      referenceAudioKey: '/private/reference.wav',
+    });
+
+    expect(bootstrap.providers.find(({ id }) => id === 'chatterbox')).toMatchObject({
+      configured: true,
+      available: true,
+      supportsClassroom: true,
+    });
+  });
+
+  it('registers Chatterbox only when explicitly requested for a Qwen-first profile', async () => {
+    vi.stubEnv('VOICE_CLONING_BASE_URL', 'http://chatterbox.test');
+    const storage = await import('@/lib/voice-cloning/storage');
+    const original = profile();
+    const referenceAudioKey = await storage.writeReferenceAudio(
+      original.id,
+      original.ownerId,
+      pcmWav(),
+    );
+    await storage.writeVoiceProfile({
+      ...original,
+      providerReferenceId: undefined,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+      referenceAudioKey,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ providerReferenceId: 'chatterbox-lazy-id' }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(Buffer.from(pcmWav()), { headers: { 'content-type': 'audio/wav' } }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { generateVoiceComparisonPreview } = await import('@/lib/server/voice-comparison');
+
+    await generateVoiceComparisonPreview({
+      ownerId: original.ownerId,
+      request: {
+        profileId: original.id,
+        providerId: 'chatterbox',
+        text: 'Preview this exact narration.',
+        language: 'en',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://chatterbox.test/profiles');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      profileId: original.id,
+      referenceAudioPath: referenceAudioKey,
+      language: 'en',
+      modelVariant: 'v3',
+    });
+    expect(
+      (await storage.readVoiceProfile(original.id, original.ownerId))?.providerReferenceId,
+    ).toBe('chatterbox-lazy-id');
   });
 });

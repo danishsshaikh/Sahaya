@@ -30,8 +30,12 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { VOXCPM_AUTO_VOICE_ID, VOXCPM_TTS_PROVIDER_ID } from '@/lib/audio/voxcpm';
 import { resolveFacultyVoiceSelection } from '@/lib/voice-cloning/synthesis';
-import { TeachingVoiceError } from '@/lib/voice-cloning/types';
-import { enqueueTeachingVoiceJob } from '@/lib/voice-cloning/teaching-voice-jobs';
+import {
+  isVoiceEnhancementMode,
+  TeachingVoiceError,
+  type VoiceEnhancementMode,
+} from '@/lib/voice-cloning/types';
+import { enqueueTeachingVoiceJobDurably } from '@/lib/voice-cloning/teaching-voice-jobs';
 import { normalizeTeachingVoiceLanguageId } from '@/lib/voice-cloning/language';
 import { requireSessionUser } from '@/lib/auth/server';
 import { QwenVoiceCloneError, qwenVoiceCloneErrorMessage } from '@/lib/audio/qwen-voice-clone';
@@ -66,6 +70,8 @@ export async function POST(req: NextRequest) {
       stageId?: string;
       outlineId?: string;
       sceneId?: string;
+      teachingVoiceProviderId?: 'qwen3-tts' | 'ming3-tts';
+      teachingVoiceEnhancementMode?: VoiceEnhancementMode;
     };
     ttsProviderId = body.ttsProviderId;
     ttsVoice = typeof body.ttsVoice === 'string' ? body.ttsVoice.trim() : undefined;
@@ -78,6 +84,26 @@ export async function POST(req: NextRequest) {
         : typeof body.language === 'string'
           ? body.language
           : undefined;
+    if (
+      body.teachingVoiceProviderId !== undefined &&
+      body.teachingVoiceProviderId !== 'qwen3-tts' &&
+      body.teachingVoiceProviderId !== 'ming3-tts'
+    ) {
+      return apiError('INVALID_REQUEST', 400, 'Unsupported course Teaching Voice provider.');
+    }
+    if (
+      body.teachingVoiceEnhancementMode !== undefined &&
+      !isVoiceEnhancementMode(body.teachingVoiceEnhancementMode)
+    ) {
+      return apiError('INVALID_REQUEST', 400, 'Unsupported Qwen narration audio mode.');
+    }
+    const teachingVoiceProviderId =
+      body.teachingVoiceProviderId === 'qwen3-tts' || body.teachingVoiceProviderId === 'ming3-tts'
+        ? body.teachingVoiceProviderId
+        : undefined;
+    const teachingVoiceEnhancementMode = isVoiceEnhancementMode(body.teachingVoiceEnhancementMode)
+      ? body.teachingVoiceEnhancementMode
+      : undefined;
 
     // Validate required fields
     if (!text || !audioId) {
@@ -103,9 +129,15 @@ export async function POST(req: NextRequest) {
           teacherVoiceProfileId,
           user.id,
           requestedLanguage ?? undefined,
+          teachingVoiceProviderId,
         );
-        if (providerId === 'chatterbox' || providerId === 'indicf5' || providerId === 'qwen3-tts') {
-          const { job } = enqueueTeachingVoiceJob({
+        if (
+          providerId === 'chatterbox' ||
+          providerId === 'indicf5' ||
+          providerId === 'qwen3-tts' ||
+          providerId === 'ming3-tts'
+        ) {
+          const { job } = await enqueueTeachingVoiceJobDurably({
             providerId,
             ownerId: user.id,
             profileId: teacherVoiceProfileId,
@@ -115,6 +147,9 @@ export async function POST(req: NextRequest) {
             stageId: typeof body.stageId === 'string' ? body.stageId : undefined,
             outlineId: typeof body.outlineId === 'string' ? body.outlineId : undefined,
             sceneId: typeof body.sceneId === 'string' ? body.sceneId : undefined,
+            ...(providerId === 'qwen3-tts'
+              ? { qwenEnhancementMode: teachingVoiceEnhancementMode }
+              : {}),
           });
           return apiSuccess(
             {

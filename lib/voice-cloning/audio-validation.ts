@@ -102,7 +102,7 @@ export type GeneratedVoiceMasteringPreset =
   | 'chatterbox-clarity'
   | 'chatterbox-enhanced';
 
-export type VoiceReferenceProcessingPreset = 'standard' | 'indicf5-natural';
+export type VoiceReferenceProcessingPreset = 'standard' | 'indicf5-natural' | 'provider-compatible';
 
 export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/webm',
@@ -111,6 +111,7 @@ export const SUPPORTED_RECORDING_MIME_TYPES = new Set([
   'audio/ogg;codecs=opus',
   'audio/mp4',
   'audio/mpeg',
+  'audio/flac',
   'audio/wav',
   'audio/x-wav',
 ]);
@@ -195,7 +196,7 @@ export function validateIncomingClipMetadata(clip: IncomingVoiceClip): void {
   if (!SUPPORTED_RECORDING_MIME_TYPES.has(mimeType)) {
     throw new VoiceRecordingQualityError(
       'decode_failed',
-      'The recording could not be read. Please try recording again.',
+      'The audio file could not be read. Use WAV, MP3, M4A, OGG, FLAC, or WebM audio.',
       `Unsupported audio type: ${clip.mimeType || 'unknown'}`,
     );
   }
@@ -540,9 +541,8 @@ export async function normalizeVoiceEnrollmentRecording(
 
     const { metrics: quality, decision: qualityDecision } =
       await analyzeVoiceRecordingQuality(inputPath);
-    const processingArgs =
-      preset === 'indicf5-natural' ? [] : ['-af', REFERENCE_PREPROCESSING_FILTER];
-    const encodingArgs = preset === 'indicf5-natural' ? ['-c:a', 'pcm_s16le'] : [];
+    const processingArgs = preset === 'standard' ? ['-af', REFERENCE_PREPROCESSING_FILTER] : [];
+    const encodingArgs = preset === 'standard' ? [] : ['-c:a', 'pcm_s16le'];
     await execFileAsync('ffmpeg', [
       '-y',
       '-hide_banner',

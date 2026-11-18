@@ -1,12 +1,26 @@
 import { createHash } from 'node:crypto';
 import { getResourceJobQueue, type ResourceJobSnapshot } from '@/lib/server/resource-job-queue';
+import {
+  cleanupTeachingVoiceArtifacts,
+  findTeachingVoiceArtifactByIdempotencyKey,
+  persistTeachingVoiceArtifact,
+  readTeachingVoiceArtifact,
+  teachingVoiceArtifactSnapshot,
+  TeachingVoiceArtifactInvalidError,
+} from '@/lib/voice-cloning/teaching-voice-artifacts';
 import { synthesizeFacultyVoice } from '@/lib/voice-cloning/synthesis';
+import { createLogger } from '@/lib/logger';
+import type { VoiceEnhancementMode } from '@/lib/voice-cloning/types';
+import { getMing3TtsPreviewServiceConfig } from '@/lib/voice-cloning/config';
+
+const log = createLogger('TeachingVoiceJobs');
 
 export const CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:chatterbox';
 export const INDICF5_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:indicf5';
 export const QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:qwen3-tts';
+export const MING3_TTS_TEACHING_VOICE_RESOURCE_KEY = 'teaching-voice:ming3-tts';
 
-export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5' | 'qwen3-tts';
+export type QueuedTeachingVoiceProvider = 'chatterbox' | 'indicf5' | 'qwen3-tts' | 'ming3-tts';
 
 export interface TeachingVoiceJobResult {
   audio: Uint8Array;
@@ -22,16 +36,50 @@ export interface TeachingVoiceJobInput {
   stageId?: string;
   outlineId?: string;
   sceneId?: string;
+  qwenEnhancementMode?: VoiceEnhancementMode;
 }
 
 export interface QueuedTeachingVoiceJobInput extends TeachingVoiceJobInput {
   providerId: QueuedTeachingVoiceProvider;
 }
 
+export type TeachingVoiceJobErrorCode =
+  | 'TTS_SYNTHESIS_FAILED'
+  | 'TTS_ENHANCEMENT_FAILED'
+  | 'TTS_AUDIO_STORAGE_FAILED';
+
+class TeachingVoiceJobFailure extends Error {
+  constructor(
+    readonly jobErrorCode: TeachingVoiceJobErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'TeachingVoiceJobFailure';
+  }
+}
+
+function safeFailureMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message.replace(/\s+/g, ' ').trim().slice(0, 300)
+    : 'Teaching Voice generation failed.';
+}
+
+function synthesisFailure(error: unknown): TeachingVoiceJobFailure {
+  const message = safeFailureMessage(error);
+  return new TeachingVoiceJobFailure(
+    /enhanc/i.test(message) ? 'TTS_ENHANCEMENT_FAILED' : 'TTS_SYNTHESIS_FAILED',
+    message,
+  );
+}
+
 export function createTeachingVoiceIdempotencyKey(
   input: TeachingVoiceJobInput & { providerId?: QueuedTeachingVoiceProvider },
 ): string {
   const textHash = createHash('sha256').update(input.text).digest('hex');
+  const mingConditioningMode =
+    input.providerId === 'ming3-tts'
+      ? getMing3TtsPreviewServiceConfig().conditioningMode
+      : undefined;
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -43,6 +91,10 @@ export function createTeachingVoiceIdempotencyKey(
         outlineId: input.outlineId ?? null,
         sceneId: input.sceneId ?? null,
         language: input.language ?? null,
+        ...(input.providerId === 'qwen3-tts'
+          ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
+          : {}),
+        ...(mingConditioningMode ? { mingConditioningMode } : {}),
         textHash,
       }),
     )
@@ -52,34 +104,117 @@ export function createTeachingVoiceIdempotencyKey(
 function resourceKeyForProvider(providerId: QueuedTeachingVoiceProvider): string {
   if (providerId === 'indicf5') return INDICF5_TEACHING_VOICE_RESOURCE_KEY;
   if (providerId === 'qwen3-tts') return QWEN3_TTS_TEACHING_VOICE_RESOURCE_KEY;
+  if (providerId === 'ming3-tts') return MING3_TTS_TEACHING_VOICE_RESOURCE_KEY;
   return CHATTERBOX_TEACHING_VOICE_RESOURCE_KEY;
+}
+
+function concurrencyForProvider(providerId: QueuedTeachingVoiceProvider): number {
+  return providerId === 'ming3-tts' ? getMing3TtsPreviewServiceConfig().maxConcurrency : 1;
 }
 
 export function enqueueTeachingVoiceJob(input: QueuedTeachingVoiceJobInput): {
   job: ResourceJobSnapshot;
   reused: boolean;
 } {
+  const idempotencyKey = createTeachingVoiceIdempotencyKey(input);
+  const metadata = {
+    provider: input.providerId,
+    profileId: input.profileId,
+    stageId: input.stageId,
+    outlineId: input.outlineId,
+    sceneId: input.sceneId,
+    ...(input.providerId === 'qwen3-tts'
+      ? { qwenEnhancementMode: input.qwenEnhancementMode ?? 'profile-default' }
+      : {}),
+    ...(input.providerId === 'ming3-tts'
+      ? { mingConditioningMode: getMing3TtsPreviewServiceConfig().conditioningMode }
+      : {}),
+  };
   return getResourceJobQueue().enqueue<TeachingVoiceJobResult>({
     resourceKey: resourceKeyForProvider(input.providerId),
-    concurrency: 1,
+    concurrency: concurrencyForProvider(input.providerId),
     ownerId: input.ownerId,
-    idempotencyKey: createTeachingVoiceIdempotencyKey(input),
-    metadata: {
-      provider: input.providerId,
-      profileId: input.profileId,
-      stageId: input.stageId,
-      outlineId: input.outlineId,
-      sceneId: input.sceneId,
+    idempotencyKey,
+    metadata,
+    run: async (jobId) => {
+      let result: TeachingVoiceJobResult;
+      try {
+        result = await synthesizeFacultyVoice({
+          profileId: input.profileId,
+          ownerId: input.ownerId,
+          text: input.text,
+          language: input.language,
+          queueJobId: jobId,
+          ...(input.providerId === 'qwen3-tts' || input.providerId === 'ming3-tts'
+            ? {
+                providerId: input.providerId,
+                ...(input.providerId === 'qwen3-tts'
+                  ? { qwenEnhancementMode: input.qwenEnhancementMode }
+                  : {}),
+              }
+            : {}),
+        });
+      } catch (error) {
+        throw synthesisFailure(error);
+      }
+      try {
+        const artifact = await persistTeachingVoiceArtifact({
+          jobId,
+          ownerId: input.ownerId,
+          idempotencyKey,
+          audio: result.audio,
+          format: result.format,
+          metadata,
+        });
+        log.info('[TeachingVoiceArtifact]', {
+          event: 'stored',
+          jobId,
+          provider: input.providerId,
+          byteLength: artifact.byteLength,
+          durationSeconds: artifact.durationSeconds,
+        });
+      } catch (error) {
+        const message =
+          error instanceof TeachingVoiceArtifactInvalidError
+            ? error.message
+            : 'Teaching Voice audio could not be stored safely.';
+        throw new TeachingVoiceJobFailure('TTS_AUDIO_STORAGE_FAILED', message);
+      }
+      void cleanupTeachingVoiceArtifacts().catch(() => undefined);
+      return result;
     },
-    run: (jobId) =>
-      synthesizeFacultyVoice({
-        profileId: input.profileId,
-        ownerId: input.ownerId,
-        text: input.text,
-        language: input.language,
-        queueJobId: jobId,
-      }),
   });
+}
+
+export async function enqueueTeachingVoiceJobDurably(input: QueuedTeachingVoiceJobInput): Promise<{
+  job: ResourceJobSnapshot;
+  reused: boolean;
+}> {
+  const idempotencyKey = createTeachingVoiceIdempotencyKey(input);
+  let retained: Awaited<ReturnType<typeof findTeachingVoiceArtifactByIdempotencyKey>> = null;
+  try {
+    retained = await findTeachingVoiceArtifactByIdempotencyKey(input.ownerId, idempotencyKey);
+  } catch (error) {
+    if (!(error instanceof TeachingVoiceArtifactInvalidError)) throw error;
+    // A corrupt/missing retained artifact is never reused. Enqueue a fresh job
+    // under a new id and leave the damaged files untouched for diagnosis.
+    log.warn('[TeachingVoiceArtifact]', {
+      event: 'retained-artifact-unusable',
+      provider: input.providerId,
+      stageId: input.stageId,
+      sceneId: input.sceneId,
+      reason: error.kind,
+    });
+  }
+  if (retained) {
+    log.info('[TeachingVoiceArtifact]', {
+      event: 'retained-job-reused',
+      jobId: retained.manifest.jobId,
+      provider: input.providerId,
+    });
+    return { job: teachingVoiceArtifactSnapshot(retained.manifest), reused: true };
+  }
+  return enqueueTeachingVoiceJob(input);
 }
 
 export function enqueueChatterboxTeachingVoiceJob(input: TeachingVoiceJobInput): {
@@ -98,6 +233,52 @@ export function readTeachingVoiceJobResult(
   ownerId: string,
 ): TeachingVoiceJobResult | null {
   return getResourceJobQueue().result<TeachingVoiceJobResult>(jobId, ownerId);
+}
+
+export async function readTeachingVoiceJobDurably(
+  jobId: string,
+  ownerId: string,
+): Promise<ResourceJobSnapshot | null> {
+  const memory = readTeachingVoiceJob(jobId, ownerId);
+  if (memory) return memory;
+  const retained = await readTeachingVoiceArtifact(jobId, ownerId);
+  return retained ? teachingVoiceArtifactSnapshot(retained.manifest) : null;
+}
+
+export async function readTeachingVoiceJobResultDurably(
+  jobId: string,
+  ownerId: string,
+): Promise<TeachingVoiceJobResult | null> {
+  const memory = readTeachingVoiceJobResult(jobId, ownerId);
+  if (memory) {
+    let existing: Awaited<ReturnType<typeof readTeachingVoiceArtifact>> = null;
+    try {
+      existing = await readTeachingVoiceArtifact(jobId, ownerId);
+    } catch (error) {
+      if (!(error instanceof TeachingVoiceArtifactInvalidError)) throw error;
+    }
+    if (!existing) {
+      const snapshot = readTeachingVoiceJob(jobId, ownerId);
+      try {
+        await persistTeachingVoiceArtifact({
+          jobId,
+          ownerId,
+          idempotencyKey: createHash('sha256').update(`legacy-job:${jobId}`).digest('hex'),
+          audio: memory.audio,
+          format: memory.format,
+          metadata: snapshot?.metadata ?? {},
+        });
+        log.info('[TeachingVoiceArtifact]', { event: 'legacy-job-recovered', jobId });
+      } catch {
+        // The pre-fix bytes are still valuable: serve them once so the browser
+        // can persist the narration even if durable salvage is unavailable.
+        log.warn('[TeachingVoiceArtifact]', { event: 'legacy-job-recovery-failed', jobId });
+      }
+    }
+    return memory;
+  }
+  const retained = await readTeachingVoiceArtifact(jobId, ownerId);
+  return retained ? { audio: retained.audio, format: retained.format } : null;
 }
 
 export function cancelTeachingVoiceJob(jobId: string, ownerId: string): ResourceJobSnapshot | null {

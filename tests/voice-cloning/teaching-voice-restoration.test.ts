@@ -4,58 +4,46 @@ import { act, createElement, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TeachingVoiceCard } from '@/components/voice-cloning/teaching-voice-card';
+import type { PublicVoiceProfile } from '@/lib/voice-cloning/types';
 
+const PROFILE_ID = 'vcp_enhanced_ready';
 const roots: Root[] = [];
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-function readyEnglishProfileResponse(
-  activeEngine: 'chatterbox' | 'qwen3-tts' = 'chatterbox',
-): Response {
-  const original = { format: 'wav', base64: 'cXdlbi1vcmlnaW5hbA==', createdAt: 'now' };
-  return new Response(
-    JSON.stringify({
-      success: true,
-      profile: {
-        id: 'vcp_existing_english',
-        displayName: 'My Teaching Voice',
-        provider: 'chatterbox',
-        language: 'en',
-        languageId: 'hi',
-        status: 'ready',
-        modelVariant: 'v3',
-        enhancementMode: 'resemble-enhance',
-        activeEngine,
-        qwenEnhancementMode: 'standard',
-        previewText:
-          "Newton's first law states that an object remains at rest unless acted upon by an external force.",
-        previewTextLanguageId: 'en',
-        preview: original,
-        previewComparison: { original },
-        ...(activeEngine === 'qwen3-tts'
-          ? {
-              qwenPreview: {
-                previewModel: 'qwen3-tts-1.7b-base',
-                qwenCloneMode: 'speaker-embedding',
-                enhancementMode: 'standard',
-                preview: original,
-                comparison: { original },
-              },
-            }
-          : {}),
-        createdAt: '2026-10-16T07:00:00.000Z',
-        updatedAt: '2026-10-16T07:10:00.000Z',
-        consentTimestamp: '2026-10-16T07:00:00.000Z',
-        consentVersion: '1',
-        profileVersion: 1,
-      },
-      previewModels: ['chatterbox-v3', 'qwen3-tts-1.7b-base'],
-      qwenClassroomEnabled: true,
-      qwenClassroomEnhancementAvailable: false,
-    }),
-    { status: 200, headers: { 'content-type': 'application/json' } },
-  );
+const readyProfile: PublicVoiceProfile = {
+  id: PROFILE_ID,
+  displayName: 'My Teaching Voice',
+  provider: 'chatterbox',
+  language: 'en',
+  languageId: 'en',
+  status: 'ready',
+  activeEngine: 'qwen3-tts',
+  enhancementMode: 'standard',
+  qwenEnhancementMode: 'resemble-enhance',
+  qwenPreview: {
+    previewModel: 'qwen3-tts-1.7b-base',
+    qwenCloneMode: 'speaker-embedding',
+    enhancementMode: 'resemble-enhance',
+    preview: { format: 'wav', base64: 'b3JpZ2luYWw=', createdAt: '2026-10-29T00:00:00Z' },
+    comparison: {
+      original: { format: 'wav', base64: 'b3JpZ2luYWw=', createdAt: '2026-10-29T00:00:00Z' },
+      enhanced: { format: 'wav', base64: 'ZW5oYW5jZA==', createdAt: '2026-10-29T00:00:01Z' },
+    },
+    previewText: 'Welcome to the course.',
+  },
+  createdAt: '2026-10-26T00:00:00Z',
+  updatedAt: '2026-10-29T00:00:00Z',
+  consentTimestamp: '2026-10-26T00:00:00Z',
+  consentVersion: 'faculty-self-voice-v1',
+  profileVersion: 1,
+};
+
+function response(): Response {
+  return new Response(JSON.stringify({ success: true, profile: readyProfile }), {
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 function Harness() {
@@ -66,15 +54,16 @@ function Harness() {
   });
 }
 
-async function mountTeachingVoiceCard(): Promise<HTMLElement> {
+async function mount(): Promise<HTMLElement> {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
   roots.push(root);
-  act(() => root.render(createElement(Harness)));
   await act(async () => {
+    root.render(createElement(Harness));
     await new Promise((settle) => setTimeout(settle, 0));
   });
+  await act(async () => new Promise((settle) => setTimeout(settle, 0)));
   return host;
 }
 
@@ -82,7 +71,7 @@ beforeEach(() => {
   window.localStorage.clear();
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => readyEnglishProfileResponse()),
+    vi.fn(async () => response()),
   );
 });
 
@@ -93,84 +82,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('Teaching Voice profile restoration', () => {
-  it('restores a ready English Chatterbox profile after refresh', async () => {
-    window.localStorage.setItem(
-      'sahaya.teachingVoice.selection.v1.en',
-      JSON.stringify({
-        enabled: true,
-        profileId: 'vcp_stale_english',
-        enhancementMode: 'standard',
-      }),
-    );
-    window.localStorage.setItem(
-      'sahaya.teachingVoice.selection.v1.hi',
-      JSON.stringify({ enabled: false }),
-    );
+describe('Teaching Voice restoration', () => {
+  it('restores the enhanced ready voice and its playable sample after reload', async () => {
+    const host = await mount();
 
-    const firstRender = await mountTeachingVoiceCard();
-    expect(firstRender.textContent).toContain('Using Voice');
-    expect(firstRender.textContent).toContain('Manage Voice');
-    expect(firstRender.textContent).not.toContain('Create Voice');
-    const firstManage = [...firstRender.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
-    );
-    if (!(firstManage instanceof HTMLButtonElement))
-      throw new Error('Manage Voice button not found');
-    act(() => firstManage.click());
-    expect(firstRender.querySelector('[aria-label="Original Chatterbox preview"]')).not.toBeNull();
-
-    const restoredSelection = JSON.parse(
-      window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}',
-    );
-    expect(restoredSelection).toEqual({
+    expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?language=en');
+    expect(host.textContent).toContain('Voice ready');
+    const audio = host.querySelector('[aria-label="Teaching Voice sample"]');
+    expect(audio).not.toBeNull();
+    expect(audio?.getAttribute('src')).toContain('data:audio/wav;base64,ZW5oYW5jZA==');
+    expect(
+      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
+    ).toMatchObject({
       enabled: true,
-      profileId: 'vcp_existing_english',
+      profileId: PROFILE_ID,
       enhancementMode: 'resemble-enhance',
     });
-    expect(
-      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.hi') || '{}'),
-    ).toEqual({ enabled: false });
-
-    act(() => roots.shift()?.unmount());
-    firstRender.remove();
-
-    const refreshedRender = await mountTeachingVoiceCard();
-    expect(refreshedRender.textContent).toContain('Using Voice');
-    expect(refreshedRender.textContent).toContain('Manage Voice');
-    const refreshedManage = [...refreshedRender.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
-    );
-    if (!(refreshedManage instanceof HTMLButtonElement)) {
-      throw new Error('Manage Voice button not found after refresh');
-    }
-    act(() => refreshedManage.click());
-    expect(
-      refreshedRender.querySelector('[aria-label="Original Chatterbox preview"]'),
-    ).not.toBeNull();
-    expect(fetch).toHaveBeenCalledWith('/api/voice-cloning/profile?language=en');
   });
 
-  it('restores the active Qwen engine and cached preview after refresh', async () => {
-    vi.mocked(fetch).mockImplementation(async () => readyEnglishProfileResponse('qwen3-tts'));
-
-    const firstRender = await mountTeachingVoiceCard();
-    expect(firstRender.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
-    const manage = [...firstRender.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent?.trim() === 'Manage Voice',
+  it('does not silently re-enable a voice the faculty explicitly disabled', async () => {
+    window.localStorage.setItem(
+      'sahaya.teachingVoice.selection.v1.en',
+      JSON.stringify({ enabled: false }),
     );
-    if (!(manage instanceof HTMLButtonElement)) throw new Error('Manage Voice button not found');
-    act(() => manage.click());
+    const host = await mount();
 
-    const qwen = [...firstRender.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes('Qwen3-TTS 1.7B'),
+    expect(host.textContent).toContain('Voice ready');
+    const use = [...host.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Use Voice',
     );
-    expect(qwen?.getAttribute('aria-pressed')).toBe('true');
-    expect(firstRender.querySelector('[aria-label="Original Qwen3-TTS preview"]')).not.toBeNull();
-
-    act(() => roots.shift()?.unmount());
-    firstRender.remove();
-    const refreshedRender = await mountTeachingVoiceCard();
-    expect(refreshedRender.textContent).toContain('Teaching Voice selected: Qwen3-TTS 1.7B');
+    expect(use).toBeDefined();
+    expect(
+      JSON.parse(window.localStorage.getItem('sahaya.teachingVoice.selection.v1.en') || '{}'),
+    ).toMatchObject({ enabled: false });
   });
 });

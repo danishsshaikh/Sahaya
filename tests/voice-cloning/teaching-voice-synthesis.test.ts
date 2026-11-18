@@ -19,11 +19,17 @@ const mocks = vi.hoisted(() => ({
   processQwenAudio: vi.fn(),
   masterAudio: vi.fn(),
   enhancementAllowed: vi.fn(),
+  mingEnabled: vi.fn(),
+  synthesizeMing: vi.fn(),
 }));
 vi.mock('@/lib/voice-cloning/config', () => ({
   isVoiceCloningServerEnabled: () => true,
   isQwen3TtsClassroomEnabled: () => true,
+  isMing3TtsPreviewEnabled: mocks.mingEnabled,
   isVoiceEnhancementAllowed: mocks.enhancementAllowed,
+}));
+vi.mock('@/lib/server/ming3-tts', () => ({
+  synthesizeMing3TeachingVoice: mocks.synthesizeMing,
 }));
 vi.mock('@/lib/voice-cloning/storage', () => ({
   readVoiceProfile: mocks.read,
@@ -49,6 +55,13 @@ beforeEach(() => {
   mocks.masterAudio.mockReset();
   mocks.enhancementAllowed.mockReset();
   mocks.enhancementAllowed.mockReturnValue(true);
+  mocks.mingEnabled.mockReturnValue(true);
+  mocks.synthesizeMing.mockResolvedValue({
+    audio: new Uint8Array([3, 1, 4]),
+    format: 'wav',
+    durationSeconds: 1,
+    referenceProvenance: 'processed-reference',
+  });
   profile = {
     id: 'vcp_example',
     ownerId: 'usr_example',
@@ -93,12 +106,12 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function busyError() {
+function busyError(provider: 'chatterbox' | 'qwen3-tts' = 'chatterbox') {
   return new TeachingVoiceProviderOperationError(
     'Teaching Voice service is busy. Try again after the current generation finishes.',
     429,
     {
-      provider: 'chatterbox',
+      provider,
       endpoint: '/synthesize',
       operation: 'synthesis',
       providerStatus: 429,
@@ -107,6 +120,35 @@ function busyError() {
 }
 
 describe('profile-specific synthesis and recovery', () => {
+  it('routes a new Ming Teaching Voice through Ming without enhancement or fallback', async () => {
+    profile = { ...profile, activeEngine: 'ming3-tts' };
+
+    await expect(synthesizeFacultyVoice(request)).resolves.toEqual({
+      audio: new Uint8Array([3, 1, 4]),
+      format: 'wav',
+    });
+
+    expect(mocks.synthesizeMing).toHaveBeenCalledExactlyOnceWith({
+      profile,
+      text: request.text,
+    });
+    expect(mocks.resolve).not.toHaveBeenCalled();
+    expect(mocks.processAudio).not.toHaveBeenCalled();
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
+    expect(mocks.masterAudio).not.toHaveBeenCalled();
+  });
+
+  it('reports a disabled Ming service and never silently switches providers', async () => {
+    profile = { ...profile, activeEngine: 'ming3-tts' };
+    mocks.mingEnabled.mockReturnValue(false);
+
+    await expect(resolveFacultyVoiceSelection(profile.id, profile.ownerId, 'en')).rejects.toThrow(
+      'Ming service is not enabled',
+    );
+    expect(mocks.resolve).not.toHaveBeenCalled();
+    expect(mocks.synthesizeMing).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['chatterbox', 'en'],
     ['indicf5', 'hi'],
@@ -228,7 +270,7 @@ describe('profile-specific synthesis and recovery', () => {
   it('bounds provider-busy retries by elapsed wait time', async () => {
     vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
     vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '20');
-    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_WAIT_MS', '2');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_WAIT_MS', '1');
     mocks.synthesize.mockRejectedValue(busyError());
 
     await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 429 });
@@ -349,6 +391,116 @@ describe('profile-specific synthesis and recovery', () => {
       }),
     );
     expect(result.audio).toEqual(new Uint8Array([1]));
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it('uses the course-selected Qwen provider and skips enhancement for Original mode', async () => {
+    profile = {
+      ...profile,
+      activeEngine: 'chatterbox',
+      qwenEnhancementMode: 'resemble-enhance',
+    };
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+
+    await expect(
+      resolveFacultyVoiceSelection(profile.id, profile.ownerId, 'en', 'qwen3-tts'),
+    ).resolves.toEqual({ providerId: 'qwen3-tts', synthesisLanguage: 'en' });
+    await expect(
+      synthesizeFacultyVoice({
+        ...request,
+        providerId: 'qwen3-tts',
+        qwenEnhancementMode: 'standard',
+      }),
+    ).resolves.toEqual({ audio: new Uint8Array([1]), format: 'wav' });
+
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith('qwen3-tts');
+    expect(mocks.processQwenAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        attemptEnhancement: false,
+        originalMasteringPreset: null,
+        enhancedMasteringPreset: null,
+      }),
+    );
+  });
+
+  it('honors explicit course-selected Enhanced mode even when the profile setting is Original', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts', qwenEnhancementMode: 'standard' };
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([1]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([9]), format: 'wav' },
+    });
+
+    await expect(
+      synthesizeFacultyVoice({
+        ...request,
+        providerId: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+      }),
+    ).resolves.toEqual({ audio: new Uint8Array([9]), format: 'wav' });
+    expect(mocks.processQwenAudio).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ attemptEnhancement: true }),
+    );
+  });
+
+  it('recovers a bounded Qwen busy response before enhancement runs once', async () => {
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    vi.stubEnv('TEACHING_VOICE_BUSY_MAX_RETRIES', '2');
+    profile = {
+      ...profile,
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+    };
+    mocks.synthesize
+      .mockRejectedValueOnce(busyError('qwen3-tts'))
+      .mockResolvedValueOnce({ audio: new Uint8Array([4]), format: 'wav' });
+    mocks.processQwenAudio.mockResolvedValueOnce({
+      original: { audio: new Uint8Array([4]), format: 'wav' },
+      enhanced: { audio: new Uint8Array([8]), format: 'wav' },
+    });
+
+    await expect(synthesizeFacultyVoice(request)).resolves.toEqual({
+      audio: new Uint8Array([8]),
+      format: 'wav',
+    });
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.processQwenAudio).toHaveBeenCalledOnce();
+  });
+
+  it('does not spend the generic twenty-retry budget on a persistently busy Qwen worker', async () => {
+    vi.stubEnv('TEACHING_VOICE_BUSY_RETRY_BASE_MS', '1');
+    profile = { ...profile, activeEngine: 'qwen3-tts' };
+    mocks.synthesize.mockRejectedValue(busyError('qwen3-tts'));
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 429 });
+
+    expect(mocks.synthesize).toHaveBeenCalledTimes(2);
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
+  });
+
+  it('does not enhance or persist a deadline-stopped partial Qwen result', async () => {
+    profile = { ...profile, activeEngine: 'qwen3-tts', qwenEnhancementMode: 'resemble-enhance' };
+    mocks.synthesize.mockRejectedValue(
+      new TeachingVoiceProviderOperationError(
+        'Qwen3-TTS generation timed out before complete audio was produced.',
+        504,
+        {
+          provider: 'qwen3-tts',
+          endpoint: '/synthesize',
+          operation: 'synthesis',
+          providerStatus: 504,
+        },
+      ),
+    );
+
+    await expect(synthesizeFacultyVoice(request)).rejects.toMatchObject({ status: 504 });
+
+    expect(mocks.synthesize).toHaveBeenCalledOnce();
+    expect(mocks.processQwenAudio).not.toHaveBeenCalled();
     expect(mocks.write).not.toHaveBeenCalled();
   });
 

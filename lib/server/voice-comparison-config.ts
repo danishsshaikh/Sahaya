@@ -31,6 +31,15 @@ export function getSarvamVoiceCloningConfig(): ExternalVoiceProviderConfig {
   };
 }
 
+export function externalVoiceProviderUnavailableReason(
+  providerName: string,
+  config: ExternalVoiceProviderConfig,
+): string | undefined {
+  if (!config.enabled) return `${providerName} is disabled on this deployment.`;
+  if (!config.apiKey) return `${providerName} credentials are not configured on this server.`;
+  return undefined;
+}
+
 export function getBodhanTtsConfig(): ExternalVoiceProviderConfig {
   return {
     enabled: envFlag('BODHAN_TTS_ENABLED'),

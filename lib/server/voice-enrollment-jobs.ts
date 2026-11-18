@@ -14,10 +14,7 @@ import {
 } from '@/lib/voice-cloning/language';
 import {
   createVoiceProfileId,
-  deleteVoiceProfileAssets,
-  findCurrentVoiceProfile,
   findVoiceProfileByEnrollmentAttempt,
-  readVoiceProfile,
   referenceAudioExists,
   resolveReferenceAudioPath,
   writeReferenceAudio,
@@ -49,6 +46,8 @@ import {
   getChatterboxDefaultModelVariant,
   isVoiceEnhancementAllowed,
 } from '@/lib/voice-cloning/config';
+import { activateEnhancedQwenTeachingVoice } from '@/lib/server/qwen3-tts-preview';
+import { activateMing3TeachingVoice } from '@/lib/server/ming3-tts';
 
 const log = createLogger('VoiceEnrollmentJob');
 
@@ -75,6 +74,7 @@ export interface VoiceEnrollmentJob {
   completedAt?: number;
   languageId?: string;
   provider?: 'chatterbox' | 'indicf5';
+  workflow?: 'provider-default' | 'enhanced-qwen' | 'ming-default';
   profileId?: string;
   result?: VoiceProfile;
   error?: string;
@@ -97,8 +97,10 @@ interface VoiceEnrollmentInput {
   displayName: string;
   languageId: string;
   providerId: 'chatterbox' | 'indicf5';
-  referenceText: string;
+  referenceText?: string;
   recording: IncomingVoiceClip;
+  enrollmentSource: 'microphone' | 'audio-import';
+  workflow: 'provider-default' | 'enhanced-qwen' | 'ming-default';
 }
 
 const TERMINAL_JOB_TTL_MS = 30 * 60 * 1000;
@@ -327,6 +329,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
   ownerUserId: string;
   languageId: string;
   provider: 'chatterbox' | 'indicf5';
+  workflow: 'provider-default' | 'enhanced-qwen' | 'ming-default';
 }): { job: VoiceEnrollmentJob; reused: boolean } {
   const now = nowMs();
   cleanupVoiceEnrollmentJobs(now);
@@ -345,6 +348,7 @@ export function createOrReuseVoiceEnrollmentJob(input: {
     updatedAt: now,
     languageId: input.languageId,
     provider: input.provider,
+    workflow: input.workflow,
     profileId: existing?.profileId,
   };
   jobs.set(input.attemptId, job);
@@ -426,9 +430,11 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       recordingBytes: input.recording.bytes.byteLength,
     });
     const normalizedReference =
-      input.providerId === 'indicf5'
-        ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
-        : await normalizeVoiceEnrollmentRecording(input.recording);
+      input.enrollmentSource === 'audio-import'
+        ? await normalizeVoiceEnrollmentRecording(input.recording, 'provider-compatible')
+        : input.providerId === 'indicf5'
+          ? await normalizeVoiceEnrollmentRecording(input.recording, 'indicf5-natural')
+          : await normalizeVoiceEnrollmentRecording(input.recording);
     log.info('voice enrollment quality check passed', {
       attemptId: input.attemptId,
       operation: 'enroll',
@@ -450,10 +456,6 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       input.ownerUserId,
       input.attemptId,
     );
-    const previousProfile =
-      existingAttemptProfile?.replacesProfileId !== undefined
-        ? await readVoiceProfile(existingAttemptProfile.replacesProfileId, input.ownerUserId)
-        : await findCurrentVoiceProfile(input.ownerUserId, input.languageId, true);
     const profileId = existingAttemptProfile?.id ?? createVoiceProfileId();
     const now = new Date().toISOString();
     profile = {
@@ -478,8 +480,9 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       consentTimestamp: existingAttemptProfile?.consentTimestamp ?? now,
       consentVersion: VOICE_CLONING_CONSENT_VERSION,
       profileVersion: 1,
-      replacesProfileId: existingAttemptProfile?.replacesProfileId ?? previousProfile?.id,
+      replacesProfileId: undefined,
       enrollmentAttemptId: input.attemptId,
+      enrollmentSource: input.enrollmentSource,
       providerReferenceId: undefined,
       preview: undefined,
       previewComparison: undefined,
@@ -527,6 +530,47 @@ async function processVoiceEnrollment(input: VoiceEnrollmentInput): Promise<Voic
       originalRecordingRetained: true,
       originalRecordingMimeType: input.recording.mimeType,
     });
+
+    if (input.workflow === 'ming-default') {
+      currentPhase = 'provider_registration';
+      updateJob(input.attemptId, { phase: currentPhase });
+      const readyProfile = await activateMing3TeachingVoice(profile, input.ownerUserId, {
+        allowPreReadyProfile: true,
+      });
+      currentPhase = 'finalizing';
+      updateJob(input.attemptId, { phase: currentPhase });
+      log.info('Ming Teaching Voice enrolled', {
+        attemptId: input.attemptId,
+        profileId,
+        operation: 'enroll',
+        status: readyProfile.status,
+        language: input.languageId,
+        provider: 'ming3-tts',
+        durationMs: nowMs() - startedAt,
+        qualityDecision: normalizedReference.qualityDecision.severity,
+      });
+      return readyProfile;
+    }
+
+    if (input.workflow === 'enhanced-qwen') {
+      currentPhase = 'preview_generation';
+      updateJob(input.attemptId, { phase: currentPhase });
+      const readyProfile = await activateEnhancedQwenTeachingVoice(profile, input.ownerUserId);
+      currentPhase = 'finalizing';
+      updateJob(input.attemptId, { phase: currentPhase });
+      log.info('enhanced Teaching Voice enrolled', {
+        attemptId: input.attemptId,
+        profileId,
+        operation: 'enroll',
+        status: readyProfile.status,
+        language: input.languageId,
+        provider: 'qwen3-tts',
+        enhancement: 'resemble-enhance',
+        durationMs: nowMs() - startedAt,
+        qualityDecision: normalizedReference.qualityDecision.severity,
+      });
+      return readyProfile;
+    }
 
     const config: VoiceConfiguration = {
       languageId: input.languageId,
@@ -709,13 +753,48 @@ export async function parseVoiceEnrollmentForm(
     throw new TeachingVoiceError('A normalized Teaching Voice language is required.');
   }
   const providerId = newTeachingVoiceProvider(languageId);
-  const phrase = getVoiceEnrollmentPhrases(languageId).find(
-    (item) => item.id === formData.get('phraseId'),
-  );
-  if (!phrase || formData.get('referenceText') !== phrase.text) {
-    throw new TeachingVoiceError(
-      'The enrollment paragraph has changed. Reload and record the displayed paragraph again.',
+  const requestedWorkflow = formData.get('workflow');
+  const workflow =
+    requestedWorkflow === 'enhanced-qwen' || requestedWorkflow === 'ming-default'
+      ? requestedWorkflow
+      : 'provider-default';
+  if ((workflow === 'enhanced-qwen' || workflow === 'ming-default') && languageId !== 'en') {
+    throw new TeachingVoiceError('The simplified Teaching Voice workflow requires English audio.');
+  }
+  const enrollmentSource =
+    formData.get('enrollmentSource') === 'audio-import' ? 'audio-import' : 'microphone';
+  let referenceText: string | undefined;
+  if (enrollmentSource === 'audio-import') {
+    referenceText =
+      typeof formData.get('referenceText') === 'string'
+        ? String(formData.get('referenceText')).trim()
+        : '';
+    if (referenceText.length > 2000) {
+      throw new TeachingVoiceError(
+        'The imported recording transcript must be 2000 characters or fewer.',
+      );
+    }
+    referenceText ||= undefined;
+    if ((workflow === 'enhanced-qwen' || workflow === 'ming-default') && !referenceText) {
+      throw new TeachingVoiceError(
+        'Generate or enter an accurate transcript for the uploaded audio before creating the voice.',
+      );
+    }
+    if (providerId === 'indicf5' && !referenceText) {
+      throw new TeachingVoiceError(
+        'IndicF5 requires the exact words spoken in the imported recording. Use configured transcription or enter and verify the transcript.',
+      );
+    }
+  } else {
+    const phrase = getVoiceEnrollmentPhrases(languageId).find(
+      (item) => item.id === formData.get('phraseId'),
     );
+    if (!phrase || formData.get('referenceText') !== phrase.text) {
+      throw new TeachingVoiceError(
+        'The enrollment paragraph has changed. Reload and record the displayed paragraph again.',
+      );
+    }
+    referenceText = phrase.text;
   }
   return {
     attemptId,
@@ -723,8 +802,10 @@ export async function parseVoiceEnrollmentForm(
     displayName,
     languageId,
     providerId,
-    referenceText: phrase.text,
+    referenceText,
     recording: await readEnrollmentRecording(formData),
+    enrollmentSource,
+    workflow,
   };
 }
 
@@ -749,6 +830,7 @@ export async function startVoiceEnrollment(input: VoiceEnrollmentInput): Promise
       completedAt: now,
       languageId: input.languageId,
       provider: input.providerId,
+      workflow: input.workflow,
       profileId: completedProfile.id,
       result: completedProfile,
     };
@@ -761,6 +843,7 @@ export async function startVoiceEnrollment(input: VoiceEnrollmentInput): Promise
     ownerUserId: input.ownerUserId,
     languageId: input.languageId,
     provider: input.providerId,
+    workflow: input.workflow,
   });
   return { job, reused };
 }
@@ -799,38 +882,6 @@ export async function acceptVoiceProfilePreview(
   };
   await writeVoiceProfile(next);
   await markVoiceConfigured(ownerId);
-  if (profile.replacesProfileId) {
-    const previousProfile = await readVoiceProfile(profile.replacesProfileId, ownerId);
-    if (
-      previousProfile &&
-      previousProfile.ownerId === ownerId &&
-      resolveVoiceProfileReferenceLanguage(previousProfile) ===
-        resolveVoiceProfileReferenceLanguage(profile) &&
-      previousProfile.status !== 'deleted'
-    ) {
-      if (previousProfile.providerReferenceId) {
-        await getVoiceCloningProvider(resolveVoiceProfileProvider(previousProfile))
-          .deleteProfile({ providerReferenceId: previousProfile.providerReferenceId })
-          .catch(() => log.warn('Could not remove replaced Teaching Voice service registration'));
-      }
-      await deleteVoiceProfileAssets(previousProfile);
-      await writeVoiceProfile({
-        ...previousProfile,
-        status: 'deleted',
-        referenceAudioKey: undefined,
-        originalRecording: undefined,
-        referenceText: undefined,
-        providerReferenceId: undefined,
-        preview: undefined,
-        previewComparison: undefined,
-        previewTextLanguageId: undefined,
-        previewVariants: undefined,
-        draftPreview: undefined,
-        qwenPreviewCache: undefined,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-  }
   return next;
 }
 

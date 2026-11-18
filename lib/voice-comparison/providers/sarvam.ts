@@ -30,6 +30,8 @@ interface SarvamSynthesisResponse {
   audio_duration?: unknown;
 }
 
+type SarvamOperation = 'voice_creation' | 'preview_generation';
+
 export interface SarvamVoiceCreationResult {
   voiceId: string;
   referenceText?: string;
@@ -51,7 +53,14 @@ const SARVAM_REFERENCE_MIME_TYPES = new Map<string, { type: string; extension: s
   ['audio/ogg', { type: 'audio/ogg', extension: 'opus' }],
   ['audio/ogg;codecs=opus', { type: 'audio/ogg', extension: 'opus' }],
   ['audio/aac', { type: 'audio/aac', extension: 'aac' }],
+  ['audio/mulaw', { type: 'audio/mulaw', extension: 'mulaw' }],
+  ['audio/alaw', { type: 'audio/alaw', extension: 'alaw' }],
+  ['audio/l16', { type: 'audio/l16', extension: 'l16' }],
+  ['audio/linear16', { type: 'audio/linear16', extension: 'linear16' }],
 ]);
+
+export const SARVAM_INLINE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
+export const SARVAM_INLINE_REFERENCE_MAX_SECONDS = 15;
 
 export function sarvamReferenceUploadType(mimeType: string) {
   return SARVAM_REFERENCE_MIME_TYPES.get(mimeType.trim().toLowerCase()) ?? null;
@@ -158,7 +167,12 @@ export class SarvamVoiceCloningPreviewProvider {
   }
 
   async synthesize(input: {
-    voiceId: string;
+    voiceId?: string;
+    referenceAudio?: {
+      bytes: Uint8Array;
+      mimeType: string;
+      durationSeconds: number;
+    };
     text: string;
     language: VoiceComparisonLanguageCode;
     signal?: AbortSignal;
@@ -169,11 +183,51 @@ export class SarvamVoiceCloningPreviewProvider {
     if (input.text.length < 1 || input.text.length > 1000) {
       throw new TeachingVoiceError('Sarvam AI preview segments must contain 1 to 1000 characters.');
     }
+    if (Boolean(input.voiceId) === Boolean(input.referenceAudio)) {
+      throw new TeachingVoiceError(
+        'Sarvam AI requires exactly one saved clone or authorized reference recording.',
+      );
+    }
+    const uploadType = input.referenceAudio
+      ? sarvamReferenceUploadType(input.referenceAudio.mimeType)
+      : null;
+    if (input.referenceAudio) {
+      if (!uploadType) {
+        throw new TeachingVoiceError(
+          'The original Teaching Voice recording format is not supported by Sarvam AI.',
+        );
+      }
+      if (
+        input.referenceAudio.bytes.byteLength === 0 ||
+        input.referenceAudio.bytes.byteLength > SARVAM_INLINE_REFERENCE_MAX_BYTES
+      ) {
+        throw new TeachingVoiceError(
+          'Sarvam AI inline voice cloning requires a reference recording no larger than 10 MB.',
+        );
+      }
+      if (
+        !Number.isFinite(input.referenceAudio.durationSeconds) ||
+        input.referenceAudio.durationSeconds <= 0 ||
+        input.referenceAudio.durationSeconds > SARVAM_INLINE_REFERENCE_MAX_SECONDS
+      ) {
+        throw new TeachingVoiceError(
+          'Sarvam AI inline voice cloning requires a reference recording no longer than 15 seconds.',
+        );
+      }
+    }
     const response = await this.request(
       '/voices/clone',
       () => {
         const form = new FormData();
-        form.set('voice_id', input.voiceId);
+        if (input.voiceId) {
+          form.set('voice_id', input.voiceId);
+        } else if (input.referenceAudio && uploadType) {
+          form.set(
+            'ref_audio',
+            new Blob([Buffer.from(input.referenceAudio.bytes)], { type: uploadType.type }),
+            `reference.${uploadType.extension}`,
+          );
+        }
         form.set('text', input.text);
         form.set('language_code', languageCode);
         form.set('output_audio_codec', 'wav');
@@ -209,7 +263,7 @@ export class SarvamVoiceCloningPreviewProvider {
   private async request(
     endpoint: string,
     init: () => RequestInit,
-    operation: 'voice_creation' | 'preview_generation',
+    operation: SarvamOperation,
     signal: AbortSignal | undefined,
     retryRateLimit: boolean,
   ): Promise<Response> {
@@ -234,11 +288,7 @@ export class SarvamVoiceCloningPreviewProvider {
     }
   }
 
-  private throwProviderError(
-    response: Response,
-    body: unknown,
-    operation: 'voice_creation' | 'preview_generation',
-  ): never {
+  private throwProviderError(response: Response, body: unknown, operation: SarvamOperation): never {
     const mapped = providerStatusMessage('Sarvam AI', response.status);
     throw new ExternalVoiceProviderError(mapped.message, mapped.status, 'SARVAM_UPSTREAM_ERROR', {
       provider: 'sarvam',

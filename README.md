@@ -123,6 +123,43 @@ https://github.com/user-attachments/assets/8f3f1e5f-1468-4e93-8054-afeeea683a61
 
 ---
 
+## Sahaya container deployment
+
+This Sahaya branch extends OpenMAIC with authenticated Teaching Voice enrollment, cloned classroom
+narration, Ming as the default engine for new English Teaching Voices, Qwen Original/Enhanced,
+Sarvam cloned voices, and Bodhan Indic-Speak.
+
+New contributors and university administrators can choose either runtime:
+
+- **Docker:** existing Compose deployment for developers and Docker-based institutions.
+- **Podman:** native, rootless-first deployment for university Linux/GPU servers. Docker is not
+  required, and GPU assignment uses explicit NVIDIA CDI device names.
+
+Start with [the container getting-started guide](docs/GETTING_STARTED.md), then use the dedicated
+[Docker guide](docs/DEPLOY_WITH_DOCKER.md) or [Podman guide](docs/DEPLOY_WITH_PODMAN.md). University
+IT teams should also read the [administrator, privacy, backup, and recovery guide](docs/UNIVERSITY_DEPLOYMENT.md).
+The [architecture and provider matrix](docs/ARCHITECTURE.md) distinguishes implemented, optional,
+external, and not-yet-container-validated services.
+
+```bash
+cp .env.example .env
+chmod 600 .env
+
+# Docker, no local GPU
+scripts/deployment-preflight.sh --runtime docker --mode basic
+docker compose up --build --wait
+
+# Podman, no local GPU
+deploy/podman/sahaya-podman --mode basic preflight
+deploy/podman/sahaya-podman --mode basic build
+deploy/podman/sahaya-podman --mode basic start
+```
+
+Neither path starts local GPU models by default. Configuration validation does not prove real CUDA
+inference; perform an explicit authorized live test on the target server.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -328,11 +365,250 @@ Or manually:
 
 ### Docker Deployment
 
+For the short newcomer flow and runtime comparison, see
+[Sahaya container deployment](#sahaya-container-deployment). Podman users should follow the
+[native Podman guide](docs/DEPLOY_WITH_PODMAN.md); `podman compose` is not required.
+
+The default Compose stack is intentionally API-only: one Sahaya/OpenMAIC app
+container with durable server-owned data. It does not download or start a local
+model and it binds the web UI to host loopback. Optional profiles add PostgreSQL,
+video rendering, or individual NVIDIA inference services.
+
+#### Quick start (external APIs, no local GPU)
+
+Requirements: Docker Engine 24+ with the Compose v2 plugin, approximately 4 GiB
+of free RAM for the application build, and credentials for at least one LLM
+provider. Copy the example to `.env`, not only `.env.local`: Compose uses `.env`
+when it expands the `NEXT_PUBLIC_*` image-build arguments.
+
 ```bash
-cp .env.example .env.local
-# Edit .env.local with your API keys, then:
-docker compose up --build
+cp .env.example .env
+# Edit .env. Set one LLM provider/model and only the speech providers you use.
+docker compose config --quiet
+docker compose up --build --wait
 ```
+
+Open <http://localhost:3000>. API keys stay server-side; never put a secret in a
+`NEXT_PUBLIC_*` variable. Sarvam cloning and Bodhan use their existing HTTPS
+adapters when `SARVAM_VOICE_CLONING_ENABLED` / `BODHAN_TTS_ENABLED` and the
+corresponding server key are set. They do not need a local GPU container.
+
+The app health check is `GET /api/health`. Verify it without publishing another
+port:
+
+```bash
+docker compose ps
+curl --fail http://127.0.0.1:3000/api/health
+docker compose logs --tail=100 openmaic
+```
+
+The named `openmaic-data` volume holds account files, Teaching Voice profiles and
+recordings, retained generation artifacts, classroom JSON/media, and narration
+audio beneath `/app/data`. Rebuilding an image does not replace it. PostgreSQL
+uses `openmaic-postgres`; model caches use `sahaya-huggingface-cache`. Credentials
+remain in the ignored host `.env` file and are not copied into an image.
+
+Browser-only classrooms still live in that browser's IndexedDB. A Docker volume
+cannot preserve browser storage. Export important browser-only courses and/or
+enable the PostgreSQL profile so the application's authenticated import and
+server-persistence paths can retain server copies. Do not clear site data and
+expect Compose to reconstruct it.
+
+#### Optional local Gemma endpoint (llama.cpp)
+
+Download an authorized Gemma GGUF explicitly into a host directory; Compose does
+not download weights at startup. Set `GEMMA_MODEL_DIR`, `GEMMA_GGUF_FILE`, and a
+model name in `.env`, for example:
+
+```env
+GEMMA_MODEL_DIR=./.models/gemma
+GEMMA_GGUF_FILE=gemma.gguf
+GEMMA_GPU_DEVICE=0
+OPENAI_API_KEY=local-not-a-secret
+OPENAI_BASE_URL=http://llama-gemma:8080/v1
+OPENAI_MODELS=gemma-local
+DEFAULT_MODEL=openai:gemma-local
+```
+
+Then start only that GPU profile:
+
+```bash
+docker compose --profile gpu-gemma up --build --wait
+docker compose exec openmaic wget -qO- http://llama-gemma:8080/health
+```
+
+`llama-gemma:8080` is private to the Compose `inference` network. It has no host
+port. The checkpoint mount is read-only. Choose GGUF quantization, context size,
+and GPU layers for the actual card; their combined memory use determines VRAM,
+so there is no honest one-size-fits-all number.
+
+#### Optional Ming 3.0 TTS 0.5B (default Teaching Voice)
+
+New English Teaching Voice enrollment and new courses use Ming when its feature
+gate is enabled. Sahaya does not silently fall back if Ming is unavailable.
+Existing course-specific provider selections and existing Qwen audio remain
+unchanged.
+
+The image build requires an explicit checkout of the official Ming source and an
+explicit local model directory. Pin the source to a reviewed commit and record
+that commit in deployment notes; do not build from an unrecorded moving branch.
+
+```bash
+mkdir -p .models/sources .models/ming3-tts
+git clone https://github.com/inclusionAI/Ming-3.0-tts.git .models/sources/ming3-tts
+git -C .models/sources/ming3-tts checkout <reviewed-commit>
+HF_HOME=.models/huggingface \
+  hf download inclusionAI/Ming-3.0-tts-0.5b --local-dir .models/ming3-tts
+```
+
+Configure and start it:
+
+```env
+NEXT_PUBLIC_FEATURE_VOICE_CLONING=true
+NEXT_PUBLIC_FEATURE_COURSE_NARRATION_SWITCHING=true
+OPENMAIC_ENABLE_COURSE_NARRATION_SWITCHING=true
+OPENMAIC_ENABLE_EXPERIMENTAL_COURSE_NARRATION=true
+MING3_TTS_PREVIEW_ENABLED=true
+MING3_TTS_SOURCE_DIR=./.models/sources/ming3-tts
+MING3_TTS_MODEL_DIR=./.models/ming3-tts
+MING3_GPU_DEVICE=0
+MING3_TTS_CONDITIONING_MODE=acoustic-reference
+```
+
+```bash
+docker compose --profile gpu-ming up --build --wait
+docker compose exec openmaic wget -qO- http://ming3-tts:8773/health
+```
+
+Ming receives the same owner-scoped recording path from the shared durable data
+volume. The model mount is read-only; only its private embedding cache is
+writable. `acoustic-reference` remains the default conditioning mode. The
+official project has documented H800 80 GB and H20 96 GB test hardware but not a
+minimum VRAM requirement for this checkpoint, so measure peak use on the target
+host instead of inferring it from the 0.5B label.
+
+#### Optional Qwen3-TTS 1.7B
+
+Qwen uses a separately pinned upstream checkout and a pre-downloaded model. The
+service enforces offline model loading. Original and Enhanced remain distinct
+explicit choices; Original never becomes an automatic fallback for Enhanced.
+
+```bash
+git clone https://github.com/QwenLM/Qwen3-TTS.git .models/sources/qwen3-tts
+git -C .models/sources/qwen3-tts checkout <reviewed-commit>
+HF_HOME=.models/huggingface \
+  hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir .models/qwen3-tts
+```
+
+```env
+QWEN3_TTS_PREVIEW_ENABLED=true
+QWEN3_TTS_CLASSROOM_ENABLED=true
+QWEN3_TTS_SOURCE_DIR=./.models/sources/qwen3-tts
+QWEN3_TTS_MODEL_DIR=./.models/qwen3-tts
+QWEN3_TTS_GPU_DEVICE=0
+QWEN3_TTS_ATTENTION_IMPLEMENTATION=eager
+```
+
+```bash
+docker compose --profile gpu-qwen up --build --wait
+docker compose exec openmaic wget -qO- http://qwen3-tts:8771/health
+```
+
+The stock app container supports the existing Qwen service and Original output.
+Enhanced output still uses Sahaya's existing persistent Resemble Enhance child
+worker. That worker must run inside the app container with its CUDA-compatible
+Python environment and checkpoint cache; the lightweight Alpine app image does
+not bundle that large, host-specific environment. Use a reviewed custom app
+image and pass the documented `RESEMBLE_ENHANCE_*` paths before enabling the
+enhancement gates. Do not claim Enhanced is ready merely because Qwen's `/health`
+passes.
+
+#### Other speech services
+
+Chatterbox V3 and IndicF5 remain supported by their existing adapters and Python
+services, but they are not silently installed into the lightweight app image.
+Their CUDA/Torch combinations are different, and the IndicF5 service explicitly
+has no validated clean-room runtime yet. Run a reviewed service image or the
+documented host process, then configure the Docker app with
+`VOICE_CLONING_BASE_URL=http://host.docker.internal:8765` or
+`INDICF5_VOICE_CLONING_BASE_URL=http://host.docker.internal:8772`. Do not expose
+those ports beyond the trusted host. Sarvam and Bodhan are external HTTPS APIs
+and need no local service. The MP4 renderer remains the independent
+`video-export` profile.
+
+#### NVIDIA and model-loading requirements
+
+GPU profiles require Linux, a compatible NVIDIA driver, Docker Engine, and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Confirm `docker run --rm --gpus all nvidia/cuda:<compatible-tag> nvidia-smi`
+works before building model images. Each profile requests one configured device
+(`GEMMA_GPU_DEVICE`, `MING3_GPU_DEVICE`, or `QWEN3_TTS_GPU_DEVICE`). You may point
+profiles at the same GPU only after measuring that their simultaneously loaded
+models fit. Sahaya does not assume four GPUs, and you should enable only the
+profiles the host can carry.
+
+The default CUDA/Torch base is configurable through `TTS_CUDA_BASE_IMAGE` because
+Ming and Qwen upstream requirements can differ by revision and GPU driver. A
+Compose config check verifies topology, not CUDA compatibility or audio quality.
+Build and live synthesis must be validated on the intended GPU before production.
+
+#### Container networking
+
+- `127.0.0.1` inside `openmaic` means the app container itself.
+- Use Compose DNS (`ming3-tts`, `qwen3-tts`, `llama-gemma`) for profile services.
+- Use `host.docker.internal` for a service deliberately running on the Docker
+  host; Compose supplies the Linux host-gateway mapping.
+- Inference services use only `expose`, never `ports`, and the inference network
+  is internal. The app retains a separate outbound network for external APIs.
+
+#### Stop, restart, and update safely
+
+```bash
+docker compose stop
+docker compose start
+docker compose restart openmaic
+docker compose pull
+docker compose up --build --wait
+```
+
+Do not add `-v` to `docker compose down` unless you explicitly intend to destroy
+the named data, database, and cache volumes. Back up `openmaic-data` and
+`openmaic-postgres` before migration. A normal rebuild or `down` without `-v`
+preserves them.
+
+#### Common Docker problems
+
+- **Feature remains hidden:** `NEXT_PUBLIC_*` values are compiled at image build
+  time. Put them in `.env` (or pass `--env-file`) and rebuild the app image.
+- **Provider URL refuses/loops:** replace container `localhost` with a Compose DNS
+  name or `host.docker.internal`; never point the app at its own port by mistake.
+- **Ming selected but unavailable:** enable `MING3_TTS_PREVIEW_ENABLED`, start the
+  `gpu-ming` profile, and inspect its health/logs. No other engine is substituted.
+- **GPU is not found:** verify the NVIDIA toolkit and selected device ID outside
+  the stack. Do not change GPU allocation blindly.
+- **Model load fails:** verify the read-only model directory, exact upstream
+  source revision, CUDA/Torch compatibility, and cache permissions.
+- **A browser course disappeared:** check the same browser profile's IndexedDB;
+  Docker volumes do not contain browser-local storage.
+- **App is unhealthy:** inspect `docker compose logs openmaic`, then check
+  `/api/health`. Optional provider health is separate from app health.
+
+#### Deployment capability matrix
+
+| Capability | Default API-only stack | Optional profile / requirement |
+| --- | --- | --- |
+| Latest Sahaya app | Yes | `openmaic` image build |
+| External LLM/TTS APIs | Yes | Server-side keys in `.env` |
+| Sarvam/Bodhan | Yes, when explicitly enabled | No local GPU |
+| Gemma llama.cpp | No | `gpu-gemma` + local GGUF |
+| Ming 3.0 TTS 0.5B | No; fails clearly if selected | `gpu-ming` + source/model |
+| Qwen3-TTS 1.7B Original | No | `gpu-qwen` + source/model |
+| Qwen Enhanced | Code preserved; worker not bundled | Custom app worker runtime |
+| Chatterbox / IndicF5 | Adapter preserved | Reviewed external service runtime |
+| Durable server files | Yes | `openmaic-data` |
+| PostgreSQL documents/assets | No | `server-persistence` |
+| Browser IndexedDB courses | Browser-owned | Export or authenticated server import |
+| MP4 renderer | No | `video-export` |
 
 #### Slow-network / China build acceleration
 
@@ -377,12 +653,13 @@ and PostgreSQL. The persistence HTTP server is embedded in the app at
 `/api/persistence`; there is no standalone persistence service.
 
 ```bash
-cp .env.example .env.local
-printf '\nDATABASE_URL=postgres://openmaic:openmaic-dev@postgres:5432/openmaic\nPERSISTENCE_DEV_TOKEN=openmaic-local-dev\n' >> .env.local
-NEXT_PUBLIC_PERSISTENCE=1 NEXT_PUBLIC_PERSISTENCE_TOKEN=openmaic-local-dev docker compose --profile server-persistence up --build
+cp .env.example .env
+# Edit .env and set DATABASE_URL, PERSISTENCE_DEV_TOKEN,
+# NEXT_PUBLIC_PERSISTENCE=1, and the matching NEXT_PUBLIC_PERSISTENCE_TOKEN.
+docker compose --profile server-persistence up --build --wait
 ```
 
-Add your provider API keys to `.env.local` as usual. Runtime sessions and course
+Add your provider API keys to `.env` as usual. Runtime sessions and course
 documents become server-backed; device-scoped KV data (including the anonymous
 device learner key and playback position) remains in the browser. Existing
 browser course data is copied into the configured server store lazily, one

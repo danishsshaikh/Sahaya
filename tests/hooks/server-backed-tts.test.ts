@@ -96,6 +96,26 @@ function ttsResponse() {
   };
 }
 
+function wavBytes(payload: string): Uint8Array {
+  const data = new TextEncoder().encode(payload);
+  const bytes = new Uint8Array(44 + data.byteLength);
+  const view = new DataView(bytes.buffer);
+  bytes.set(new TextEncoder().encode('RIFF'), 0);
+  view.setUint32(4, 36 + data.byteLength, true);
+  bytes.set(new TextEncoder().encode('WAVEfmt '), 8);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 24_000, true);
+  view.setUint32(28, 48_000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  bytes.set(new TextEncoder().encode('data'), 36);
+  view.setUint32(40, data.byteLength, true);
+  bytes.set(data, 44);
+  return bytes;
+}
+
 import {
   isAssetStorageFull,
   markAssetStorageFull,
@@ -222,7 +242,7 @@ describe('server-backed narration storage', () => {
           status: 200,
           statusText: 'OK',
           headers: new Headers({ 'content-type': 'audio/wav' }),
-          arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+          arrayBuffer: async () => wavBytes(text).buffer,
         };
       }
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -255,7 +275,10 @@ describe('server-backed narration storage', () => {
           teacherVoiceProfileId: 'vcp_test',
           ttsLanguageCode: 'en',
         });
-        expect(await (mocks.poolPut.mock.calls[index][0] as Blob).text()).toBe(texts[index]);
+        const stored = new Uint8Array(
+          await (mocks.poolPut.mock.calls[index][0] as Blob).arrayBuffer(),
+        );
+        expect(new TextDecoder().decode(stored.subarray(44))).toBe(texts[index]);
       }
       const snapshot = JSON.parse(JSON.stringify(scene));
       expect(snapshot.actions).toEqual(
@@ -331,7 +354,7 @@ describe('server-backed narration storage', () => {
         status: 200,
         statusText: 'OK',
         headers: new Headers({ 'content-type': 'audio/wav' }),
-        arrayBuffer: async () => new TextEncoder().encode('queued-audio').buffer,
+        arrayBuffer: async () => wavBytes('queued-audio').buffer,
       });
 
     try {
@@ -357,7 +380,8 @@ describe('server-backed narration storage', () => {
         '/api/generate/tts/jobs/rq_test/audio',
       ]);
       expect(queueStates).toEqual(['queued', 'running', null]);
-      expect(await (mocks.poolPut.mock.calls[0][0] as Blob).text()).toBe('queued-audio');
+      const stored = new Uint8Array(await (mocks.poolPut.mock.calls[0][0] as Blob).arrayBuffer());
+      expect(new TextDecoder().decode(stored.subarray(44))).toBe('queued-audio');
       expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
         ttsLanguageCode: 'hi',
       });
@@ -410,6 +434,49 @@ describe('server-backed narration storage', () => {
       await rejection;
       expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(mocks.poolPut).not.toHaveBeenCalled();
+    } finally {
+      useStageStore.setState({ stage: previousStage });
+    }
+  });
+
+  it('does not mark Teaching Voice ready when completed audio is malformed', async () => {
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    const { useStageStore } = await import('@/lib/store/stage');
+    const previousStage = useStageStore.getState().stage;
+    useStageStore.setState({
+      stage: { ...previousStage, teacherVoiceProfileId: 'vcp_test' } as NonNullable<
+        typeof previousStage
+      >,
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'qwen3-tts',
+          jobId: 'rq_invalid_audio',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_invalid_audio',
+          audioUrl: '/api/generate/tts/jobs/rq_invalid_audio/audio',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'audio/wav' }),
+        arrayBuffer: async () => new TextEncoder().encode('not-a-wav').buffer,
+      });
+
+    try {
+      await expect(generateAndStoreTTS('tts_invalid', 'Narration', 'English')).rejects.toThrow(
+        'Teaching Voice returned invalid audio',
+      );
+      expect(mocks.poolPut).not.toHaveBeenCalled();
+      expect(mocks.audioPut).not.toHaveBeenCalled();
     } finally {
       useStageStore.setState({ stage: previousStage });
     }
@@ -543,7 +610,7 @@ describe('server-backed narration storage', () => {
       expect(mocks.synthesizeFacultyVoice).toHaveBeenCalledTimes(1);
 
       gates['faculty-a'].resolve({
-        audio: new TextEncoder().encode('faculty-a-audio'),
+        audio: wavBytes('faculty-a-audio'),
         format: 'wav',
       });
       await flushAsyncWork();
@@ -553,7 +620,7 @@ describe('server-backed narration storage', () => {
       await expect(first).resolves.toBe('ast_audio_allocated');
 
       gates['faculty-b'].resolve({
-        audio: new TextEncoder().encode('faculty-b-audio'),
+        audio: wavBytes('faculty-b-audio'),
         format: 'wav',
       });
       await flushAsyncWork();

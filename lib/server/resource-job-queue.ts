@@ -26,6 +26,7 @@ export interface ResourceJobSnapshot {
   estimatedWaitMs: number | null;
   attemptCount: number;
   error?: string;
+  errorCode?: string;
   metadata: ResourceJobMetadata;
 }
 
@@ -37,6 +38,7 @@ interface ResourceJob extends Omit<
   idempotencyKey: string;
   run: (jobId: string) => Promise<unknown>;
   result?: unknown;
+  errorCode?: string;
   updatedAt: number;
 }
 
@@ -64,6 +66,12 @@ const MAX_RETAINED_JOBS = 250;
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || 'Unknown error');
   return message.replace(/\s+/g, ' ').trim().slice(0, 300) || 'Generation job failed';
+}
+
+function safeErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('jobErrorCode' in error)) return undefined;
+  const code = (error as { jobErrorCode?: unknown }).jobErrorCode;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(code) ? code : undefined;
 }
 
 function isTerminal(status: ResourceJobStatus): boolean {
@@ -238,6 +246,7 @@ export class ResourceJobQueue {
           const completedAt = this.now();
           job.status = 'failed';
           job.error = safeError(error);
+          job.errorCode = safeErrorCode(error);
           job.completedAt = completedAt;
           job.updatedAt = completedAt;
           job.run = async () => undefined;
@@ -275,6 +284,7 @@ export class ResourceJobQueue {
       estimatedWaitMs: this.estimatedWaitMs(job, pendingIndex, resource),
       attemptCount: job.attemptCount,
       error: job.error,
+      errorCode: job.errorCode,
       metadata: job.metadata,
     };
   }

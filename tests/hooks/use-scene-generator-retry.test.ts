@@ -115,6 +115,25 @@ function jsonResponse(status: number, body: unknown) {
   };
 }
 
+function teachingVoiceWav(): ArrayBuffer {
+  const sampleCount = 2_400;
+  const bytes = new Uint8Array(44 + sampleCount * 2);
+  const view = new DataView(bytes.buffer);
+  bytes.set(new TextEncoder().encode('RIFF'), 0);
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  bytes.set(new TextEncoder().encode('WAVEfmt '), 8);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 24_000, true);
+  view.setUint32(28, 48_000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  bytes.set(new TextEncoder().encode('data'), 36);
+  view.setUint32(40, sampleCount * 2, true);
+  return bytes.buffer;
+}
+
 describe('browser scene generation retry wrappers', () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -545,7 +564,7 @@ describe('browser scene generation retry wrappers', () => {
         }),
       )
       .mockResolvedValueOnce(
-        new Response(new TextEncoder().encode('audio-data'), {
+        new Response(teachingVoiceWav(), {
           status: 200,
           headers: { 'content-type': 'audio/wav' },
         }),
@@ -565,6 +584,62 @@ describe('browser scene generation retry wrappers', () => {
       ttsLanguageCode: 'hi',
     });
     expect(body.language).toBeUndefined();
+  });
+
+  it('sends the explicit course Qwen mode for individual narration generation', async () => {
+    mocks.stageState.mockReturnValue({
+      stage: {
+        id: 'stage-1',
+        teacherVoiceProfileId: 'vcp_ready',
+        lessonLanguage: 'en',
+        narration: {
+          schemaVersion: 1,
+          activeVersionId: 'original',
+          versions: [],
+          preferredSelection: {
+            providerId: 'qwen3-tts',
+            providerName: 'Qwen3-TTS (Original)',
+            profileId: 'vcp_ready',
+            language: 'en',
+            enhancementMode: 'standard',
+          },
+        },
+      },
+    });
+    const { generateAndStoreTTS } = await import('@/lib/hooks/use-scene-generator');
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          async: true,
+          teachingVoiceProvider: 'qwen3-tts',
+          jobId: 'rq_completed_qwen_original_test',
+          status: 'completed',
+          statusUrl: '/api/generate/tts/jobs/rq_completed_qwen_original_test',
+          audioUrl: '/api/generate/tts/jobs/rq_completed_qwen_original_test/audio',
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(teachingVoiceWav(), {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        }),
+      );
+
+    await generateAndStoreTTS(
+      'tts_qwen_original',
+      'Exact narration text.',
+      'English',
+      undefined,
+      retryOptions,
+    );
+
+    expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
+      teacherVoiceProfileId: 'vcp_ready',
+      teachingVoiceProviderId: 'qwen3-tts',
+      teachingVoiceEnhancementMode: 'standard',
+      ttsLanguageCode: 'en',
+    });
   });
 
   it('takes the exact Hindi Force preview through Scene 1 and IndicF5 queue admission', async () => {
@@ -635,7 +710,7 @@ describe('browser scene generation retry wrappers', () => {
         }),
       )
       .mockResolvedValueOnce(
-        new Response(new TextEncoder().encode('force-hindi-audio'), {
+        new Response(teachingVoiceWav(), {
           status: 200,
           headers: { 'content-type': 'audio/wav' },
         }),

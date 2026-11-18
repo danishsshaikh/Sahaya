@@ -11,19 +11,44 @@ services:
         - ALLOWED_FRAME_ANCESTORS=${ALLOWED_FRAME_ANCESTORS:-}
         - NEXT_PUBLIC_PERSISTENCE=${NEXT_PUBLIC_PERSISTENCE:-}
         - NEXT_PUBLIC_PERSISTENCE_TOKEN=${NEXT_PUBLIC_PERSISTENCE_TOKEN:-}
+        - NEXT_PUBLIC_PRO_WORKBENCH_ENABLED=${NEXT_PUBLIC_PRO_WORKBENCH_ENABLED:-}
         - NEXT_PUBLIC_MAIC_EDITOR_ENABLED=${NEXT_PUBLIC_MAIC_EDITOR_ENABLED:-}
+        - NEXT_PUBLIC_FEATURE_COURSE_NARRATION_SWITCHING=${NEXT_PUBLIC_FEATURE_COURSE_NARRATION_SWITCHING:-}
         - NEXT_PUBLIC_MAIC_EDITOR_RENDERER_ENABLED=${NEXT_PUBLIC_MAIC_EDITOR_RENDERER_ENABLED:-}
         - NEXT_PUBLIC_MAIC_PLAYBACK_RENDERER_ENABLED=${NEXT_PUBLIC_MAIC_PLAYBACK_RENDERER_ENABLED:-}
         - NEXT_PUBLIC_PI_CHAT_ENABLED=${NEXT_PUBLIC_PI_CHAT_ENABLED:-}
         - NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED=${NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED:-}
         - NEXT_PUBLIC_SHOW_VOCATIONAL_TEST_UI=${NEXT_PUBLIC_SHOW_VOCATIONAL_TEST_UI:-}
         - NEXT_PUBLIC_ENABLE_VIDEO_EXPORT=${NEXT_PUBLIC_ENABLE_VIDEO_EXPORT:-}
+        - NEXT_PUBLIC_VIDEO_EXPORT_BURN_IN_CAPTIONS=${NEXT_PUBLIC_VIDEO_EXPORT_BURN_IN_CAPTIONS:-}
         - NEXT_PUBLIC_VIDEO_EXPORT_CTA_DESTINATION=${NEXT_PUBLIC_VIDEO_EXPORT_CTA_DESTINATION:-}
         - NEXT_PUBLIC_ENABLE_PPTX_IMPORT=${NEXT_PUBLIC_ENABLE_PPTX_IMPORT:-}
+        - NEXT_PUBLIC_FEATURE_GENERATED_CLASSROOM_AGENTS=${NEXT_PUBLIC_FEATURE_GENERATED_CLASSROOM_AGENTS:-}
+        - NEXT_PUBLIC_FEATURE_COMPANION_SELECTOR=${NEXT_PUBLIC_FEATURE_COMPANION_SELECTOR:-}
+        - NEXT_PUBLIC_FEATURE_CLASSROOM_CHAT=${NEXT_PUBLIC_FEATURE_CLASSROOM_CHAT:-}
+        - NEXT_PUBLIC_FEATURE_VOICE_CLONING=${NEXT_PUBLIC_FEATURE_VOICE_CLONING:-}
+        - NEXT_PUBLIC_FEATURE_STATIC_VOICE=${NEXT_PUBLIC_FEATURE_STATIC_VOICE:-}
+        - NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION=${NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION:-}
+        - NEXT_PUBLIC_FEATURE_WEB_SEARCH=${NEXT_PUBLIC_FEATURE_WEB_SEARCH:-}
+        - NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT=${NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT:-}
+        - NEXT_PUBLIC_FEATURE_WHITEBOARD=${NEXT_PUBLIC_FEATURE_WHITEBOARD:-}
+        - NEXT_PUBLIC_FEATURE_INTERACTIVE_SCENES=${NEXT_PUBLIC_FEATURE_INTERACTIVE_SCENES:-}
+        - NEXT_PUBLIC_FEATURE_DETERMINISTIC_INTERACTIVES=${NEXT_PUBLIC_FEATURE_DETERMINISTIC_INTERACTIVES:-}
+        - NEXT_PUBLIC_FEATURE_DISCUSSION_SCENES=${NEXT_PUBLIC_FEATURE_DISCUSSION_SCENES:-}
+        - NEXT_PUBLIC_FEATURE_WORKSPACE_SCENES=${NEXT_PUBLIC_FEATURE_WORKSPACE_SCENES:-}
+        - NEXT_PUBLIC_FEATURE_FLOW_SCENES=${NEXT_PUBLIC_FEATURE_FLOW_SCENES:-}
+        - NEXT_PUBLIC_INTERACTIVE_CAPABILITY_TRACE=${NEXT_PUBLIC_INTERACTIVE_CAPABILITY_TRACE:-}
+        - NEXT_PUBLIC_VIDEO_SPOTLIGHT_PARITY_TRACE=${NEXT_PUBLIC_VIDEO_SPOTLIGHT_PARITY_TRACE:-}
     ports:
-      - '3000:3000'
+      - '${SAHAYA_HTTP_BIND:-127.0.0.1}:${SAHAYA_HTTP_PORT:-3000}:3000'
     env_file:
-      - .env.local
+      # Docker Compose reads .env for ${...} interpolation (including the
+      # NEXT_PUBLIC build arguments above). .env.local remains a runtime-only
+      # compatibility override for existing non-Docker installations.
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
     environment:
       # Point the app at the render service when it's running. This wins over any
       # RENDER_SERVICE_URL in .env.local; the service only starts under the
@@ -32,13 +57,34 @@ services:
       # MP4 export disabled and degrades to the ZIP-download path — this URL
       # being set does not, by itself, advertise a working render.
       - RENDER_SERVICE_URL=http://render-service:9000
+      # Keep every server-owned recording/artifact beneath the durable volume.
+      - OPENMAIC_AUTH_DATA_DIR=/app/data/auth
+      - VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
+      - TEACHING_VOICE_JOB_ARTIFACT_DIR=/app/data/voice-cloning/teaching-voice-job-artifacts-v1
+      # Container loopback is the app container, not the host or an inference
+      # container. These stable DNS names are safe even while their opt-in
+      # profiles are stopped; feature gates still control availability.
+      - MING3_TTS_BASE_URL=http://ming3-tts:8773
+      - QWEN3_TTS_BASE_URL=http://qwen3-tts:8771
     networks:
       - default # outbound internet (LLM/media provider APIs, etc.)
       - render # reach the render service over the isolated network
+      - inference # reach private, profile-gated local model endpoints
+    extra_hosts:
+      # Linux equivalent of Docker Desktop's host alias. Use this hostname in
+      # provider URLs when a model runs directly on the Docker host.
+      - 'host.docker.internal:host-gateway'
     volumes:
       # Optional: mount server-providers.yml for provider config
       # - ./server-providers.yml:/app/server-providers.yml:ro
       - openmaic-data:/app/data
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:3000/api/health']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    init: true
     restart: unless-stopped
 
   # Optional PostgreSQL backing for the app-embedded persistence API.
@@ -62,6 +108,155 @@ services:
       start_period: 5s
     volumes:
       - openmaic-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Optional private llama.cpp OpenAI-compatible endpoint for a local Gemma
+  # GGUF. The model is an explicit read-only host mount: this service never
+  # downloads a checkpoint at startup and publishes no host port.
+  llama-gemma:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    profiles:
+      - gpu-gemma
+    command:
+      - --model
+      - /models/${GEMMA_GGUF_FILE:-gemma.gguf}
+      - --host
+      - 0.0.0.0
+      - --port
+      - '8080'
+      - --n-gpu-layers
+      - ${GEMMA_GPU_LAYERS:-99}
+      - --ctx-size
+      - ${GEMMA_CONTEXT_SIZE:-8192}
+    expose:
+      - '8080'
+    volumes:
+      - ${GEMMA_MODEL_DIR:-./.models/gemma}:/models:ro
+    networks:
+      - inference
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', '--silent', 'http://127.0.0.1:8080/health']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${GEMMA_GPU_DEVICE:-0}']
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Ming is Sahaya's default Teaching Voice engine for new English profiles.
+  # Build input is an explicit local checkout of the official implementation;
+  # model weights and reference recordings remain outside the image.
+  ming3-tts:
+    build:
+      context: .
+      dockerfile: services/ming3-tts/Dockerfile
+      args:
+        TTS_CUDA_BASE_IMAGE: ${TTS_CUDA_BASE_IMAGE:-pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime}
+      additional_contexts:
+        ming-source: ${MING3_TTS_SOURCE_DIR:-./.models/sources/ming3-tts}
+    profiles:
+      - gpu-ming
+    environment:
+      - HF_HOME=/cache/huggingface
+      - TRANSFORMERS_CACHE=/cache/huggingface/transformers
+      - MING3_TTS_HOST=0.0.0.0
+      - MING3_TTS_PORT=8773
+      - MING3_TTS_REPOSITORY_DIR=/opt/ming3-tts
+      - MING3_TTS_MODEL=/models/ming3-tts
+      - MING3_TTS_REFERENCE_ROOT=/app/data/voice-cloning
+      - MING3_TTS_EMBEDDING_ROOT=/app/data/voice-cloning/.ming3-speaker-embeddings
+      - MING3_TTS_CONDITIONING_MODE=${MING3_TTS_CONDITIONING_MODE:-acoustic-reference}
+      - MING3_TTS_DEVICE=cuda:0
+    expose:
+      - '8773'
+    volumes:
+      - ${MING3_TTS_MODEL_DIR:-./.models/ming3-tts}:/models/ming3-tts:ro
+      - openmaic-data:/app/data
+      - sahaya-huggingface-cache:/cache/huggingface
+    networks:
+      - inference
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8773/health'))['ok']",
+        ]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${MING3_GPU_DEVICE:-0}']
+              capabilities: [gpu]
+    shm_size: 2gb
+    restart: unless-stopped
+
+  # Optional Qwen Original/Enhanced synthesis backend. Qwen itself is isolated
+  # here; Enhanced remains the app's existing Resemble worker path and is never
+  # selected as an automatic fallback.
+  qwen3-tts:
+    build:
+      context: .
+      dockerfile: services/qwen3-tts/Dockerfile
+      args:
+        TTS_CUDA_BASE_IMAGE: ${TTS_CUDA_BASE_IMAGE:-pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime}
+      additional_contexts:
+        qwen-source: ${QWEN3_TTS_SOURCE_DIR:-./.models/sources/qwen3-tts}
+    profiles:
+      - gpu-qwen
+    environment:
+      - HF_HOME=/cache/huggingface
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - QWEN3_TTS_SERVICE_HOST=0.0.0.0
+      - QWEN3_TTS_SERVICE_PORT=8771
+      - QWEN3_TTS_MODEL=/models/qwen3-tts
+      - QWEN3_TTS_ATTENTION_IMPLEMENTATION=${QWEN3_TTS_ATTENTION_IMPLEMENTATION:-eager}
+      - QWEN3_TTS_QUEUE_WAIT_SECONDS=${QWEN3_TTS_QUEUE_WAIT_SECONDS:-30}
+      - QWEN3_TTS_MAX_PENDING=${QWEN3_TTS_MAX_PENDING:-64}
+      - QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS=${QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS:-165}
+      - QWEN3_TTS_RESPONSE_GRACE_SECONDS=${QWEN3_TTS_RESPONSE_GRACE_SECONDS:-5}
+      - QWEN3_TTS_MAX_NEW_TOKENS=${QWEN3_TTS_MAX_NEW_TOKENS:-512}
+    expose:
+      - '8771'
+    volumes:
+      - ${QWEN3_TTS_MODEL_DIR:-./.models/qwen3-tts}:/models/qwen3-tts:ro
+      - openmaic-data:/app/data:ro
+      - sahaya-huggingface-cache:/cache/huggingface
+    networks:
+      - inference
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8771/health'))['ok']",
+        ]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${QWEN3_TTS_GPU_DEVICE:-0}']
+              capabilities: [gpu]
+    shm_size: 2gb
     restart: unless-stopped
 
   # Isolated MP4 render service (Node 22 + Chromium + FFmpeg) for classroom video
@@ -131,6 +326,18 @@ services:
     shm_size: 2gb
     networks:
       - render
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:9000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
 networks:
@@ -142,7 +349,12 @@ networks:
   # can't use this shared network to reach the app.
   render:
     internal: true
+  # Model endpoints are reachable only by containers attached to this network.
+  # No inference service has a host `ports` mapping.
+  inference:
+    internal: true
 
 volumes:
   openmaic-data:
   openmaic-postgres:
+  sahaya-huggingface-cache:

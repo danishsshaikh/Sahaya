@@ -43,7 +43,9 @@ export function isQwen3TtsClassroomEnabled(): boolean {
 export function getQwen3TtsPreviewServiceConfig(): { baseUrl: string; timeoutMs: number } {
   return {
     baseUrl: (process.env.QWEN3_TTS_BASE_URL || 'http://127.0.0.1:8771').trim().replace(/\/$/, ''),
-    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 1000, 900000)),
+    // The Python worker has a hard 165-second request deadline. Keep transport
+    // waiting outside that boundary so it receives the worker's terminal 504.
+    timeoutMs: Math.floor(boundedNumber('QWEN3_TTS_TIMEOUT_MS', 180000, 180000, 900000)),
   };
 }
 
@@ -51,15 +53,25 @@ export function isMing3TtsPreviewEnabled(): boolean {
   return envFlag('MING3_TTS_PREVIEW_ENABLED', false);
 }
 
+export type Ming3TtsConditioningMode = 'acoustic-reference' | 'speaker-embedding-only';
+
+function ming3TtsConditioningMode(): Ming3TtsConditioningMode {
+  return process.env.MING3_TTS_CONDITIONING_MODE?.trim().toLowerCase() === 'speaker-embedding-only'
+    ? 'speaker-embedding-only'
+    : 'acoustic-reference';
+}
+
 export function getMing3TtsPreviewServiceConfig(): {
   baseUrl: string;
   timeoutMs: number;
   maxConcurrency: number;
+  conditioningMode: Ming3TtsConditioningMode;
 } {
   return {
     baseUrl: (process.env.MING3_TTS_BASE_URL || 'http://127.0.0.1:8773').trim().replace(/\/$/, ''),
     timeoutMs: Math.floor(boundedNumber('MING3_TTS_TIMEOUT_MS', 300000, 1000, 900000)),
     maxConcurrency: Math.floor(boundedNumber('MING3_TTS_MAX_CONCURRENCY', 1, 1, 2)),
+    conditioningMode: ming3TtsConditioningMode(),
   };
 }
 

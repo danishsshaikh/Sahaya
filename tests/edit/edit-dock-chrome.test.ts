@@ -8,6 +8,12 @@ vi.mock('@/components/edit/AgentsView/RosterDialog', () => ({
 vi.mock('@/components/edit/EditDock/ElementRefLassoButton', () => ({
   ElementRefLassoButton: () => createElement('button', { 'data-testid': 'element-lasso' }),
 }));
+vi.mock('@/components/edit/NarrationVoiceDialog', () => ({
+  NarrationVoiceButton: () => createElement('button', { 'data-testid': 'narration-voice' }),
+}));
+vi.mock('@/lib/config/feature-flags', () => ({
+  isCourseNarrationSwitchingEnabled: () => true,
+}));
 vi.mock('@/lib/hooks/use-i18n', () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }));
@@ -33,6 +39,7 @@ describe('global edit control bar', () => {
 
     expect(html).toContain('data-testid="edit-dock-bar"');
     expect(html).toContain('data-testid="edit-dock-roster"');
+    expect(html).toContain('data-testid="narration-voice"');
     expect(html).toContain('data-testid="element-lasso"');
     expect(html).toContain('2 / 3');
   });

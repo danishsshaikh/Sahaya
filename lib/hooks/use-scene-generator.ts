@@ -699,6 +699,19 @@ export async function generateAndStoreTTS(
   const settings = useSettingsStore.getState();
   const stage = useStageStore.getState().stage;
   const teacherVoiceProfileId = stage?.teacherVoiceProfileId;
+  const preferredNarrationSelection = stage?.narration?.preferredSelection;
+  const teachingVoiceProviderId =
+    teacherVoiceProfileId &&
+    (preferredNarrationSelection?.providerId === 'qwen3-tts' ||
+      preferredNarrationSelection?.providerId === 'ming3-tts')
+      ? preferredNarrationSelection.providerId
+      : undefined;
+  const teachingVoiceEnhancementMode =
+    teachingVoiceProviderId === 'qwen3-tts'
+      ? preferredNarrationSelection?.enhancementMode === 'standard'
+        ? 'standard'
+        : 'resemble-enhance'
+      : undefined;
   if (!teacherVoiceProfileId && !isStaticVoiceEnabled()) return null;
   const lessonLanguage = normalizeTeachingVoiceLanguageId(stage?.lessonLanguage);
   const narrationLanguage = lessonLanguage || language || stage?.languageDirective;
@@ -806,6 +819,8 @@ export async function generateAndStoreTTS(
               ttsProviderConfig?.baseUrl || ttsProviderConfig?.customDefaultBaseUrl || undefined,
             ttsProviderOptions: providerOptions,
             teacherVoiceProfileId,
+            teachingVoiceProviderId,
+            teachingVoiceEnhancementMode,
             ttsLanguageCode,
             stageId,
             sceneId,
@@ -930,6 +945,11 @@ export async function generateAndStoreTTS(
   // clip onto a timeline without re-decoding. null → leave undefined; the audio
   // still persists and plays.
   const duration = measureAudioDuration(bytes, data.format) ?? undefined;
+  if (teacherVoiceProfileId && (!duration || bytes.byteLength === 0)) {
+    throw new Error(
+      'Teaching Voice returned invalid audio. This narration was not marked as voiced.',
+    );
+  }
   const serverBacked = isServerBackedMediaPersistence();
   // Server-backed: the bytes go to the pool and the pool allocates the
   // identity, so the id the speech action ends up holding names durable audio

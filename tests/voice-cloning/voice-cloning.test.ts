@@ -98,6 +98,8 @@ describe('voice profile privacy', () => {
       generationSettings: VOICE_SETTINGS_PRESETS['accent-test'],
       enhancementMode: 'standard',
       activeEngine: 'chatterbox',
+      enrollmentSource: 'microphone',
+      compatibleProviders: ['chatterbox'],
       qwenEnhancementMode: 'standard',
       createdAt: '2026-08-11T00:00:00.000Z',
       updatedAt: '2026-08-11T00:00:00.000Z',
@@ -203,7 +205,7 @@ describe('explicit cloned voice TTS routing', () => {
       synthesizeFacultyVoice,
     }));
     vi.doMock('@/lib/voice-cloning/teaching-voice-jobs', () => ({
-      enqueueTeachingVoiceJob,
+      enqueueTeachingVoiceJobDurably: enqueueTeachingVoiceJob,
     }));
     vi.doMock('@/lib/audio/tts-providers', () => ({
       generateTTS,
@@ -526,65 +528,40 @@ describe('faculty voice setup UI contract', () => {
   const componentSource = () =>
     readFileSync(join(repoRoot, 'components/voice-cloning/teaching-voice-card.tsx'), 'utf8');
 
-  it('keeps customization behind an explicit control and prevents duplicate enrollments', () => {
+  it('shows one faculty-facing record or upload workflow', () => {
     const source = componentSource();
 
-    expect(source).toContain("type SetupStep = 'record' | 'preview' | 'review'");
-    expect(source).toContain("checking: 'Checking your recording...'");
-    expect(source).toContain("preparing: 'Preparing voice sample...'");
-    expect(source).toContain("generating: 'Generating your voice preview...'");
-    expect(source).toContain("finishing: 'Finishing audio...'");
-    expect(source).toContain('const [customizeOpen, setCustomizeOpen] = useState(false)');
-    expect(source).toContain("value: Exclude<VoiceSettingsPreset, 'custom'>");
-    expect(source).toContain("{ value: 'natural', label: 'Natural' }");
-    expect(source).toContain("{ value: 'expressive', label: 'Expressive' }");
-    expect(source).toContain('draftPresetDescription');
-    expect(source).toContain('Manual settings are active.');
-    expect(source).not.toContain("{ value: 'custom'");
-    expect(source).not.toContain("{ value: 'accent-test', label: 'Accent Test' }");
-    expect(source).toContain('Speak naturally and do not rush.');
-    expect(source).not.toContain('Minimum');
-    expect(source).not.toContain('MAX_RECORDING_DURATION_SECONDS');
-    expect(source).not.toContain('MIN_RECORDING_DURATION_SECONDS');
-    expect(source).toContain('enrollmentRequestInFlightRef.current');
-    expect(source).toContain('setRecordingRequiresRetry(true)');
-    expect(source).toContain('Customize Voice');
-    expect(source).not.toContain('{renderVoiceConfigurationControls()}\n\n              <div');
+    expect(source).toContain('My Teaching Voice');
+    expect(source).toContain('Record Voice');
+    expect(source).toContain('Upload Audio');
+    expect(source).toContain('Generate Voice');
+    expect(source).toContain('Ming 3.0 TTS 0.5B');
+    expect(source).toContain("formData.set('workflow', 'ming-default')");
+    expect(source).not.toContain('Customize Voice');
+    expect(source).not.toContain('Generate Preview');
+    expect(source).not.toContain('Voice Output');
+    expect(source).not.toContain('Use These Settings');
+    expect(source).not.toContain('VoiceComparisonPanel');
   });
 
-  it('keeps customization controls compact and teacher-facing', () => {
+  it('keeps consent and upload transcription explicit', () => {
     const source = componentSource();
 
-    expect(source).toContain('Clear, balanced classroom narration.');
-    expect(source).toContain('More emphasis for stories and key ideas.');
-    expect(source).toContain('Adjusts pronunciation conditioning only.');
-    expect(source).toContain('<option value="en">English</option>');
-    expect(source).toContain('<option value="hi">Hindi-influenced</option>');
-    expect(source).toContain('Voice Output');
-    expect(source).toContain('Generate Preview');
-    expect(source).not.toContain('Voice Model');
-    expect(source).not.toContain('Advanced Voice Settings');
-    expect(source).not.toContain('Expert Settings');
-    expect(source).toContain('sm:grid-cols-2');
-    expect(source).not.toContain('Chatterbox receives');
-    expect(source).not.toContain('grid gap-2 sm:grid-cols-4');
+    expect(source).toContain('I own this recording or have explicit permission');
+    expect(source).toContain('Transcribe Audio');
+    expect(source).toContain('Enter or correct the exact words spoken');
+    expect(source).toContain("formData.set('referenceText', transcript.trim())");
+    expect(source).not.toContain('Reference transcript (optional)');
   });
 
-  it('cleans candidate recording state during re-record without deleting accepted voice state', () => {
+  it('prevents duplicate generation and preserves earlier profiles during replacement', () => {
     const source = componentSource();
 
-    expect(source).toContain('const candidateAudioRef = useRef<HTMLAudioElement | null>(null)');
-    expect(source).toContain('candidateAudioRef.current.pause()');
-    expect(source).toContain('candidateAudioRef.current.currentTime = 0');
-    expect(source).toContain('URL.revokeObjectURL(prev.url)');
-    expect(source).toContain('const clearCandidateRecording = () =>');
-    expect(source).toContain('setRecordingRequiresRetry(false)');
-    expect(source).toContain('setPreviewError(null)');
-    expect(source).toContain('setEnrollmentError(null)');
-    expect(source).toContain('const discardCandidateProfile = async (profileId: string)');
-    expect(source).toContain('onClick={() => discardCandidateProfile(profile.id)}');
-    expect(source).toContain("method: 'DELETE'");
-    expect(source).not.toContain('Discard');
+    expect(source).toContain('requestInFlightRef.current');
+    expect(source).toContain('if (!profile || requestInFlightRef.current) return');
+    expect(source).toContain('if (!recording.blob || requestInFlightRef.current) return');
+    expect(source).toContain('previous voices are preserved');
+    expect(source).not.toContain("method: 'DELETE'");
   });
 });
 
@@ -722,6 +699,7 @@ describe('voice profile model preview API', () => {
   const readVoiceProfile = vi.fn();
   const findCurrentVoiceProfile = vi.fn();
   const findVoiceProfileByEnrollmentAttempt = vi.fn();
+  const listVoiceProfiles = vi.fn();
   const deleteVoiceProfileAssets = vi.fn();
   const writeReferenceAudio = vi.fn();
   const writeOriginalRecording = vi.fn();
@@ -734,6 +712,8 @@ describe('voice profile model preview API', () => {
   const isQwen3TtsClassroomEnabled = vi.fn();
   const generateQwen3TtsModelPreview = vi.fn();
   const currentQwen3TtsPreview = vi.fn();
+  const activateEnhancedQwenTeachingVoice = vi.fn();
+  const activateMing3TeachingVoice = vi.fn();
   const createVoiceProfileId = vi.fn(() => 'vcp_new');
 
   beforeEach(async () => {
@@ -745,6 +725,7 @@ describe('voice profile model preview API', () => {
     readVoiceProfile.mockReset();
     findCurrentVoiceProfile.mockReset();
     findVoiceProfileByEnrollmentAttempt.mockReset();
+    listVoiceProfiles.mockReset();
     deleteVoiceProfileAssets.mockReset();
     writeReferenceAudio.mockReset();
     writeOriginalRecording.mockReset();
@@ -757,6 +738,8 @@ describe('voice profile model preview API', () => {
     isQwen3TtsClassroomEnabled.mockReset();
     generateQwen3TtsModelPreview.mockReset();
     currentQwen3TtsPreview.mockReset();
+    activateEnhancedQwenTeachingVoice.mockReset();
+    activateMing3TeachingVoice.mockReset();
     createVoiceProfileId.mockClear();
     referenceAudioExists.mockResolvedValue(true);
     createProfile.mockImplementation(async ({ profileId }) => ({ providerReferenceId: profileId }));
@@ -765,6 +748,7 @@ describe('voice profile model preview API', () => {
     writeVoiceProfile.mockResolvedValue(undefined);
     findCurrentVoiceProfile.mockResolvedValue(null);
     findVoiceProfileByEnrollmentAttempt.mockResolvedValue(null);
+    listVoiceProfiles.mockResolvedValue([]);
     writeReferenceAudio.mockResolvedValue('/private/reference.wav');
     writeOriginalRecording.mockResolvedValue({
       key: '/private/original-recording.webm',
@@ -804,6 +788,18 @@ describe('voice profile model preview API', () => {
     isQwen3TtsPreviewEnabled.mockReturnValue(false);
     isQwen3TtsClassroomEnabled.mockReturnValue(false);
     currentQwen3TtsPreview.mockImplementation((profile) => profile.qwenPreviewCache?.result);
+    activateEnhancedQwenTeachingVoice.mockImplementation(async (profile) => ({
+      ...profile,
+      status: 'ready',
+      activeEngine: 'qwen3-tts',
+      qwenEnhancementMode: 'resemble-enhance',
+    }));
+    activateMing3TeachingVoice.mockImplementation(async (profile) => ({
+      ...profile,
+      status: 'ready',
+      activeEngine: 'ming3-tts',
+      preview: { format: 'wav', base64: 'bWluZw==', createdAt: '2026-11-17T00:00:00.000Z' },
+    }));
     vi.doMock('@/lib/voice-cloning/config', () => ({
       getVoiceCloningDefaultLanguage: () => 'en',
       getChatterboxDefaultModelVariant: () => 'v3',
@@ -811,6 +807,7 @@ describe('voice profile model preview API', () => {
       isVoiceEnhancementAllowed,
       isQwen3TtsPreviewEnabled,
       isQwen3TtsClassroomEnabled,
+      isMing3TtsPreviewEnabled: () => true,
     }));
     vi.doMock('@/lib/voice-cloning/audio-enhancement', () => ({
       processChatterboxAudioVariants,
@@ -819,6 +816,10 @@ describe('voice profile model preview API', () => {
       createQwen3TtsPreviewCacheKey: vi.fn(() => 'qwen-cache-v1'),
       currentQwen3TtsPreview,
       generateQwen3TtsModelPreview,
+      activateEnhancedQwenTeachingVoice,
+    }));
+    vi.doMock('@/lib/server/ming3-tts', () => ({
+      activateMing3TeachingVoice,
     }));
     vi.doMock('@/lib/voice-cloning/audio-validation', () => ({
       isVoiceRecordingQualityError: (error: unknown) =>
@@ -834,6 +835,7 @@ describe('voice profile model preview API', () => {
       deleteVoiceProfileAssets,
       findCurrentVoiceProfile,
       findVoiceProfileByEnrollmentAttempt,
+      listVoiceProfiles,
       readVoiceProfile,
       referenceAudioExists,
       writeReferenceAudio,
@@ -970,7 +972,7 @@ describe('voice profile model preview API', () => {
         referenceText: VOICE_ENROLLMENT_PARAGRAPH,
       }),
     );
-    expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', 'en', true);
+    expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
     expect(completed.profile.draftPreview.config).toEqual({
       languageId: 'en',
       modelVariant: 'v3',
@@ -1026,6 +1028,219 @@ describe('voice profile model preview API', () => {
         status: 'preview-ready',
       }),
     );
+  });
+
+  it('runs the simplified workflow through enhanced Qwen without a Chatterbox preview', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const exactBytes = new Uint8Array([7, 7, 3, 1]);
+    const form = enrollmentForm();
+    form.set('attemptId', 'attempt-enhanced-qwen');
+    form.set('workflow', 'enhanced-qwen');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('recording', new File([exactBytes], 'faculty.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-enhanced-qwen');
+
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: {
+        activeEngine: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+        status: 'ready',
+      },
+    });
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({ bytes: exactBytes, fileName: 'faculty.wav' }),
+    );
+    expect(activateEnhancedQwenTeachingVoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+        referenceAudioKey: '/private/reference.wav',
+      }),
+      'local-faculty',
+    );
+    expect(createProfile).not.toHaveBeenCalled();
+    expect(generatePreview).not.toHaveBeenCalled();
+  });
+
+  it('runs the default simplified workflow through Ming without a Chatterbox or Qwen preview', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const exactBytes = new Uint8Array([5, 4, 3, 2]);
+    const form = enrollmentForm();
+    form.set('attemptId', 'attempt-ming-default');
+    form.set('workflow', 'ming-default');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('recording', new File([exactBytes], 'faculty.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-ming-default');
+
+    expect(completed).toMatchObject({
+      success: true,
+      status: 'completed',
+      profile: { activeEngine: 'ming3-tts', status: 'ready' },
+    });
+    expect(activateMing3TeachingVoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referenceText: VOICE_ENROLLMENT_PARAGRAPH,
+        referenceAudioKey: '/private/reference.wav',
+      }),
+      'local-faculty',
+      { allowPreReadyProfile: true },
+    );
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({ bytes: exactBytes, fileName: 'faculty.wav' }),
+    );
+    expect(createProfile).not.toHaveBeenCalled();
+    expect(generatePreview).not.toHaveBeenCalled();
+    expect(activateEnhancedQwenTeachingVoice).not.toHaveBeenCalled();
+  });
+
+  it('requires an accurate transcript for enhanced uploaded enrollment', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-enhanced-without-transcript');
+    form.set('workflow', 'enhanced-qwen');
+    form.set('consent', 'true');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'en');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('accurate transcript'),
+    });
+    expect(nextServerMocks.afterCallbacks).toHaveLength(0);
+  });
+
+  it('imports authorized audio with its exact transcript and preserves the original bytes', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const exactBytes = new Uint8Array([8, 6, 7, 5, 3, 0, 9]);
+    const form = new FormData();
+    form.set('attemptId', 'attempt-import-test');
+    form.set('consent', 'true');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('displayName', 'Previous seminar voice');
+    form.set('languageId', 'en');
+    form.set('referenceText', 'This is the exact sentence spoken in the imported recording.');
+    form.set('recording', new File([exactBytes], 'seminar.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(202);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-import-test');
+
+    expect(completed.profile).toMatchObject({
+      displayName: 'Previous seminar voice',
+      enrollmentSource: 'audio-import',
+    });
+    expect(writeOriginalRecording).toHaveBeenCalledWith(
+      'vcp_new',
+      'local-faculty',
+      expect.objectContaining({
+        bytes: exactBytes,
+        mimeType: 'audio/wav',
+        fileName: 'seminar.wav',
+      }),
+    );
+    expect(normalizeVoiceEnrollmentRecording).toHaveBeenCalledWith(
+      expect.objectContaining({ bytes: exactBytes, fileName: 'seminar.wav' }),
+      'provider-compatible',
+    );
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enrollmentSource: 'audio-import',
+        referenceText: 'This is the exact sentence spoken in the imported recording.',
+      }),
+    );
+    expect(createProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires import authorization but permits providers that do not need a transcript', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-import-rejected');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'en');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const noConsent = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(noConsent.status).toBe(400);
+    form.set('consent', 'true');
+    const noTranscript = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(noTranscript.status).toBe(202);
+    expect(nextServerMocks.afterCallbacks).toHaveLength(1);
+    await runScheduledEnrollment();
+    const completed = await completedEnrollmentProfile('attempt-import-rejected');
+    expect(completed.profile.referenceText).toBeUndefined();
+    expect(createProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceText: undefined }),
+    );
+  });
+
+  it('explains the transcript requirement before scheduling an IndicF5 import', async () => {
+    const { POST } = await import('@/app/api/voice-cloning/profile/route');
+    const form = new FormData();
+    form.set('attemptId', 'attempt-indic-import');
+    form.set('enrollmentSource', 'audio-import');
+    form.set('languageId', 'hi');
+    form.set('consent', 'true');
+    form.set('recording', new File([new Uint8Array([1, 2])], 'voice.wav', { type: 'audio/wav' }));
+
+    const response = await POST(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'POST',
+        body: form,
+      }) as never,
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining('IndicF5 requires the exact words'),
+    });
+    expect(nextServerMocks.afterCallbacks).toHaveLength(0);
   });
 
   it('rejects an enrollment transcript that differs from the displayed approved phrase', async () => {
@@ -1085,7 +1300,7 @@ describe('voice profile model preview API', () => {
           referenceText: phrase.text,
         }),
       );
-      expect(findCurrentVoiceProfile).toHaveBeenCalledWith('local-faculty', language, true);
+      expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
       expect(generatePreview).toHaveBeenCalledWith(
         expect.objectContaining({
           language,
@@ -1099,6 +1314,62 @@ describe('voice profile model preview API', () => {
       );
     },
   );
+
+  it('activates enhanced Qwen for an owned existing profile without replacing its recording', async () => {
+    const existing = readyProfile('v3');
+    readVoiceProfile.mockResolvedValue(existing);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: existing.id,
+          action: 'activate-enhanced-qwen',
+        }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      profile: {
+        id: existing.id,
+        activeEngine: 'qwen3-tts',
+        qwenEnhancementMode: 'resemble-enhance',
+      },
+    });
+    expect(activateEnhancedQwenTeachingVoice).toHaveBeenCalledExactlyOnceWith(
+      existing,
+      'local-faculty',
+    );
+    expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
+    expect(writeReferenceAudio).not.toHaveBeenCalled();
+  });
+
+  it('activates Ming for an owned existing profile without replacing its recording', async () => {
+    const existing = readyProfile('v3');
+    readVoiceProfile.mockResolvedValue(existing);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({ profileId: existing.id, action: 'activate-ming' }),
+      }) as never,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      profile: { id: existing.id, activeEngine: 'ming3-tts' },
+    });
+    expect(activateMing3TeachingVoice).toHaveBeenCalledExactlyOnceWith(existing, 'local-faculty', {
+      allowPreReadyProfile: false,
+    });
+    expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
+    expect(writeReferenceAudio).not.toHaveBeenCalled();
+  });
 
   it('previews English and Hindi text with Hindi synthesis from one English reference', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));
@@ -1187,6 +1458,79 @@ describe('voice profile model preview API', () => {
       expect(findCurrentVoiceProfile).not.toHaveBeenCalled();
     },
   );
+
+  it('returns the owner saved library and renames one profile without changing its creation time', async () => {
+    const newest = {
+      ...readyProfile('v3'),
+      id: 'vcp_newest',
+      displayName: 'Newest voice',
+      createdAt: '2026-08-20T00:00:00.000Z',
+    };
+    const previous = {
+      ...readyProfile('v3'),
+      id: 'vcp_previous',
+      displayName: 'Previous voice',
+      createdAt: '2026-08-10T00:00:00.000Z',
+    };
+    listVoiceProfiles.mockResolvedValue([newest, previous]);
+    findCurrentVoiceProfile.mockResolvedValue(newest);
+    const { GET, PATCH } = await import('@/app/api/voice-cloning/profile/route');
+
+    const libraryResponse = await GET(
+      new NextRequest('http://localhost/api/voice-cloning/profile?library=true'),
+    );
+    await expect(libraryResponse.json()).resolves.toMatchObject({
+      profiles: [
+        { id: 'vcp_newest', displayName: 'Newest voice' },
+        { id: 'vcp_previous', displayName: 'Previous voice' },
+      ],
+    });
+    expect(listVoiceProfiles).toHaveBeenCalledWith('local-faculty', { readyOnly: true });
+
+    readVoiceProfile.mockResolvedValue(previous);
+    const renamed = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_previous',
+          action: 'rename',
+          displayName: 'Earlier lecture voice',
+        }),
+      }) as never,
+    );
+    await expect(renamed.json()).resolves.toMatchObject({
+      profile: {
+        id: 'vcp_previous',
+        displayName: 'Earlier lecture voice',
+        createdAt: '2026-08-10T00:00:00.000Z',
+      },
+    });
+    expect(readVoiceProfile).toHaveBeenCalledWith('vcp_previous', 'local-faculty');
+    expect(writeVoiceProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'vcp_previous',
+        displayName: 'Earlier lecture voice',
+        createdAt: '2026-08-10T00:00:00.000Z',
+      }),
+    );
+  });
+
+  it('does not rename a profile that is absent from the authenticated owner scope', async () => {
+    readVoiceProfile.mockResolvedValue(null);
+    const { PATCH } = await import('@/app/api/voice-cloning/profile/route');
+    const response = await PATCH(
+      new Request('http://localhost/api/voice-cloning/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          profileId: 'vcp_other_owner',
+          action: 'rename',
+          displayName: 'Not allowed',
+        }),
+      }) as never,
+    );
+    expect(response.status).toBe(404);
+    expect(writeVoiceProfile).not.toHaveBeenCalled();
+  });
 
   it('persists an original-versus-enhanced preview from one Chatterbox synthesis', async () => {
     readVoiceProfile.mockResolvedValue(readyProfile('v3'));
@@ -1536,7 +1880,7 @@ describe('voice profile model preview API', () => {
     expect(createProfile).not.toHaveBeenCalled();
   });
 
-  it('keeps the existing accepted profile until a replacement preview is accepted', async () => {
+  it('creates a separate candidate without marking the existing profile for replacement', async () => {
     const existingProfile = readyProfile('v3');
     findCurrentVoiceProfile.mockResolvedValue(existingProfile);
     const { POST } = await import('@/app/api/voice-cloning/profile/route');
@@ -1562,7 +1906,7 @@ describe('voice profile model preview API', () => {
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'vcp_new',
-        replacesProfileId: 'vcp_ready',
+        replacesProfileId: undefined,
         status: 'processing',
       }),
     );
@@ -2013,7 +2357,7 @@ describe('voice profile model preview API', () => {
     );
   });
 
-  it('persists accepted preview config while preserving the reference audio', async () => {
+  it('persists accepted preview config while preserving every older voice and reference', async () => {
     readVoiceProfile
       .mockResolvedValueOnce({
         ...readyProfile('v2'),
@@ -2055,17 +2399,11 @@ describe('voice profile model preview API', () => {
     expect(data.profile.languageId).toBe('hi');
     expect(data.profile.previewTextLanguageId).toBe('en');
     expect(data.profile.generationSettings).toEqual(VOICE_SETTINGS_PRESETS['accent-test']);
-    expect(writeVoiceProfile).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        id: 'vcp_old',
-        status: 'deleted',
-        referenceAudioKey: undefined,
-      }),
+    expect(writeVoiceProfile).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'vcp_old', status: 'deleted' }),
     );
-    expect(deleteVoiceProfileAssets).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'vcp_old' }),
-    );
-    expect(deleteProfile).toHaveBeenCalledWith({ providerReferenceId: 'ref-old' });
+    expect(deleteVoiceProfileAssets).not.toHaveBeenCalled();
+    expect(deleteProfile).not.toHaveBeenCalled();
     expect(writeVoiceProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         modelVariant: 'v3',

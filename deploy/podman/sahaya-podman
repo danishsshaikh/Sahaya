@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ENV_FILE=${SAHAYA_ENV_FILE:-$ROOT_DIR/.env}
+MODE=${SAHAYA_MODE:-}
+DATA_DIR=${SAHAYA_DATA_DIR:-}
+APP_IMAGE=${SAHAYA_APP_IMAGE:-localhost/sahaya-app:local}
+MING_IMAGE=${SAHAYA_MING_IMAGE:-localhost/sahaya-ming3-tts:local}
+QWEN_IMAGE=${SAHAYA_QWEN_IMAGE:-localhost/sahaya-qwen3-tts:local}
+RENDER_IMAGE=${SAHAYA_RENDER_IMAGE:-localhost/sahaya-render:local}
+APP_NETWORK=sahaya-app
+INFERENCE_NETWORK=sahaya-inference
+RENDER_NETWORK=sahaya-render
+
+usage() {
+  cat <<'EOF'
+Usage: deploy/podman/sahaya-podman [global options] COMMAND [argument]
+
+Global options:
+  --mode basic|ming|gemma-ming|full
+  --env-file PATH
+  --data-dir PATH
+
+Commands:
+  preflight          Read-only host, environment, model, port and CDI checks
+  gpu-check          Run nvidia-smi with each selected CDI device (image must exist)
+  build              Build only the images needed by the selected mode
+  start              Create networks/directories and start the selected mode
+  stop               Stop Sahaya containers without deleting persistent data
+  restart            Restart currently created Sahaya containers
+  status             Show container and health status
+  logs [service]     Follow logs (default: sahaya-app)
+  quadlet-install    Install rootless systemd Quadlets for the selected mode
+  backup PATH        Create a private tar archive of Sahaya server data
+
+Optional .env switches: SAHAYA_WITH_POSTGRES=true and SAHAYA_WITH_VIDEO=true.
+The script never downloads model checkpoints or modifies host GPU configuration.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --mode)
+      MODE=${2:-}
+      shift 2
+      ;;
+    --env-file)
+      ENV_FILE=${2:-}
+      shift 2
+      ;;
+    --data-dir)
+      DATA_DIR=${2:-}
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *) break ;;
+  esac
+done
+
+COMMAND=${1:-}
+shift || true
+
+env_value() {
+  local key=$1 default_value=${2:-} line value
+  line=$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" 2>/dev/null | tail -n 1 || true)
+  if [[ -z "$line" ]]; then
+    printf '%s' "$default_value"
+    return
+  fi
+  value=${line#*=}
+  value=${value%$'\r'}
+  if [[ ${#value} -ge 2 ]]; then
+    if [[ ${value:0:1} == '"' && ${value: -1} == '"' ]]; then
+      value=${value:1:${#value}-2}
+    elif [[ ${value:0:1} == "'" && ${value: -1} == "'" ]]; then
+      value=${value:1:${#value}-2}
+    fi
+  fi
+  printf '%s' "$value"
+}
+
+resolve_path() {
+  if [[ "$1" == /* ]]; then printf '%s' "$1"; else printf '%s/%s' "$ROOT_DIR" "${1#./}"; fi
+}
+
+DATA_DIR=$(resolve_path "${DATA_DIR:-$(env_value SAHAYA_DATA_DIR "${XDG_DATA_HOME:-$HOME/.local/share}/sahaya")}")
+MODE=${MODE:-$(env_value SAHAYA_MODE basic)}
+case "$MODE" in basic | ming | gemma-ming | full) ;; *) printf 'Unsupported mode: %s\n' "$MODE" >&2; exit 2 ;; esac
+
+needs_ming() { [[ "$MODE" == ming || "$MODE" == gemma-ming || "$MODE" == full ]]; }
+needs_gemma() { [[ "$MODE" == gemma-ming || "$MODE" == full ]]; }
+needs_qwen() { [[ "$MODE" == full ]]; }
+with_postgres() { [[ $(env_value SAHAYA_WITH_POSTGRES false) == true ]]; }
+with_video() { [[ $(env_value SAHAYA_WITH_VIDEO false) == true ]]; }
+
+require_podman() {
+  command -v podman >/dev/null 2>&1 || {
+    printf 'Podman is required. See docs/DEPLOY_WITH_PODMAN.md.\n' >&2
+    exit 1
+  }
+}
+
+gpu_check() {
+  require_podman
+  local image device label label_device
+  image=$(env_value NVIDIA_CUDA_PROBE_IMAGE docker.io/nvidia/cuda:12.4.1-base-ubuntu22.04)
+  if ! podman image exists "$image"; then
+    printf 'Probe image is not local: %s\nPull it explicitly, review it, then retry: podman pull %s\n' "$image" "$image" >&2
+    exit 1
+  fi
+  local checks=()
+  if needs_gemma; then checks+=("Gemma:$(env_value PODMAN_GEMMA_GPU_DEVICE)"); fi
+  if needs_ming; then checks+=("Ming:$(env_value PODMAN_MING_GPU_DEVICE)"); fi
+  if needs_qwen; then checks+=("Qwen:$(env_value PODMAN_QWEN_GPU_DEVICE)"); fi
+  ((${#checks[@]} > 0)) || { printf 'Mode %s does not select a GPU service.\n' "$MODE"; return; }
+  for label_device in "${checks[@]}"; do
+    label=${label_device%%:*}
+    device=${label_device#*:}
+    printf 'Checking %s device %s\n' "$label" "$device"
+    podman run --rm --pull=never --device "$device" --security-opt label=disable "$image" nvidia-smi -L
+  done
+}
+
+public_build_args() {
+  local key value
+  local keys=(
+    ALPINE_MIRROR NPM_REGISTRY ALLOWED_FRAME_ANCESTORS
+    NEXT_PUBLIC_PERSISTENCE NEXT_PUBLIC_PERSISTENCE_TOKEN
+    NEXT_PUBLIC_PRO_WORKBENCH_ENABLED NEXT_PUBLIC_MAIC_EDITOR_ENABLED
+    NEXT_PUBLIC_FEATURE_COURSE_NARRATION_SWITCHING
+    NEXT_PUBLIC_MAIC_EDITOR_RENDERER_ENABLED NEXT_PUBLIC_MAIC_PLAYBACK_RENDERER_ENABLED
+    NEXT_PUBLIC_PI_CHAT_ENABLED NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED
+    NEXT_PUBLIC_SHOW_VOCATIONAL_TEST_UI NEXT_PUBLIC_ENABLE_VIDEO_EXPORT
+    NEXT_PUBLIC_VIDEO_EXPORT_BURN_IN_CAPTIONS NEXT_PUBLIC_VIDEO_EXPORT_CTA_DESTINATION
+    NEXT_PUBLIC_ENABLE_PPTX_IMPORT NEXT_PUBLIC_FEATURE_GENERATED_CLASSROOM_AGENTS
+    NEXT_PUBLIC_FEATURE_COMPANION_SELECTOR NEXT_PUBLIC_FEATURE_CLASSROOM_CHAT
+    NEXT_PUBLIC_FEATURE_VOICE_CLONING NEXT_PUBLIC_FEATURE_STATIC_VOICE
+    NEXT_PUBLIC_FEATURE_PROMPT_PERSONALIZATION NEXT_PUBLIC_FEATURE_WEB_SEARCH
+    NEXT_PUBLIC_FEATURE_CLASSROOM_IMPORT NEXT_PUBLIC_FEATURE_WHITEBOARD
+    NEXT_PUBLIC_FEATURE_INTERACTIVE_SCENES NEXT_PUBLIC_FEATURE_DETERMINISTIC_INTERACTIVES
+    NEXT_PUBLIC_FEATURE_DISCUSSION_SCENES NEXT_PUBLIC_FEATURE_WORKSPACE_SCENES
+    NEXT_PUBLIC_FEATURE_FLOW_SCENES NEXT_PUBLIC_INTERACTIVE_CAPABILITY_TRACE
+    NEXT_PUBLIC_VIDEO_SPOTLIGHT_PARITY_TRACE
+  )
+  BUILD_ARGS=()
+  for key in "${keys[@]}"; do
+    value=$(env_value "$key")
+    [[ -n "$value" ]] && BUILD_ARGS+=(--build-arg "$key=$value")
+  done
+}
+
+build_images() {
+  require_podman
+  [[ -f "$ENV_FILE" ]] || { printf 'Missing %s\n' "$ENV_FILE" >&2; exit 1; }
+  public_build_args
+  podman build "${BUILD_ARGS[@]}" --tag "$APP_IMAGE" --file "$ROOT_DIR/Dockerfile" "$ROOT_DIR"
+
+  if needs_ming; then
+    local source base
+    source=$(resolve_path "$(env_value MING3_TTS_SOURCE_DIR "$ROOT_DIR/.models/sources/ming3-tts")")
+    base=$(env_value TTS_CUDA_BASE_IMAGE pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime)
+    podman build --tag "$MING_IMAGE" \
+      --build-arg "TTS_CUDA_BASE_IMAGE=$base" \
+      --build-context "ming-source=$source" \
+      --file "$ROOT_DIR/services/ming3-tts/Dockerfile" "$ROOT_DIR"
+  fi
+
+  if needs_qwen; then
+    local source base
+    source=$(resolve_path "$(env_value QWEN3_TTS_SOURCE_DIR "$ROOT_DIR/.models/sources/qwen3-tts")")
+    base=$(env_value TTS_CUDA_BASE_IMAGE pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime)
+    podman build --tag "$QWEN_IMAGE" \
+      --build-arg "TTS_CUDA_BASE_IMAGE=$base" \
+      --build-context "qwen-source=$source" \
+      --file "$ROOT_DIR/services/qwen3-tts/Dockerfile" "$ROOT_DIR"
+  fi
+
+  if with_video; then
+    podman build --tag "$RENDER_IMAGE" --file "$ROOT_DIR/render-service/Dockerfile" "$ROOT_DIR/render-service"
+  fi
+  if needs_gemma; then
+    podman pull "$(env_value LLAMA_CPP_IMAGE ghcr.io/ggml-org/llama.cpp:server-cuda)"
+  fi
+  if with_postgres; then podman pull postgres:16; fi
+}
+
+ensure_network() {
+  local name=$1
+  shift
+  podman network exists "$name" 2>/dev/null || podman network create "$@" "$name" >/dev/null
+}
+
+remove_container() {
+  podman container exists "$1" 2>/dev/null && podman rm --force "$1" >/dev/null
+}
+
+gpu_args() {
+  local device=$1
+  GPU_ARGS=(--device "$device" --security-opt label=disable)
+  if [[ $(env_value PODMAN_KEEP_GROUPS false) == true ]]; then
+    GPU_ARGS+=(--group-add keep-groups)
+  fi
+}
+
+run_ming() {
+  local model device
+  model=$(resolve_path "$(env_value MING3_TTS_MODEL_DIR "$ROOT_DIR/.models/ming3-tts")")
+  device=$(env_value PODMAN_MING_GPU_DEVICE)
+  gpu_args "$device"
+  remove_container sahaya-ming3-tts
+  podman run --detach --pull=never --name sahaya-ming3-tts --replace --restart=unless-stopped \
+    --network "$INFERENCE_NETWORK" --network-alias ming3-tts \
+    "${GPU_ARGS[@]}" --shm-size 2g \
+    --env HF_HOME=/cache/huggingface \
+    --env MING3_TTS_HOST=0.0.0.0 --env MING3_TTS_PORT=8773 \
+    --env MING3_TTS_REPOSITORY_DIR=/opt/ming3-tts \
+    --env MING3_TTS_MODEL=/models/ming3-tts \
+    --env MING3_TTS_REFERENCE_ROOT=/app/data/voice-cloning \
+    --env MING3_TTS_EMBEDDING_ROOT=/app/data/voice-cloning/.ming3-speaker-embeddings \
+    --env "MING3_TTS_CONDITIONING_MODE=$(env_value MING3_TTS_CONDITIONING_MODE acoustic-reference)" \
+    --env MING3_TTS_DEVICE=cuda:0 \
+    --volume "$model:/models/ming3-tts:ro" \
+    --volume "$DATA_DIR/app:/app/data:z" \
+    --volume "$DATA_DIR/cache/huggingface:/cache/huggingface:z" \
+    --health-cmd "python -c \"import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8773/health'))['ok']\"" \
+    --health-interval 20s --health-timeout 10s --health-retries 30 --health-start-period 180s \
+    "$MING_IMAGE" >/dev/null
+}
+
+run_qwen() {
+  local model device
+  model=$(resolve_path "$(env_value QWEN3_TTS_MODEL_DIR "$ROOT_DIR/.models/qwen3-tts")")
+  device=$(env_value PODMAN_QWEN_GPU_DEVICE)
+  gpu_args "$device"
+  remove_container sahaya-qwen3-tts
+  podman run --detach --pull=never --name sahaya-qwen3-tts --replace --restart=unless-stopped \
+    --network "$INFERENCE_NETWORK" --network-alias qwen3-tts \
+    "${GPU_ARGS[@]}" --shm-size 2g \
+    --env HF_HOME=/cache/huggingface --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
+    --env QWEN3_TTS_SERVICE_HOST=0.0.0.0 --env QWEN3_TTS_SERVICE_PORT=8771 \
+    --env QWEN3_TTS_MODEL=/models/qwen3-tts \
+    --env "QWEN3_TTS_ATTENTION_IMPLEMENTATION=$(env_value QWEN3_TTS_ATTENTION_IMPLEMENTATION eager)" \
+    --env "QWEN3_TTS_QUEUE_WAIT_SECONDS=$(env_value QWEN3_TTS_QUEUE_WAIT_SECONDS 30)" \
+    --env "QWEN3_TTS_MAX_PENDING=$(env_value QWEN3_TTS_MAX_PENDING 64)" \
+    --env "QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS=$(env_value QWEN3_TTS_SYNTHESIS_DEADLINE_SECONDS 165)" \
+    --env "QWEN3_TTS_RESPONSE_GRACE_SECONDS=$(env_value QWEN3_TTS_RESPONSE_GRACE_SECONDS 5)" \
+    --env "QWEN3_TTS_MAX_NEW_TOKENS=$(env_value QWEN3_TTS_MAX_NEW_TOKENS 512)" \
+    --volume "$model:/models/qwen3-tts:ro" \
+    --volume "$DATA_DIR/app:/app/data:ro,z" \
+    --volume "$DATA_DIR/cache/huggingface:/cache/huggingface:z" \
+    --health-cmd "python -c \"import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8771/health'))['ok']\"" \
+    --health-interval 20s --health-timeout 10s --health-retries 30 --health-start-period 180s \
+    "$QWEN_IMAGE" >/dev/null
+}
+
+run_gemma() {
+  local model_dir model_file device image
+  model_dir=$(resolve_path "$(env_value GEMMA_MODEL_DIR "$ROOT_DIR/.models/gemma")")
+  model_file=$(env_value GEMMA_GGUF_FILE gemma.gguf)
+  device=$(env_value PODMAN_GEMMA_GPU_DEVICE)
+  image=$(env_value LLAMA_CPP_IMAGE ghcr.io/ggml-org/llama.cpp:server-cuda)
+  gpu_args "$device"
+  remove_container sahaya-llama-gemma
+  podman run --detach --pull=never --name sahaya-llama-gemma --replace --restart=unless-stopped \
+    --network "$INFERENCE_NETWORK" --network-alias llama-gemma \
+    "${GPU_ARGS[@]}" --volume "$model_dir:/models:ro" \
+    --health-cmd 'curl --fail --silent http://127.0.0.1:8080/health' \
+    --health-interval 15s --health-timeout 5s --health-retries 20 --health-start-period 120s \
+    "$image" --model "/models/$model_file" --host 0.0.0.0 --port 8080 \
+    --n-gpu-layers "$(env_value GEMMA_GPU_LAYERS 99)" \
+    --ctx-size "$(env_value GEMMA_CONTEXT_SIZE 8192)" >/dev/null
+}
+
+run_postgres() {
+  local password
+  password=$(env_value PERSISTENCE_POSTGRES_PASSWORD)
+  [[ -n "$password" ]] || { printf 'PERSISTENCE_POSTGRES_PASSWORD is required.\n' >&2; exit 1; }
+  remove_container sahaya-postgres
+  podman run --detach --pull=never --name sahaya-postgres --replace --restart=unless-stopped \
+    --network "$APP_NETWORK" --network-alias postgres \
+    --env POSTGRES_DB=openmaic --env POSTGRES_USER=openmaic --env "POSTGRES_PASSWORD=$password" \
+    --volume "$DATA_DIR/postgres:/var/lib/postgresql/data:U,Z" \
+    --health-cmd 'pg_isready -U openmaic -d openmaic' \
+    --health-interval 5s --health-timeout 5s --health-retries 10 --health-start-period 5s \
+    postgres:16 >/dev/null
+}
+
+run_render() {
+  remove_container sahaya-render
+  podman run --detach --pull=never --name sahaya-render --replace --restart=unless-stopped \
+    --network "$RENDER_NETWORK" --network-alias render-service \
+    --cap-add NET_ADMIN --memory "$(env_value RENDER_SERVICE_MEMORY_LIMIT 8g)" --shm-size 2g \
+    --env PORT=9000 --env "RENDER_RESOURCE_PROFILE=$(env_value RENDER_RESOURCE_PROFILE standard)" \
+    --health-cmd "node -e \"fetch('http://127.0.0.1:9000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\"" \
+    --health-interval 15s --health-timeout 5s --health-retries 10 --health-start-period 30s \
+    "$RENDER_IMAGE" >/dev/null
+}
+
+run_app() {
+  local bind port
+  bind=$(env_value SAHAYA_HTTP_BIND 127.0.0.1)
+  port=$(env_value SAHAYA_HTTP_PORT 3000)
+  remove_container sahaya-app
+  local args=(
+    run --detach --pull=never --name sahaya-app --replace --restart=unless-stopped --init
+    --network "$APP_NETWORK" --network "$INFERENCE_NETWORK"
+    --publish "$bind:$port:3000"
+    --env-file "$ENV_FILE"
+    --env OPENMAIC_AUTH_DATA_DIR=/app/data/auth
+    --env VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
+    --env TEACHING_VOICE_JOB_ARTIFACT_DIR=/app/data/voice-cloning/teaching-voice-job-artifacts-v1
+    --env MING3_TTS_BASE_URL=http://ming3-tts:8773
+    --env QWEN3_TTS_BASE_URL=http://qwen3-tts:8771
+    --env RENDER_SERVICE_URL=http://render-service:9000
+    --volume "$DATA_DIR/app:/app/data:U,z"
+  )
+  if with_video; then args+=(--network "$RENDER_NETWORK"); fi
+  podman "${args[@]}" "$APP_IMAGE" >/dev/null
+}
+
+start_stack() {
+  require_podman
+  "$ROOT_DIR/scripts/deployment-preflight.sh" --runtime podman --mode "$MODE" --env-file "$ENV_FILE"
+  mkdir -p "$DATA_DIR/app" "$DATA_DIR/cache/huggingface" "$DATA_DIR/postgres"
+  chmod 700 "$DATA_DIR" "$DATA_DIR/app" "$DATA_DIR/postgres"
+  ensure_network "$APP_NETWORK"
+  ensure_network "$INFERENCE_NETWORK" --internal
+  if with_video; then ensure_network "$RENDER_NETWORK" --internal; fi
+  if needs_gemma; then run_gemma; fi
+  if needs_ming; then run_ming; fi
+  if needs_qwen; then run_qwen; fi
+  if with_postgres; then run_postgres; fi
+  if with_video; then run_render; fi
+  run_app
+  printf 'Sahaya started. Check readiness with: %s status\n' "$0"
+}
+
+stop_stack() {
+  require_podman
+  local name
+  for name in sahaya-app sahaya-render sahaya-qwen3-tts sahaya-ming3-tts sahaya-llama-gemma sahaya-postgres; do
+    podman container exists "$name" 2>/dev/null && podman stop --ignore "$name" >/dev/null
+  done
+  printf 'Sahaya containers stopped. Persistent data was not deleted.\n'
+}
+
+restart_stack() {
+  require_podman
+  local found=false name
+  for name in sahaya-postgres sahaya-llama-gemma sahaya-ming3-tts sahaya-qwen3-tts sahaya-render sahaya-app; do
+    if podman container exists "$name" 2>/dev/null; then
+      podman restart "$name" >/dev/null
+      found=true
+    fi
+  done
+  [[ "$found" == true ]] || { printf 'No Sahaya containers exist; run start first.\n' >&2; exit 1; }
+}
+
+status_stack() {
+  require_podman
+  podman ps --all --filter 'name=sahaya-' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+}
+
+backup_data() {
+  local output=${1:-}
+  [[ -n "$output" ]] || { printf 'backup requires an output archive path.\n' >&2; exit 2; }
+  [[ -d "$DATA_DIR" ]] || { printf 'Data directory does not exist: %s\n' "$DATA_DIR" >&2; exit 1; }
+  if command -v podman >/dev/null 2>&1 && podman ps --filter 'name=sahaya-' --format '{{.Names}}' | grep -q .; then
+    printf 'Stop Sahaya before backup so application and PostgreSQL files are consistent.\n' >&2
+    exit 1
+  fi
+  output=$(mkdir -p "$(dirname "$output")" && cd "$(dirname "$output")" && pwd)/$(basename "$output")
+  umask 077
+  if command -v podman >/dev/null 2>&1; then
+    podman unshare tar --create --gzip --file "$output" --directory "$DATA_DIR" .
+  else
+    tar --create --gzip --file "$output" --directory "$DATA_DIR" .
+  fi
+  printf 'Backup created: %s\n' "$output"
+}
+
+case "$COMMAND" in
+  preflight) exec "$ROOT_DIR/scripts/deployment-preflight.sh" --runtime podman --mode "$MODE" --env-file "$ENV_FILE" ;;
+  gpu-check) gpu_check ;;
+  build) build_images ;;
+  start) start_stack ;;
+  stop) stop_stack ;;
+  restart) restart_stack ;;
+  status) status_stack ;;
+  logs)
+    require_podman
+    exec podman logs --follow "${1:-sahaya-app}"
+    ;;
+  quadlet-install)
+    exec "$ROOT_DIR/deploy/podman/install-quadlet.sh" --mode "$MODE" --env-file "$ENV_FILE" --data-dir "$DATA_DIR"
+    ;;
+  backup) backup_data "${1:-}" ;;
+  *) usage; [[ -n "$COMMAND" ]] && exit 2 || exit 0 ;;
+esac

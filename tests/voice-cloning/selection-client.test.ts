@@ -92,6 +92,30 @@ describe('resolveGenerationTeachingVoiceProfileId', () => {
     expect(readTeachingVoiceSelection('hi', storage)).toBeUndefined();
   });
 
+  it('persists the Qwen-specific enhanced mode for new course generation', async () => {
+    const storage = memoryStorage();
+    const fetchProfile = vi.fn(async () =>
+      response({
+        profile: {
+          id: 'vcp_qwen_enhanced',
+          status: 'ready',
+          activeEngine: 'qwen3-tts',
+          enhancementMode: 'standard',
+          qwenEnhancementMode: 'resemble-enhance',
+        },
+      }),
+    );
+
+    await expect(
+      resolveGenerationTeachingVoiceProfileId(undefined, fetchProfile as typeof fetch, storage),
+    ).resolves.toBe('vcp_qwen_enhanced');
+    expect(readTeachingVoiceSelection('en', storage)).toEqual({
+      enabled: true,
+      profileId: 'vcp_qwen_enhanced',
+      enhancementMode: 'resemble-enhance',
+    });
+  });
+
   it('respects an intentional Teaching Voice disable for the same ready profile', async () => {
     const storage = memoryStorage();
     const fetchProfile = vi.fn(async () =>

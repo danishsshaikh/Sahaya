@@ -1,9 +1,15 @@
 # Teaching Voice Integration
 
-Each private, owner-scoped profile represents one reference language. New English
-enrollments use `chatterbox`; new Hindi and Marathi enrollments use `indicf5`.
-Stored `profile.provider` controls preview, synthesis, recovery, and deletion.
-Absent provider metadata and retired `qwen3` metadata resolve to Chatterbox.
+Each private, owner-scoped profile represents one reference language. The simplified
+English homepage workflow stores the authorized recording, prepares the existing
+Ming 3.0 TTS 0.5B reference, generates a Ming sample, and activates Ming. Only
+after that valid WAV sample is saved does the explicit
+Generate Voice action make that profile the account's active English voice. It
+does not generate extra Chatterbox or Qwen samples. Existing profiles retain their
+stored `activeEngine`, and existing course-specific selections remain authoritative.
+Existing provider-specific and IndicF5 enrollment APIs remain available to their
+existing callers. Stored `profile.provider` remains the compatibility and lifecycle provider;
+`activeEngine` and the engine-specific enhancement mode determine classroom synthesis.
 Unknown IDs fail and no provider fallback is permitted.
 
 Legacy Qwen3 profiles remain usable only when their private normalized reference
@@ -30,21 +36,49 @@ language in `profile.languageId`. Classroom narration uses that saved Chatterbox
 selection even when the unchanged lesson text is English. IndicF5 synthesis
 continues to require an explicit target matching its Hindi or Marathi reference.
 
-The UI records an approved paragraph in the selected reference language and
-sends its versioned phrase ID and exact displayed text. The server checks both
-against the approved phrase and persists `referenceText` verbatim. Changing the
-enrollment language discards the local candidate recording. Preview settings do
-not change the reference language or require re-enrollment. An English-reference
+The homepage records one approved English paragraph and sends its versioned phrase
+ID and exact displayed text. Alternatively, it stores the exact authorized upload
+and requires an explicit, editable transcript; server transcription may populate
+the field but is never treated as unreviewable ground truth. The server checks the
+recorded phrase against the approved text and persists `referenceText` verbatim.
+Preview settings do not change the reference language or require re-enrollment. An English-reference
 Chatterbox profile can preview English text with English or Hindi synthesis, and
 Hindi text with Hindi synthesis. These comparisons can affect pronunciation and
 do not guarantee a particular accent. Hindi/Marathi IndicF5 previews use
 Devanagari.
 
-Replacement targets the latest ready profile in the same language. The prior
-profile is retired only after the replacement preview is accepted, with a
-second language check before cleanup. Other language profiles remain intact.
-Old JSON files without `referenceText` remain valid for Chatterbox. IndicF5
-profiles without it fail explicitly and need re-enrollment.
+Homepage re-recording or upload creates a new Ming-default profile and preserves
+previous profiles and original recordings. Advanced provider selection can still
+explicitly activate or use Qwen, Chatterbox, Ming, Sarvam, Bodhan, or IndicF5 where
+compatible. Old JSON files without `referenceText` remain valid for Chatterbox,
+but cannot be upgraded to Qwen until an accurate transcript is available. IndicF5
+profiles without the required transcript fail explicitly and need re-enrollment.
+
+## Selecting An Existing Profile
+
+Use the owner-scoped terminal utility when an older ready profile should become
+the account's default Teaching Voice. Run it in the same application environment
+as Sahaya so `OPENMAIC_AUTH_DATA_DIR` and `VOICE_CLONING_STORAGE_DIR` resolve to
+the deployed private data stores.
+
+List the account's profiles, including their immutable creation time and provider
+compatibility:
+
+```sh
+pnpm voice-profile list --user <faculty-email-or-user-id>
+```
+
+After confirming that the intended profile is owned by that account and marked
+ready, activate it by ID:
+
+```sh
+pnpm voice-profile activate --user <faculty-email-or-user-id> --profile vcp_RYn-oAtrY3ptceg6
+```
+
+Activation validates the account, profile ownership, readiness, and readable
+owner-scoped reference audio. It updates only the account-level Teaching Voice
+pointer. It does not alter profile timestamps, delete or recreate audio, or
+change any existing course-specific profile binding.
 
 ## HTTP Boundary
 
@@ -56,6 +90,7 @@ application and Python services must see the same reference files.
 | --- | --- | --- | --- |
 | Chatterbox | `VOICE_CLONING_BASE_URL` | `VOICE_CLONING_TIMEOUT_MS` | 120000 ms |
 | IndicF5 | `http://127.0.0.1:8772` | `INDICF5_VOICE_CLONING_TIMEOUT_MS` | 900000 ms |
+| Ming 3.0 TTS 0.5B | `http://127.0.0.1:8773` | `MING3_TTS_TIMEOUT_MS` | 300000 ms |
 
 The IndicF5 URL can be overridden by `INDICF5_VOICE_CLONING_BASE_URL`.
 Transport and model-load failures are errors.
@@ -75,9 +110,11 @@ proxy timeout configuration; the isolated self-hosted GPU test must check its
 HTTP timeout limits. Increasing provider timeouts beyond it requires reviewing
 that allowance too. Teaching Voice speech actions within a scene are serial;
 Chatterbox classroom narration runs through an owner-scoped, idempotent,
-single-worker resource queue. Each completed clip is downloaded, attached, and
-persisted independently while later clips remain queued. IndicF5 retains its
-existing request behavior.
+single-worker resource queue. Ming classroom narration has its own resource queue,
+using the existing configured Ming concurrency, and keys retained artifacts by the
+configured acoustic-reference or speaker-embedding-only conditioning mode. Each
+completed clip is downloaded, attached, and persisted independently while later
+clips remain queued. IndicF5 retains its existing request behavior.
 
 ## Indic Text Boundary
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { concatenatePcmWav, readWavMetadata, splitSpeechText } from '@/lib/voice-comparison/audio';
+import {
+  concatenatePcmWav,
+  readWavMetadata,
+  splitSpeechText,
+  splitSpeechTextPreservingText,
+} from '@/lib/voice-comparison/audio';
 
 function pcmWav(samples: number[]): Uint8Array {
   const bytes = new Uint8Array(44 + samples.length * 2);
@@ -26,6 +31,14 @@ describe('voice comparison audio', () => {
       'First sentence. Second sentence!',
       'Third sentence?',
     ]);
+  });
+
+  it('splits course narration without changing any transcript character', () => {
+    const text = '  First sentence.  Second sentence keeps spacing!  ';
+    const chunks = splitSpeechTextPreservingText(text, 22);
+
+    expect(chunks.every((chunk) => chunk.length <= 22)).toBe(true);
+    expect(chunks.join('')).toBe(text);
   });
 
   it('concatenates compatible PCM WAV responses and reports duration', () => {

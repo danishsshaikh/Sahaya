@@ -1,9 +1,19 @@
 import { createHash } from 'node:crypto';
+import { markVoiceConfigured } from '@/lib/auth/server';
 import { getVoicePreviewText } from '@/lib/voice-cloning/phrases';
-import { isVoiceEnhancementAllowed } from '@/lib/voice-cloning/config';
+import {
+  isQwen3TtsClassroomEnabled,
+  isQwen3TtsPreviewEnabled,
+  isVoiceEnhancementAllowed,
+} from '@/lib/voice-cloning/config';
 import { processVoiceAudioVariants } from '@/lib/voice-cloning/audio-enhancement';
 import { Qwen3TtsVoiceCloningProvider } from '@/lib/voice-cloning/providers/qwen3-preview';
-import { referenceAudioExists, resolveReferenceAudioPath } from '@/lib/voice-cloning/storage';
+import {
+  activateVoiceProfile,
+  referenceAudioExists,
+  resolveReferenceAudioPath,
+  writeVoiceProfile,
+} from '@/lib/voice-cloning/storage';
 import {
   TeachingVoiceError,
   type VoiceEnhancementMode,
@@ -107,4 +117,58 @@ export function createQwen3TtsPreviewCacheKey(
 export function currentQwen3TtsPreview(profile: VoiceProfile): VoiceModelPreviewResult | undefined {
   const cache = profile.qwenPreviewCache;
   return cache?.cacheKey === createQwen3TtsPreviewCacheKey(profile) ? cache.result : undefined;
+}
+
+export async function activateEnhancedQwenTeachingVoice(
+  profile: VoiceProfile,
+  ownerId: string,
+): Promise<VoiceProfile> {
+  if (profile.ownerId !== ownerId) {
+    throw new TeachingVoiceError('Teaching Voice profile does not belong to this account.', 403);
+  }
+  if (profile.language !== 'en' || !profile.referenceText?.trim()) {
+    throw new TeachingVoiceError(
+      'An accurate English transcript is required to generate this Teaching Voice.',
+    );
+  }
+  if (!isQwen3TtsPreviewEnabled() || !isQwen3TtsClassroomEnabled()) {
+    throw new TeachingVoiceError('Voice generation is not enabled on this deployment.', 503);
+  }
+  if (
+    !isVoiceEnhancementAllowed('qwen3-tts', 'en', 'preview') ||
+    !isVoiceEnhancementAllowed('qwen3-tts', 'en', 'classroom')
+  ) {
+    throw new TeachingVoiceError(
+      'Enhanced Teaching Voice output is not enabled for both samples and classroom narration.',
+      503,
+    );
+  }
+
+  const modelPreview =
+    currentQwen3TtsPreview(profile) ??
+    (await generateQwen3TtsModelPreview(profile, 'resemble-enhance'));
+  if (!modelPreview.comparison.enhanced) {
+    throw new TeachingVoiceError(
+      modelPreview.comparison.enhancementError || 'Voice enhancement did not produce audio.',
+      502,
+    );
+  }
+
+  const next: VoiceProfile = {
+    ...profile,
+    status: 'ready',
+    activeEngine: 'qwen3-tts',
+    qwenEnhancementMode: 'resemble-enhance',
+    qwenPreviewCache: {
+      cacheKey: createQwen3TtsPreviewCacheKey(profile, modelPreview.previewText),
+      result: modelPreview,
+    },
+    failureReason: undefined,
+    failurePhase: undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeVoiceProfile(next);
+  await activateVoiceProfile(ownerId, next.id);
+  await markVoiceConfigured(ownerId);
+  return next;
 }

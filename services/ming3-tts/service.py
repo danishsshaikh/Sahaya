@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -18,14 +19,40 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 
+from conditioning import (
+    ACOUSTIC_REFERENCE,
+    CONDITIONING_MODES,
+    GENERATION_CONFIG_ID,
+    parse_conditioning_mode,
+    prepare_speaker_embedding,
+    reference_preparation,
+    requires_speaker_embedding,
+    speaker_embedding_path,
+    synthesis_kwargs,
+)
+
 
 MODEL_ID = os.getenv("MING3_TTS_MODEL", "inclusionAI/Ming-3.0-tts-0.5b")
 DEVICE = os.getenv("MING3_TTS_DEVICE", "cuda:0")
 OFFICIAL_REPOSITORY = os.getenv("MING3_TTS_REPOSITORY_DIR", "").strip()
 REFERENCE_ROOT_VALUE = os.getenv("MING3_TTS_REFERENCE_ROOT", "").strip()
 REFERENCE_ROOT = Path(REFERENCE_ROOT_VALUE).resolve() if REFERENCE_ROOT_VALUE else None
+EMBEDDING_ROOT_VALUE = os.getenv("MING3_TTS_EMBEDDING_ROOT", "").strip()
+EMBEDDING_ROOT = (
+    Path(EMBEDDING_ROOT_VALUE).resolve()
+    if EMBEDDING_ROOT_VALUE
+    else (REFERENCE_ROOT / ".ming3-speaker-embeddings" if REFERENCE_ROOT else None)
+)
+try:
+    DEFAULT_CONDITIONING_MODE = parse_conditioning_mode(
+        os.getenv("MING3_TTS_CONDITIONING_MODE", ACOUSTIC_REFERENCE)
+    )
+except ValueError as exc:
+    DEFAULT_CONDITIONING_MODE = ACOUSTIC_REFERENCE
+    CONDITIONING_CONFIG_ERROR = str(exc)
+else:
+    CONDITIONING_CONFIG_ERROR = None
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-REFERENCE_PREPARATION = "official-runtime-mono-resample-and-front-pad"
 
 if OFFICIAL_REPOSITORY:
     sys.path.insert(0, str(Path(OFFICIAL_REPOSITORY).resolve()))
@@ -51,7 +78,7 @@ model_error: str | None = None
 class VoicePrompt:
     reference_audio: Path
     reference_text: str
-    reference_preparation: str
+    speaker_embedding: Path | None
 
 
 profiles: dict[str, VoicePrompt] = {}
@@ -62,6 +89,7 @@ class ProfileCreateRequest(BaseModel):
     referenceAudioPath: str = Field(min_length=1)
     referenceText: str = Field(min_length=1)
     referenceLanguage: str = "en"
+    conditioningMode: str = DEFAULT_CONDITIONING_MODE
 
     @field_validator("profileId")
     @classmethod
@@ -84,11 +112,17 @@ class ProfileCreateRequest(BaseModel):
             raise ValueError("Ming 3.0 TTS preview requires an English reference")
         return "en"
 
+    @field_validator("conditioningMode")
+    @classmethod
+    def validate_conditioning_mode(cls, value: str) -> str:
+        return parse_conditioning_mode(value)
+
 
 class SynthesizeRequest(BaseModel):
     profileId: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=1000)
     language: str = "en"
+    conditioningMode: str = DEFAULT_CONDITIONING_MODE
 
     @field_validator("profileId")
     @classmethod
@@ -110,6 +144,11 @@ class SynthesizeRequest(BaseModel):
         if value.strip().lower() not in {"en", "english"}:
             raise ValueError("Ming 3.0 TTS preview currently supports English text only")
         return "en"
+
+    @field_validator("conditioningMode")
+    @classmethod
+    def validate_conditioning_mode(cls, value: str) -> str:
+        return parse_conditioning_mode(value)
 
 
 def validate_reference(path_value: str) -> Path:
@@ -138,8 +177,18 @@ def require_model() -> Any:
     return model
 
 
+def save_speaker_embedding(payload: dict[str, Any], path: Path) -> None:
+    import torch
+
+    torch.save(payload, path)
+
+
 def load_model() -> None:
     global model, model_error
+    if CONDITIONING_CONFIG_ERROR is not None:
+        model_error = CONDITIONING_CONFIG_ERROR
+        log.error("Ming 3.0 TTS conditioning configuration is invalid")
+        return
     if REFERENCE_ROOT is None:
         model_error = "MING3_TTS_REFERENCE_ROOT is not configured"
         log.error("Ming 3.0 TTS reference root is not configured")
@@ -176,29 +225,58 @@ def health() -> dict[str, Any]:
         "device": DEVICE,
         "profileCount": profile_count,
         "referenceRootConfigured": REFERENCE_ROOT is not None,
+        "embeddingRootConfigured": EMBEDDING_ROOT is not None,
+        "defaultConditioningMode": DEFAULT_CONDITIONING_MODE,
+        "conditioningModes": list(CONDITIONING_MODES),
+        "generationConfig": GENERATION_CONFIG_ID,
         "error": model_error,
     }
 
 
 @app.post("/profiles")
-def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
-    require_model()
+def create_profile(req: ProfileCreateRequest) -> dict[str, Any]:
     reference = validate_reference(req.referenceAudioPath)
+    conditioning_mode = parse_conditioning_mode(req.conditioningMode)
+    embedding: Path | None = None
+    embedding_prepared = False
+    if requires_speaker_embedding(conditioning_mode):
+        active_model = require_model()
+        if EMBEDDING_ROOT is None:
+            raise HTTPException(status_code=503, detail="Ming embedding root is not configured")
+        EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(EMBEDDING_ROOT, 0o700)
+        embedding = speaker_embedding_path(EMBEDDING_ROOT, req.profileId, reference)
+        if not generation_lock.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Ming 3.0 TTS preview service is busy")
+        try:
+            embedding_prepared = prepare_speaker_embedding(
+                active_model,
+                reference,
+                embedding,
+                save_speaker_embedding,
+            )
+        finally:
+            generation_lock.release()
     prompt = VoicePrompt(
         reference_audio=reference,
         reference_text=req.referenceText,
-        reference_preparation=REFERENCE_PREPARATION,
+        speaker_embedding=embedding,
     )
     with state_lock:
         profiles[req.profileId] = prompt
     log.info(
-        "Ming voice prompt registered profileId=%s referencePreparation=%s",
+        "Ming voice prompt registered profileId=%s conditioningMode=%s "
+        "speakerEmbeddingPrepared=%s",
         req.profileId,
-        REFERENCE_PREPARATION,
+        req.conditioningMode,
+        embedding_prepared,
     )
     return {
         "providerReferenceId": req.profileId,
-        "referencePreparation": REFERENCE_PREPARATION,
+        "referencePreparation": reference_preparation(conditioning_mode),
+        "defaultConditioningMode": DEFAULT_CONDITIONING_MODE,
+        "speakerEmbeddingPrepared": embedding_prepared,
+        "generationConfig": GENERATION_CONFIG_ID,
     }
 
 
@@ -206,6 +284,9 @@ def create_profile(req: ProfileCreateRequest) -> dict[str, str]:
 def delete_profile(profile_id: str) -> dict[str, bool]:
     with state_lock:
         removed = profiles.pop(profile_id, None)
+    if removed is not None:
+        if removed.speaker_embedding is not None:
+            shutil.rmtree(removed.speaker_embedding.parent, ignore_errors=True)
     return {"deleted": removed is not None}
 
 
@@ -221,19 +302,44 @@ def synthesize(req: SynthesizeRequest) -> Response:
 
     started = time.monotonic()
     request_id = f"ming_{uuid.uuid4().hex[:16]}"
+    conditioning_mode = parse_conditioning_mode(req.conditioningMode)
     output_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(prefix="sahaya-ming-", suffix=".wav", delete=False) as out:
+        embedding = prompt.speaker_embedding
+        if requires_speaker_embedding(conditioning_mode) and (
+            embedding is None or not embedding.is_file() or embedding.stat().st_size == 0
+        ):
+            if EMBEDDING_ROOT is None:
+                raise HTTPException(status_code=503, detail="Ming embedding root is not configured")
+            EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(EMBEDDING_ROOT, 0o700)
+            embedding = speaker_embedding_path(EMBEDDING_ROOT, req.profileId, prompt.reference_audio)
+            prepare_speaker_embedding(
+                active_model,
+                prompt.reference_audio,
+                embedding,
+                save_speaker_embedding,
+            )
+            prompt = VoicePrompt(
+                reference_audio=prompt.reference_audio,
+                reference_text=prompt.reference_text,
+                speaker_embedding=embedding,
+            )
+            with state_lock:
+                profiles[req.profileId] = prompt
+        with tempfile.NamedTemporaryFile(
+            prefix="sahaya-ming-", suffix=".wav", delete=False
+        ) as out:
             output_path = Path(out.name)
         active_model.synthesize(
-            task="TTS",
-            language_id="English",
-            text=req.text,
-            prompt_wav_path=str(prompt.reference_audio),
-            prompt_text=prompt.reference_text,
-            use_spk_emb=True,
-            raw_text=True,
-            output_path=str(output_path),
+            **synthesis_kwargs(
+                mode=conditioning_mode,
+                text=req.text,
+                output_path=output_path,
+                reference_audio=prompt.reference_audio,
+                reference_text=prompt.reference_text,
+                speaker_embedding=embedding,
+            )
         )
         audio = output_path.read_bytes()
         if not audio:
@@ -241,8 +347,11 @@ def synthesize(req: SynthesizeRequest) -> Response:
         sf.info(output_path)
         elapsed_ms = round((time.monotonic() - started) * 1000)
         log.info(
-            "Ming preview generated profileId=%s characters=%d latencyMs=%d requestId=%s",
+            "Ming preview generated profileId=%s conditioningMode=%s "
+            "generationConfig=%s characters=%d latencyMs=%d requestId=%s",
             req.profileId,
+            conditioning_mode,
+            GENERATION_CONFIG_ID,
             len(req.text),
             elapsed_ms,
             request_id,
@@ -252,7 +361,9 @@ def synthesize(req: SynthesizeRequest) -> Response:
             media_type="audio/wav",
             headers={
                 "X-Request-Id": request_id,
-                "X-Reference-Preparation": prompt.reference_preparation,
+                "X-Reference-Preparation": reference_preparation(conditioning_mode),
+                "X-Ming-Conditioning-Mode": conditioning_mode,
+                "X-Ming-Generation-Config": GENERATION_CONFIG_ID,
                 "Cache-Control": "private, no-store",
             },
         )

@@ -27,4 +27,12 @@ describe('voice comparison provider catalog', () => {
     expect(SARVAM_LANGUAGE_CODES.mr).toBe('mr-IN');
     expect(SARVAM_LANGUAGE_CODES.ur).toBeUndefined();
   });
+
+  it('keeps Sarvam classified as voice cloning rather than preset TTS', () => {
+    expect(VOICE_COMPARISON_PROVIDERS.find(({ id }) => id === 'sarvam')).toMatchObject({
+      supportsCloning: true,
+      supportsPresetVoices: false,
+      voiceType: 'cloned',
+    });
+  });
 });

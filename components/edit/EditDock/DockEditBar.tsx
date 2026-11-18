@@ -25,6 +25,8 @@ import { useI18n } from '@/lib/hooks/use-i18n';
 import { CanvasPager, type CanvasPagerProps } from '@/components/edit/EditShell/CanvasPager';
 import { RosterDialog } from '@/components/edit/AgentsView/RosterDialog';
 import { ElementRefLassoButton } from './ElementRefLassoButton';
+import { NarrationVoiceButton } from '@/components/edit/NarrationVoiceDialog';
+import { isCourseNarrationSwitchingEnabled } from '@/lib/config/feature-flags';
 
 /** The bar's own height, in px. The dock adds it to whatever the timeline is. */
 export const DOCK_EDIT_BAR_HEIGHT = 36;
@@ -64,6 +66,7 @@ export function DockEditBar({
             <Users className="size-3" />
             {t('edit.roster.shortTitle')}
           </button>
+          {isCourseNarrationSwitchingEnabled() ? <NarrationVoiceButton sceneId={sceneId} /> : null}
         </div>
 
         <div className="flex items-center justify-center">

@@ -32,6 +32,12 @@ function normalizeProfileId(value: string | undefined): string | undefined {
   return trimmed || undefined;
 }
 
+function selectedEnhancementMode(profile: PublicVoiceProfile): VoiceEnhancementMode {
+  return profile.activeEngine === 'qwen3-tts'
+    ? (profile.qwenEnhancementMode ?? 'standard')
+    : (profile.enhancementMode ?? 'standard');
+}
+
 export function readTeachingVoiceSelection(
   language: string,
   storage: StorageLike | undefined = browserStorage(),
@@ -154,12 +160,7 @@ export async function resolveGenerationTeachingVoiceProfileId(
   const profileId = normalizeProfileId(profile.id);
   if (!profileId) return undefined;
   if (isTeachingVoiceExplicitlyDisabled(persisted, profileId)) return undefined;
-  activateTeachingVoiceSelection(
-    language,
-    profileId,
-    profile.enhancementMode ?? 'standard',
-    storage,
-  );
+  activateTeachingVoiceSelection(language, profileId, selectedEnhancementMode(profile), storage);
   return profileId;
 }
 

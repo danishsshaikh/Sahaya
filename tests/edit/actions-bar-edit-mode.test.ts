@@ -247,6 +247,50 @@ describe('ActionsBar edit-mode narration sync regressions', () => {
     expect(hasLabel('edit.tts.regenerate')).toBe(true);
   });
 
+  it('prevents duplicate single-action regeneration while the first request is pending', async () => {
+    const pending = deferredPromise<string>();
+    mocks.regenerateSpeechAudio.mockReturnValue(pending.promise);
+    mountActionsBar();
+    await findText('edit.tts.statusReady');
+
+    const button = requiredButton('edit.tts.regenerate');
+    await act(async () => {
+      button.click();
+      button.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.regenerateSpeechAudio).toHaveBeenCalledOnce();
+    pending.resolve('audio-regenerated');
+    await act(async () => pending.promise);
+    await findText('edit.tts.statusReady');
+  });
+
+  it('shows the actionable provider error and allows retrying only that action', async () => {
+    mocks.regenerateSpeechAudio
+      .mockRejectedValueOnce(new Error('Qwen3-TTS capacity remained busy. Retry this narration.'))
+      .mockResolvedValueOnce('audio-recovered');
+    mountActionsBar();
+    await findText('edit.tts.statusReady');
+
+    await act(async () => {
+      requiredButton('edit.tts.regenerate').click();
+      await Promise.resolve();
+    });
+    await findText('Qwen3-TTS capacity remained busy. Retry this narration.');
+
+    await act(async () => {
+      requiredButton('edit.tts.regenerate').click();
+      await Promise.resolve();
+    });
+    await findText('edit.tts.statusReady');
+    expect(mocks.regenerateSpeechAudio).toHaveBeenCalledTimes(2);
+    expect(getScene('scene-1').actions?.[0]).toMatchObject({
+      id: 'speech-1',
+      audioId: 'audio-recovered',
+    });
+  });
+
   it('renders stale narration and audio controls', async () => {
     setupStores(makeAudioStaleScene());
 

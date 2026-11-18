@@ -71,9 +71,15 @@ next-env.d.ts
 # generated data
 /data
 /logs
+/.models
 
 # docs
-/docs
+/docs/*
+!/docs/GETTING_STARTED.md
+!/docs/DEPLOY_WITH_DOCKER.md
+!/docs/DEPLOY_WITH_PODMAN.md
+!/docs/UNIVERSITY_DEPLOYMENT.md
+!/docs/ARCHITECTURE.md
 # Eval results
 eval/whiteboard-layout/results/
 eval/outline-language/results/
