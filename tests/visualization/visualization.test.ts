@@ -61,6 +61,20 @@ const content: VisualizationContent = {
   },
 };
 
+const nativeReady = {
+  version: '0.22.1/native-1',
+  protocol: 4,
+  maxDuration: 90,
+  manimVersion: '0.22.1',
+  isolation: 'verified',
+  backend: 'gvisor',
+  secureExecution: true,
+  rendererReady: true,
+  sandboxImage: 'sha256:' + 'b'.repeat(64),
+};
+const nativeSource =
+  'from sahaya_timing import CueScene\nclass GeneratedScene(CueScene):\n    def construct(self):\n        with self.cue("viz-0"):\n            self.wait(2)';
+
 function configureRenderer(port: number) {
   vi.stubEnv('OPENMAIC_ENABLE_MANIM', 'true');
   vi.stubEnv('MANIM_RENDERER_URL', `http://127.0.0.1:${port}`);
@@ -115,7 +129,7 @@ describe('Visualization scene integration', () => {
       'fetch',
       vi.fn(async (url: string) =>
         url.endsWith('/ready')
-          ? Response.json({ version: '0.22.1/3', maxDuration: 90, validationProtocol: 3 })
+          ? Response.json(nativeReady)
           : Response.json({ status: 'completed', artifact: content.artifact }),
       ),
     );
@@ -135,7 +149,11 @@ describe('Visualization scene integration', () => {
         allOutlines,
         ownerId: ownerUserId,
         aiCall: async () =>
-          JSON.stringify({ title: outline.title, timeline: [{ narration: 'Draw the tangent.' }] }),
+          JSON.stringify({
+            tool: 'submit_scene',
+            source: nativeSource,
+            segments: [{ id: 'viz-0', narration: 'Draw the tangent.' }],
+          }),
       }),
     }));
     const fromBrowser = JSON.parse(JSON.stringify(result.content)) as VisualizationContent;
@@ -158,18 +176,24 @@ describe('Visualization scene integration', () => {
     expect(commitSceneGenerationAttempt(ownerUserId, identity, scene.id).accepted).toBe(true);
   });
 
-  it('reuses the stored plan for measured voice timing without invoking a model', async () => {
+  it('reuses owner-scoped Python for measured voice timing without invoking a model', async () => {
     configureRenderer(18782);
-    const plan = { timeline: [{ seconds: 2, narration: 'Draw the tangent.' }, { seconds: 2 }] };
+    const source = {
+      source: nativeSource,
+      segments: [{ id: 'viz-0', narration: 'Draw the tangent.' }],
+      minimums: {},
+    };
     const transport = vi.fn(async (url: string, request?: RequestInit) => {
-      if (url.endsWith('/ready'))
-        return Response.json({ version: '0.22.1/3', maxDuration: 90, validationProtocol: 3 });
-      if (url.endsWith('/plan.json')) return Response.json(plan);
+      if (url.endsWith('/ready')) return Response.json(nativeReady);
+      if (url.endsWith('/source.json')) return Response.json(source);
       const payload = JSON.parse(String(request?.body));
-      expect(payload.plan.timeline).toEqual([
-        { seconds: 3.02, narration: 'Draw the tangent.' },
-        { seconds: 2 },
-      ]);
+      expect(payload).toMatchObject({
+        source: nativeSource,
+        segments: source.segments,
+        minimums: { 'viz-0': 3.012 },
+        quality: 'standard',
+        publication: 'saved',
+      });
       return Response.json({ status: 'completed', artifact: content.artifact });
     });
     vi.stubGlobal('fetch', transport);

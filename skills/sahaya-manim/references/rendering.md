@@ -1,0 +1,3 @@
+# Render errors and equations
+
+For syntax and API failures, check imports, the failing source line and the actual Manim class that owns the method. Use `MathTex(r"\frac{a}{b}")` for math and `Text` for prose. Use raw Python strings, balanced LaTeX braces, built-in macros and no custom TeX templates or external input. For resource problems, reduce unnecessary repetitions, polygon or surface detail, and the number of simultaneously animated items. Preserve the instructional sequence and quantities when simplifying. The preview checks media integrity and visible content. Review typography, overlap and educational accuracy separately.

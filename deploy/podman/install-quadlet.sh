@@ -112,15 +112,22 @@ NetworkName=sahaya-manim
 Driver=bridge
 Internal=true
 EOF
+  cat >"$UNIT_DIR/sahaya-manim-egress.network" <<'EOF'
+[Network]
+NetworkName=sahaya-manim-egress
+Driver=bridge
+EOF
   (
     umask 077
-    printf '%s\n' "MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)" >"$UNIT_DIR/sahaya-manim.env"
+    printf '%s\n' "MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)" \
+      "MANIM_SANDBOX_URL=$(env_value MANIM_SANDBOX_URL)" \
+      "MANIM_SANDBOX_TOKEN=$(env_value MANIM_SANDBOX_TOKEN)" >"$UNIT_DIR/sahaya-manim.env"
   )
   chmod 600 "$UNIT_DIR/sahaya-manim.env"
   cat >"$UNIT_DIR/sahaya-manim.container" <<EOF
 [Unit]
 Description=Sahaya Manim visualization renderer
-After=sahaya-manim-network.service
+After=sahaya-manim-network.service sahaya-manim-egress-network.service
 
 [Container]
 ContainerName=sahaya-manim
@@ -136,6 +143,7 @@ Environment=MANIM_MAX_DURATION=$(env_value MANIM_MAX_DURATION 90)
 Environment=MANIM_MAX_ARTIFACT_BYTES=$(env_value MANIM_MAX_ARTIFACT_BYTES 50331648)
 Environment=MANIM_STORAGE_LIMIT_BYTES=$(env_value MANIM_STORAGE_LIMIT_BYTES 10737418240)
 Network=sahaya-manim.network
+Network=sahaya-manim-egress.network
 NetworkAlias=manim-renderer
 Volume="$DATA_DIR/manim:/artifacts:U,Z"
 PodmanArgs=--cap-drop=ALL --security-opt=no-new-privileges --read-only --cpus=$(env_value MANIM_CPU_LIMIT 2) --memory=$(env_value MANIM_MEMORY_LIMIT 2g) --pids-limit=$(env_value MANIM_PID_LIMIT 128) --tmpfs=/tmp:size=$(env_value MANIM_TMPFS_SIZE 512m),mode=1777
@@ -172,6 +180,8 @@ Wants=$wants
 ContainerName=sahaya-app
 Image=$APP_IMAGE
 EnvironmentFile="$ENV_FILE"
+Environment=MANIM_SANDBOX_URL=
+Environment=MANIM_SANDBOX_TOKEN=
 Environment=OPENMAIC_AUTH_DATA_DIR=/app/data/auth
 Environment=VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
 Environment=TEACHING_VOICE_JOB_ARTIFACT_DIR=/app/data/voice-cloning/teaching-voice-job-artifacts-v1

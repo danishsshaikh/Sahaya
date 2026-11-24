@@ -1,31 +1,27 @@
-import type { PlanIssue } from './plan-contract';
 import { createHash } from 'node:crypto';
 import type { VisualizationContent } from '@openmaic/dsl';
 import { readFeatureFlagBoolean } from '@/lib/config/feature-flags';
 
 export type RenderQuality = VisualizationContent['artifact']['quality'];
-type RenderArtifact = VisualizationContent['artifact'];
+export type RenderIssue = { code: string; message?: string; line?: number; symbol?: string };
 export interface RenderJob {
   id?: string;
   status: 'queued' | 'rendering' | 'processing' | 'completed' | 'failed' | 'cancelled';
   queuePosition?: number;
-  artifact?: RenderArtifact;
-  error?: string;
+  artifact?: VisualizationContent['artifact'];
   errorCode?: string;
-  issues?: PlanIssue[];
-  blocked?: string[];
-  truncated?: boolean;
+  issue?: RenderIssue;
   diagnosticId?: string;
+  cacheHit?: boolean;
 }
 
 export class RendererError extends Error {
   constructor(
-    message: string,
     readonly status: number,
-    readonly issues: PlanIssue[] = [],
-    readonly validation?: Pick<RenderJob, 'blocked' | 'truncated' | 'diagnosticId'>,
+    readonly issue?: RenderIssue,
+    readonly diagnosticId?: string,
   ) {
-    super(message);
+    super(issue?.message || 'Visualization renderer request failed.');
   }
 }
 
@@ -49,67 +45,76 @@ export function rendererSettings() {
   }
 }
 
-function enabled() {
-  return readFeatureFlagBoolean(process.env.OPENMAIC_ENABLE_MANIM);
-}
+type Capability = {
+  available: boolean;
+  reason?: string;
+  maxDuration?: number;
+  reachable?: boolean;
+  rendererReady?: boolean;
+  secureExecution?: boolean;
+  isolation?: string;
+};
 
-export function customPythonRequested() {
-  return readFeatureFlagBoolean(process.env.MANIM_EXPERIMENTAL_CUSTOM_PYTHON);
-}
+let check: { key: string; until: number; result: Promise<Capability> } | undefined;
 
-let check:
-  | {
-      key: string;
-      until: number;
-      result: Promise<{ available: boolean; reason?: string; maxDuration?: number }>;
-    }
-  | undefined;
-
-export function getVisualizationCapability() {
+export function getVisualizationCapability(): Promise<Capability> {
+  const enabled = readFeatureFlagBoolean(process.env.OPENMAIC_ENABLE_MANIM);
   const settings = rendererSettings();
-  if (!enabled())
+  if (!enabled)
     return Promise.resolve({ available: false, reason: 'Visualization generation is disabled.' });
   if (!settings)
     return Promise.resolve({
       available: false,
-      reason: 'Configure the private Manim renderer endpoint and token.',
+      reason: 'Configure the private Manim publisher endpoint and token.',
     });
   const key = createHash('sha256').update(settings.url).update(settings.token).digest('hex');
   if (check?.key === key && check.until > Date.now()) return check.result;
-  const result = (async () => {
+  const result = (async (): Promise<Capability> => {
     try {
       const response = await rendererFetch('sahaya-readiness', '/ready', {
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(2800),
       });
-      const health = response.ok ? await response.json() : null;
-      if (typeof health?.version === 'string' && Number.isFinite(health.maxDuration)) {
-        if (health.validationProtocol !== 3) {
-          return {
-            available: false,
-            reason: 'Rebuild the Manim renderer image to enable visualization planning.',
-          };
-        }
-        return { available: true, maxDuration: health.maxDuration as number };
+      const ready = response.ok ? await response.json() : null;
+      if (
+        ready?.protocol !== 4 ||
+        ready?.manimVersion !== '0.22.1' ||
+        ready.rendererReady !== true ||
+        !Number.isFinite(ready.maxDuration)
+      ) {
+        return {
+          available: false,
+          reachable: response.ok,
+          rendererReady: false,
+          reason: 'Update the Manim publisher to protocol 4.',
+        };
       }
+      const secureExecution =
+        ready.secureExecution === true &&
+        ready.isolation === 'verified' &&
+        ready.backend === 'gvisor' &&
+        /^sha256:[a-f0-9]{64}$/.test(ready.sandboxImage);
+      return {
+        available: secureExecution,
+        reachable: true,
+        rendererReady: true,
+        secureExecution,
+        maxDuration: ready.maxDuration,
+        isolation: typeof ready.isolation === 'string' ? ready.isolation : 'unavailable',
+        ...(!secureExecution && {
+          reason: 'Visualization generation requires a verified university-approved gVisor broker.',
+        }),
+      };
     } catch {
-      // A missing optional service must not prevent ordinary lesson generation.
+      return { available: false, reachable: false, reason: 'The Manim publisher is unavailable.' };
     }
-    return {
-      available: false,
-      reason: 'The Manim renderer is unavailable. Start the visualization service and try again.',
-    };
   })();
-  check = { key, until: Date.now() + 10_000, result };
+  check = { key, until: Date.now() + 5000, result };
   return result;
 }
 
 export function configuredQuality(preview: boolean): RenderQuality {
-  const quality = preview ? process.env.MANIM_PREVIEW_QUALITY : process.env.MANIM_FINAL_QUALITY;
-  return quality === 'preview' || quality === 'high' || quality === 'standard'
-    ? quality
-    : preview
-      ? 'preview'
-      : 'standard';
+  const quality = process.env.MANIM_FINAL_QUALITY;
+  return preview ? 'preview' : quality === 'high' ? 'high' : 'standard';
 }
 
 export async function rendererFetch(
@@ -119,7 +124,7 @@ export async function rendererFetch(
   streaming = false,
 ): Promise<Response> {
   const settings = rendererSettings();
-  if (!settings) throw new RendererError('The Manim renderer is unavailable.', 503);
+  if (!settings) throw new RendererError(503);
   const headers = new Headers(options.headers);
   headers.set('Authorization', `Bearer ${settings.token}`);
   headers.set('X-Manim-Owner', createHash('sha256').update(ownerId).digest('hex'));
@@ -136,7 +141,7 @@ export async function rendererFetch(
     });
   } catch {
     options.signal?.throwIfAborted();
-    throw new RendererError('The Manim renderer could not be reached. Try again shortly.', 503);
+    throw new RendererError(503);
   } finally {
     if (headerTimer) clearTimeout(headerTimer);
   }
@@ -144,27 +149,13 @@ export async function rendererFetch(
 
 export async function readRenderJob(response: Response): Promise<RenderJob> {
   const payload = (await response.json().catch(() => null)) as RenderJob | null;
-  if (!response.ok) {
-    throw new RendererError(
-      payload?.error || 'The renderer rejected the visualization.',
-      response.status,
-      Array.isArray(payload?.issues) ? payload.issues.slice(0, 24) : [],
-      payload
-        ? {
-            blocked: payload.blocked,
-            truncated: payload.truncated,
-            diagnosticId: payload.diagnosticId,
-          }
-        : undefined,
-    );
-  }
+  if (!response.ok) throw new RendererError(response.status, payload?.issue, payload?.diagnosticId);
   if (
     !payload ||
     !['queued', 'rendering', 'processing', 'completed', 'failed', 'cancelled'].includes(
       payload.status,
     )
-  ) {
-    throw new RendererError('The rendering service returned an invalid status.', 502);
-  }
+  )
+    throw new RendererError(502);
   return payload;
 }

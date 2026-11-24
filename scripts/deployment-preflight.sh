@@ -249,8 +249,8 @@ if [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; then
   else
     ok 'Manim renderer token is configured (value hidden).'
   fi
-  for spec in MANIM_QUEUE_CONCURRENCY:1:1:4 MANIM_QUEUE_CAPACITY:8:1:32 \
-    MANIM_RENDER_TIMEOUT_SECONDS:120:10:600 MANIM_MAX_DURATION:90:1:120 \
+  for spec in MANIM_QUEUE_CONCURRENCY:1:1:2 MANIM_QUEUE_CAPACITY:8:1:32 \
+    MANIM_RENDER_TIMEOUT_SECONDS:120:10:600 MANIM_MAX_DURATION:90:5:90 \
     MANIM_MAX_ARTIFACT_BYTES:50331648:1024:1073741824 \
     MANIM_STORAGE_LIMIT_BYTES:10737418240:1024:1099511627776 MANIM_PID_LIMIT:128:32:1024; do
     IFS=: read -r key default minimum maximum <<<"$spec"
@@ -265,10 +265,14 @@ if [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; then
   done
   value=$(env_value MANIM_CPU_LIMIT 2)
   [[ "$value" =~ ^([1-9][0-9]*|0)([.][0-9]+)?$ && "$value" != 0 ]] || fail 'MANIM_CPU_LIMIT must be a positive CPU count.'
-  for key in MANIM_PREVIEW_QUALITY MANIM_FINAL_QUALITY; do
-    value=$(env_value "$key" standard)
-    [[ "$value" == preview || "$value" == standard || "$value" == high ]] || fail "$key must be preview, standard or high."
-  done
+  value=$(env_value MANIM_FINAL_QUALITY standard)
+  [[ "$value" == standard || "$value" == high ]] || fail 'MANIM_FINAL_QUALITY must be standard or high.'
+  if [[ $(env_value MANIM_SANDBOX_URL) != https://* ||
+        ! $(env_value MANIM_SANDBOX_TOKEN) =~ ^[a-zA-Z0-9_-]{32,128}$ ]]; then
+    warn 'Secure Manim generation requires an administrator-approved HTTPS sandbox broker and private token.'
+  else
+    ok 'Manim broker settings present. The publisher verifies isolation independently through /ready.'
+  fi
   if [[ "$RUNTIME" == podman ]]; then
     manim_data=$(resolve_path "$(env_value SAHAYA_DATA_DIR "${XDG_DATA_HOME:-$HOME/.local/share}/sahaya")")
     if [[ -e "$manim_data/manim" && ! -d "$manim_data/manim" ]]; then
@@ -286,9 +290,6 @@ if [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; then
   else
     ok 'Manim storage and runtime dependencies will be checked by the container on startup.'
   fi
-fi
-if [[ $(env_value MANIM_EXPERIMENTAL_CUSTOM_PYTHON false) == true ]]; then
-  fail 'Experimental Manim Python requires separate verified execution isolation and is unavailable.'
 fi
 
 needs_ming=false

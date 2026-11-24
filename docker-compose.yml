@@ -58,6 +58,8 @@ services:
       # being set does not, by itself, advertise a working render.
       - RENDER_SERVICE_URL=http://render-service:9000
       - MANIM_RENDERER_URL=http://manim-renderer:8780
+      - MANIM_SANDBOX_TOKEN=
+      - MANIM_SANDBOX_URL=
       # Keep every server-owned recording/artifact beneath the durable volume.
       - OPENMAIC_AUTH_DATA_DIR=/app/data/auth
       - VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
@@ -71,7 +73,7 @@ services:
       - default # outbound internet (LLM/media provider APIs, etc.)
       - render # reach the render service over the isolated network
       - inference # reach private, profile-gated local model endpoints
-      - manim # private structured visualization service
+      - manim # private visualization publisher
     extra_hosts:
       # Linux equivalent of Docker Desktop's host alias. Use this hostname in
       # provider URLs when a model runs directly on the Docker host.
@@ -349,6 +351,8 @@ services:
     environment:
       MANIM_RENDERER_TOKEN: ${MANIM_RENDERER_TOKEN:-}
       MANIM_CAPTURE_REJECTED_PLANS: ${MANIM_CAPTURE_REJECTED_PLANS:-false}
+      MANIM_SANDBOX_URL: ${MANIM_SANDBOX_URL:-}
+      MANIM_SANDBOX_TOKEN: ${MANIM_SANDBOX_TOKEN:-}
       MANIM_MAX_DURATION: ${MANIM_MAX_DURATION:-90}
       MANIM_MAX_ARTIFACT_BYTES: ${MANIM_MAX_ARTIFACT_BYTES:-50331648}
       MANIM_STORAGE_LIMIT_BYTES: ${MANIM_STORAGE_LIMIT_BYTES:-10737418240}
@@ -357,7 +361,7 @@ services:
       MANIM_RENDER_TIMEOUT_SECONDS: ${MANIM_RENDER_TIMEOUT_SECONDS:-120}
       HOME: /tmp
       XDG_CACHE_HOME: /tmp
-    networks: [manim]
+    networks: [manim, manim-egress]
     volumes:
       - manim-artifacts:/artifacts
     tmpfs:
@@ -380,6 +384,7 @@ networks:
   default: {}
   manim:
     internal: true
+  manim-egress: {}
   # Isolated network for app <-> render-service traffic. `internal: true` means
   # no route to the host or internet. Both services share it so the app can
   # reach the render service; the render container additionally blocks its own

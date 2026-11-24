@@ -249,6 +249,8 @@ export interface VisualizationContent {
     sha256: string;
     rendererVersion: string;
     specVersion: 1;
+    sourceFormat?: 'python';
+
     quality: 'preview' | 'standard' | 'high';
     classification: 'verified-components' | 'illustrative';
     cues: { id: string; start: number; end: number; narration?: string; caption?: string }[];

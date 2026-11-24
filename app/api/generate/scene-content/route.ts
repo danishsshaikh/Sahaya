@@ -1,4 +1,4 @@
-import { visualizationJsonOutput } from '@/lib/visualization/llm-output';
+import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
 /**
  * Scene Content Generation API
  *
@@ -475,18 +475,17 @@ export async function POST(req: NextRequest) {
               requestId: timingCollector.requestId,
               model: modelString,
             },
-            aiCall: async (system, prompt, abortSignal) =>
-              (
-                await invokeSceneContentLLM({
-                  model: languageModel,
-                  system,
-                  prompt,
-                  abortSignal,
-                  maxRetries: 0,
-                  maxOutputTokens: modelInfo?.outputWindow,
-                  ...visualizationJsonOutput(providerId, modelString, baseUrl),
-                })
-              ).text,
+            nativeTools: supportsNativeManimTools(providerId, modelString, baseUrl),
+            aiCall: (system, prompt, abortSignal, tools) =>
+              invokeSceneContentLLM({
+                model: languageModel,
+                system,
+                prompt,
+                abortSignal,
+                maxRetries: 0,
+                maxOutputTokens: Math.min(modelInfo?.outputWindow ?? 10000, 10000),
+                ...(tools && { tools, toolChoice: 'required' }),
+              }),
             signal: visualizationSignal,
             revision: visualizationRevision,
             onProgress: jobId

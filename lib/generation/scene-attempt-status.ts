@@ -17,6 +17,13 @@ const names: Record<SceneOutline['type'], string> = {
 
 const phases: Record<string, string> = {
   queued: 'Waiting in queue',
+  skill: 'Preparing Manim skill',
+  documentation: 'Retrieving Manim documentation',
+  code: 'Generating animation code',
+  'code-check': 'Validating animation code',
+  'preview-render': 'Rendering preview',
+  'code-repair': 'Correcting animation code',
+  'final-render': 'Rendering final animation',
   planning: 'Preparing visualization plan',
   validating: 'Validating visualization',
   repairing: 'Refining visualization plan',

@@ -556,8 +556,11 @@ export async function retimeVisualizationForNarration(
   outline: SceneOutline,
   allOutlines: SceneOutline[],
   signal: AbortSignal,
+  onProgress?: (phase: string, position?: number) => void,
 ) {
   const artifact = scene.content.artifact;
+  // Historical assets keep their existing frame cues and adaptive player pacing.
+  if (artifact.sourceFormat !== 'python') return scene.content;
   const cueDurations: Record<string, number> = {};
   const durationStarted = Date.now();
   for (const action of scene.actions ?? []) {
@@ -570,10 +573,11 @@ export async function retimeVisualizationForNarration(
     const duration = measureAudioDuration(await blob.arrayBuffer(), blob.type.split('/')[1]);
     if (duration && duration > 0) cueDurations[cueId] = (cueDurations[cueId] ?? 0) + duration;
   }
-  for (const cue of artifact.cues) {
-    if (cueDurations[cue.id] <= cue.end - cue.start + 0.065) delete cueDurations[cue.id];
-  }
-  if (Object.keys(cueDurations).length === 0) return scene.content;
+  if (
+    artifact.quality !== 'preview' &&
+    !artifact.cues.some((cue) => cueDurations[cue.id] > cue.end - cue.start + 0.065)
+  )
+    return scene.content;
   const result = await fetchSceneContent(
     {
       outline,
@@ -584,6 +588,7 @@ export async function retimeVisualizationForNarration(
     },
     signal,
     { maxRetries: 0 },
+    onProgress,
   );
   if (!result.success || !result.content)
     throw new Error(result.error || 'Could not render the narration timing.');
@@ -1383,6 +1388,23 @@ export interface GenerationParams {
   languageDirective?: string;
 }
 
+function deferVisualizationFinal(outline: SceneOutline, teacherVoiceProfileId?: string) {
+  if (outline.type !== 'visualization') return undefined;
+  const settings = useSettingsStore.getState();
+  if (
+    teacherVoiceProfileId ||
+    (isStaticVoiceEnabled() &&
+      settings.ttsEnabled &&
+      settings.ttsProviderId !== 'browser-native-tts' &&
+      isTTSProviderEnabled(
+        settings.ttsProviderId,
+        settings.ttsProvidersConfig?.[settings.ttsProviderId],
+      ))
+  ) {
+    return { deferFinal: true } as const;
+  }
+}
+
 export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const abortRef = useRef(false);
   const generatingRef = useRef(false);
@@ -1584,13 +1606,26 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             return;
           }
           const patch = mergeCompletedNarration(currentScene, narrationScene);
-          if (currentScene.type === 'visualization' && patch.narrationStatus === 'completed') {
+          if (
+            currentScene.type === 'visualization' &&
+            currentScene.content.artifact.sourceFormat === 'python' &&
+            patch.narrationStatus === 'completed'
+          ) {
+            const finalization = beginSceneAttempt(
+              store,
+              stageId,
+              outline.id,
+              createSceneAttemptId(),
+              false,
+            );
+            finalization?.progress('narration');
             try {
               const content = await retimeVisualizationForNarration(
                 { ...currentScene, actions: patch.actions },
                 outline,
                 store.getState().outlines,
                 controller.signal,
+                finalization?.progress,
               );
               if (content !== currentScene.content) patch.content = content;
             } catch (error) {
@@ -1600,6 +1635,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 sceneId: scene.id,
                 error: messageFromError(error, 'Timing render failed'),
               });
+            } finally {
+              finalization?.finish();
             }
             if (
               controller.signal.aborted ||
@@ -1888,6 +1925,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 ? { requirements: { requirement: params.requirement } }
                 : {}),
               agents: params.agents,
+              visualizationRevision: deferVisualizationFinal(outline, stage.teacherVoiceProfileId),
               languageDirective: params.languageDirective,
             },
             signal,
@@ -2395,6 +2433,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               ? { requirements: { requirement: params.requirement } }
               : {}),
             agents: params.agents,
+            visualizationRevision: deferVisualizationFinal(
+              outline,
+              state.stage.teacherVoiceProfileId,
+            ),
             languageDirective: params.languageDirective,
           },
           signal,

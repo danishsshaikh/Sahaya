@@ -14,6 +14,7 @@ APP_NETWORK=sahaya-app
 INFERENCE_NETWORK=sahaya-inference
 RENDER_NETWORK=sahaya-render
 MANIM_NETWORK=sahaya-manim
+MANIM_EGRESS_NETWORK=sahaya-manim-egress
 
 usage() {
   cat <<'EOF'
@@ -307,17 +308,19 @@ run_render() {
 }
 
 run_manim() {
-  local -x MANIM_RENDERER_TOKEN
+  local -x MANIM_RENDERER_TOKEN MANIM_SANDBOX_URL MANIM_SANDBOX_TOKEN
   MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)
+  MANIM_SANDBOX_URL=$(env_value MANIM_SANDBOX_URL)
+  MANIM_SANDBOX_TOKEN=$(env_value MANIM_SANDBOX_TOKEN)
   remove_container sahaya-manim
   podman run --detach --pull=never --name sahaya-manim --replace --restart=unless-stopped --init \
-    --network "$MANIM_NETWORK" --network-alias manim-renderer \
+    --network "$MANIM_NETWORK" --network "$MANIM_EGRESS_NETWORK" --network-alias manim-renderer \
     --cap-drop ALL --security-opt no-new-privileges --read-only \
     --cpus "$(env_value MANIM_CPU_LIMIT 2)" --memory "$(env_value MANIM_MEMORY_LIMIT 2g)" \
     --pids-limit "$(env_value MANIM_PID_LIMIT 128)" \
     --tmpfs "/tmp:size=$(env_value MANIM_TMPFS_SIZE 512m),mode=1777" \
     --volume "$DATA_DIR/manim:/artifacts:U,Z" \
-    --env HOME=/tmp --env XDG_CACHE_HOME=/tmp --env MANIM_RENDERER_TOKEN \
+    --env HOME=/tmp --env XDG_CACHE_HOME=/tmp --env MANIM_RENDERER_TOKEN --env MANIM_SANDBOX_URL --env MANIM_SANDBOX_TOKEN \
     --env "MANIM_CAPTURE_REJECTED_PLANS=$(env_value MANIM_CAPTURE_REJECTED_PLANS false)" \
     --env "MANIM_QUEUE_CONCURRENCY=$(env_value MANIM_QUEUE_CONCURRENCY 1)" \
     --env "MANIM_QUEUE_CAPACITY=$(env_value MANIM_QUEUE_CAPACITY 8)" \
@@ -340,6 +343,7 @@ run_app() {
     --network "$APP_NETWORK" --network "$INFERENCE_NETWORK"
     --publish "$bind:$port:3000"
     --env-file "$ENV_FILE"
+    --env MANIM_SANDBOX_URL= --env MANIM_SANDBOX_TOKEN=
     --env OPENMAIC_AUTH_DATA_DIR=/app/data/auth
     --env VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
     --env TEACHING_VOICE_JOB_ARTIFACT_DIR=/app/data/voice-cloning/teaching-voice-job-artifacts-v1
@@ -366,6 +370,7 @@ start_stack() {
   if with_manim; then
     mkdir -p "$DATA_DIR/manim"
     ensure_network "$MANIM_NETWORK" --internal
+    ensure_network "$MANIM_EGRESS_NETWORK"
     run_manim
   fi
   if needs_gemma; then run_gemma; fi

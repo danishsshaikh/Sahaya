@@ -1,0 +1,12 @@
+FROM manimcommunity/manim:v0.22.1@sha256:af29da8765a26ab1f9f1d61d401e95d50520753634ed8e343fd5c05283a459e7
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-noto-core fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/sahaya-native
+WORKDIR /tmp
+COPY native_contract.py sandbox_worker.py sahaya_timing.py /opt/sahaya-native/
+ENV HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp/matplotlib PYTHONDONTWRITEBYTECODE=1 \
+    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 shell_escape=f openin_any=p openout_any=p
+USER 1000:1000
+ENTRYPOINT ["python", "-I", "-B", "-c", "import sys,runpy;sys.path.append('/opt/sahaya-native');runpy.run_path('/opt/sahaya-native/sandbox_worker.py',run_name='__main__')"]

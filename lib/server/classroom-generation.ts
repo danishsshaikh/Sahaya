@@ -1,4 +1,4 @@
-import { visualizationJsonOutput } from '@/lib/visualization/llm-output';
+import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
 import {
   generateVisualization,
   VISUALIZATION_OUTLINE_INSTRUCTION,
@@ -281,7 +281,7 @@ export async function generateClassroom(
     LlmStage,
     {
       model: LanguageModel;
-      jsonOutput?: ReturnType<typeof visualizationJsonOutput>;
+      nativeTools: boolean;
       outputWindow?: number;
       thinking: ThinkingConfig | undefined;
     }
@@ -291,7 +291,7 @@ export async function generateClassroom(
     stage: LlmStage,
   ): Promise<{
     model: LanguageModel;
-    jsonOutput?: ReturnType<typeof visualizationJsonOutput>;
+    nativeTools: boolean;
     outputWindow?: number;
     thinking: ThinkingConfig | undefined;
   }> => {
@@ -302,7 +302,7 @@ export async function generateClassroom(
     if (!getStageModel(stage)) {
       const fallback = {
         model: languageModel,
-        jsonOutput: visualizationJsonOutput(providerId, modelString, baseUrl),
+        nativeTools: supportsNativeManimTools(providerId, modelString, baseUrl),
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
       };
@@ -314,7 +314,7 @@ export async function generateClassroom(
       const resolved = await resolveModel({ stage });
       const entry = {
         model: resolved.model,
-        jsonOutput: visualizationJsonOutput(
+        nativeTools: supportsNativeManimTools(
           resolved.providerId,
           resolved.modelString,
           resolved.baseUrl,
@@ -333,7 +333,7 @@ export async function generateClassroom(
       );
       const fallback = {
         model: languageModel,
-        jsonOutput: visualizationJsonOutput(providerId, modelString, baseUrl),
+        nativeTools: supportsNativeManimTools(providerId, modelString, baseUrl),
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
       };
@@ -354,7 +354,7 @@ export async function generateClassroom(
     timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
   ) => {
     const stage = (outlineType ? `scene-content:${outlineType}` : 'scene-content') as LlmStage;
-    const { model, outputWindow, thinking, jsonOutput } = await resolveStageModel(stage);
+    const { model, outputWindow, thinking, nativeTools } = await resolveStageModel(stage);
     const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
       const result = await callGenerationLLM(
         {
@@ -372,28 +372,27 @@ export async function generateClassroom(
       );
       return result.text;
     };
-    const visualizationAiCall: import('@/lib/visualization/generate').VisualizationAiCall = async (
+    const visualizationAiCall: import('@/lib/visualization/generate').VisualizationAiCall = (
       system,
       prompt,
       abortSignal,
+      tools,
     ) =>
-      (
-        await callGenerationLLM(
-          {
-            model,
-            system,
-            prompt,
-            abortSignal,
-            maxOutputTokens: outputWindow,
-            maxRetries: 0,
-            ...jsonOutput,
-          },
-          'generate-classroom-scene',
-          thinking,
-          timingCollector,
-        )
-      ).text;
-    return { aiCall, visualizationAiCall, model, thinking };
+      callGenerationLLM(
+        {
+          model,
+          system,
+          prompt,
+          abortSignal,
+          maxOutputTokens: Math.min(outputWindow ?? 10000, 10000),
+          maxRetries: 0,
+          ...(tools && { tools, toolChoice: 'required' }),
+        },
+        'generate-classroom-scene',
+        thinking,
+        timingCollector,
+      );
+    return { aiCall, visualizationAiCall, model, thinking, nativeTools };
   };
 
   // agent-profiles routes via the `agent-profiles` stage (matches the browser
@@ -687,6 +686,7 @@ export async function generateClassroom(
                         : contentCall.model.modelId,
                   },
                   aiCall: contentCall.visualizationAiCall,
+                  nativeTools: contentCall.nativeTools,
                 })
               : generateSceneContent(safeOutline, contentCall.aiCall, {
                   agents,

@@ -1,10 +1,10 @@
 export const VISUALIZATION_FAILURES = {
   VISUALIZATION_PLANNING:
-    'The AI could not create a complete visualization plan. Retry this scene or simplify its animation instructions.',
+    'The AI could not create a complete Manim scene. Retry this scene or simplify its animation instructions.',
   VISUALIZATION_SCHEMA:
-    'The visualization plan contains unsupported fields, values, or scientific inputs. Review its instructions and retry this scene.',
+    'The animation source or timing metadata failed validation. Review its instructions and retry this scene.',
   VISUALIZATION_REPAIR:
-    'The AI could not correct the visualization plan. Retry this scene with fewer objects or simpler animation instructions.',
+    'The AI could not correct the Manim scene. Retry this scene with fewer objects or simpler animation instructions.',
   VISUALIZATION_UNAVAILABLE:
     'The visualization renderer is unavailable. Check its service configuration or try again shortly.',
   VISUALIZATION_RENDER:

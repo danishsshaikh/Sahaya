@@ -1,0 +1,3 @@
+# Mathematics and plots
+
+Use `Axes(x_range=[min, max, step], y_range=[min, max, step])`, `axes.plot(f, x_range=[min, max])`, and `axes.c2p(x, y)` for plotted data. Label coordinates, scale, and units. For parametric curves use `ParametricFunction` and map data coordinates into the scene. Split around discontinuities. Keep numerical grids small. Use stable limits at removable singularities. Check dimensions, representative points and physical boundary conditions. For example, a normalized single-slit sinc-squared curve is one at its center and zero at nonzero integer orders in the normalized coordinate. The first principal grating orders satisfy the spacing and wavelength relationship for normal incidence.

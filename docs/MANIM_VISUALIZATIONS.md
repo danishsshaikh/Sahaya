@@ -1,146 +1,86 @@
-# Manim visualizations in Sahaya
+# Native Manim visualizations in Sahaya
 
-A **Visualization** is a rendered animation that explains a change, process, or relationship. Use a **Slide** for static explanation and a **Simulation** when faculty need to change parameters and observe the result interactively. Outline generation offers Visualization when the renderer is healthy and an animated sequence serves the learning objective. Faculty can choose it manually, edit its title and instructions, set the depth, and select Automatic, Mathematical, Conceptual, Technical, Spatial / 3D, or Custom style.
-
-In classroom playback, the player provides seeking, captions, replay, speed, fullscreen, and an animation download. The normal classroom controls can play and pause it. Leaving the scene pauses its audio and saves video position for the browser session.
+Select **Visualization** in the existing outline editor to animate a mathematical, scientific, or conceptual process. The classroom player keeps its separate narration track, captions, seeking, playback speed, fullscreen, and video download. Pro mode supports preview, replacement, and individual regeneration. Applying a replacement publishes a checked video before switching the saved scene. Existing MP4s and posters remain readable from the original artifact volume, including courses created by the retired JSON compositor. Historical artifacts retain their original cues. New rendering of a historical scene generates native Python. Full lecture video export for visualization courses is still presented as unavailable.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  Faculty --> Outline["Sahaya outline and editor"]
-  Outline --> Director["Existing LLM router and visualization prompt"]
-  Director --> Job["Owner-scoped scene attempt and status"]
-  Job --> Renderer["Private Manim CPU queue"]
-  Renderer --> Plan["Validate plan, references, math and limits"]
-  Plan --> Cairo["Trusted Cairo compositor and FFmpeg"]
-  Cairo --> Store["Owner-scoped MP4, poster, plan and metadata"]
-  Director --> Voice["Existing Teaching Voice synthesis and audio pool"]
-  Voice --> Timing["Measure audio and extend beats when needed"]
-  Timing --> Job
-  Store --> Classroom["Sahaya classroom player"]
+  Outline["Course outline"] --> Agent["Manim coding agent"]
+  Skill["Task-scoped skill and references"] --> Agent
+  Context7["Optional pinned Context7"] --> Agent
+  Agent --> Publisher["Private publisher and job queue"]
+  Publisher --> Broker["University-approved HTTPS broker"]
+  Broker --> Worker["Disposable gVisor Cairo worker"]
+  Worker --> Publisher
+  Publisher --> Agent
+  Publisher --> Store["Owner-scoped MP4, poster, source, cues"]
+  Store --> Voice["Existing Teaching Voice and measured audio"]
+  Voice --> Publisher
+  Store --> Classroom["Classroom"]
   Voice --> Classroom
 ```
 
-The app adds Visualization to the shared scene contract, outline stream, and scene editor. Generation uses the same scene attempts, action creation, course document persistence, and Teaching Voice scheduling as the other scene types. The renderer receives version 1 data, composes reusable Manim objects, and publishes a silent H.264/yuv420p MP4 with a JPEG poster. JSON course documents store an artifact reference, cue boundaries, and speech actions. The native Simulation iframe pipeline and configured AI and voice routing continue to serve their existing scene types.
+The agent uses the existing scene-content model routing and activates only for Visualization generation and regeneration. It sends a restricted tool request through native function calling on the verified direct OpenAI transports. The routed Nemotron and Gemma transports use the equivalent validated JSON envelope. The envelope carries Python source and cue metadata. The source itself uses native Manim, with one predictable `GeneratedScene` entry point. The controller checks Python without importing it, starts a preview, relays bounded errors, rejects duplicate source and repeated errors, and decides whether to publish. The previous JSON animation schema, patcher, and compositor have been retired.
 
-The director can combine text, constrained TeX equations, dots, lines, arrows, shapes, 2D axes and planes, function and parametric curves, sampled data, sorting arrays, 3D axes, spheres, surfaces, and model-derived numerical labels. Beats sequence sets of parallel animations. The supported operations include drawing, writing, fades, replacement, movement, rotation, scaling, indication, following a path, and camera transitions. [Manim Community documentation](https://docs.manim.community/en/stable/) · [Community examples](https://www.manim.community/awesome/)
+The builtin [Manim skill](../skills/sahaya-manim/SKILL.md) follows Agent Skills frontmatter. The runtime activates its main instructions, selects relevant local references, and loads additional references on a legitimate tool request or a render failure. This context is scoped to one execution. The source-first authoring pattern and topical reference organization draw on two MIT-licensed Manim skills. Sahaya authors its own instructions and execution adapter. [Agent Skills specification](https://agentskills.io/specification) · [Yusuke710/manim-skill](https://github.com/Yusuke710/manim-skill) · [ManimCE Best Practices](https://github.com/adithya-s-k/manim_skill/tree/main/skills/manimce-best-practices)
 
-| Model | What it computes |
-| --- | --- |
-| Derivative | Numerical derivative, tangent line, and tangent point. The selected point must be in a stable local domain. |
-| Projectile | Launch-to-landing trajectory on level ground, using SI units, constant gravity, and zero drag. |
-| Interference | Pointwise sum of unit-amplitude sine waves. Phase is expressed in radians. |
-| Gradient descent | Iterates for a one-variable loss and an optional surface with an added perpendicular squared term. |
-| Insertion sort | Array states after each outer insertion. Equal values retain their relative order. |
+Context7 offers MCP, a CLI, and REST. Sahaya uses the REST context operation with library ID `/manimcommunity/manim/v0.22.1`. It sends fixed generic API topics and caches accepted snippets for 12 hours. A returned version mismatch, unavailable release, missing key, or network failure uses the local references. This keeps deployment independent of the indexed version. Exact version availability under the deployment’s Context7 credentials remains to be checked. The agent treats returned snippets as reference data. [Context7 Manim library](https://context7.com/manimcommunity/manim) · [Context7 REST version behavior](https://context7.com/docs/api-guide#use-specific-versions) · [Manim Community v0.22.1](https://docs.manim.community/en/stable/changelog/0.22.1-changelog.html)
 
-Plans with a model display **Uses verified calculations** in the editor. Faculty should review the generated labels, explanation, and choice of model. Expressions have an allowlisted parser, bounded arithmetic, and domain checks. Claims expressed in arbitrary prose or general diagrams are illustrative. The supported JSON fields and limits are defined in [plan-v1.json](../services/manim-renderer/plan-v1.json).
+## Execution and university prerequisites
 
-## Editing and Teaching Voice
+The trusted publisher has the artifact volume and communicates only with the configured HTTPS broker. The reference broker runs under university administrator control on a dedicated Linux execution host. It checks a registered `runsc` runtime, cgroup limits, its pinned worker image, per-container isolation settings, and an active benign probe. Trusted Docker CLI operations run only on the broker host. Sahaya’s app and publisher have no daemon socket. A failed, stale, incompatible, or absent broker capability disables generation before a model call. Publisher `/health` reports liveness. Authenticated `/ready` reports protocol 4 and the isolation status. The app capability also applies the feature flag. The broker protocol is 1. [gVisor Docker runtime documentation](https://gvisor.dev/docs/user_guide/quick_start/docker/)
 
-Open the Visualization scene in Pro mode. Change its settings or scientific parameters, render a preview, and apply the preview at final quality. You can also regenerate directly or replace the scene type in place. The existing narration timeline supports editing spoken text and regenerating speech with the selected Teaching Voice. A failed or cancelled update leaves the prior successful scene version available.
+University administrators provision an up-to-date gVisor `runsc` registered on a dedicated Docker daemon, working CPU quota, memory and swap accounting, PID limits, and an approved private TLS reverse proxy. The proxy should permit the publisher and HPC operator IPs, cap request bodies at 128 KiB, and allow at least 135 seconds for an execution request. Use a CA trusted by the publisher image. Set the broker token through a protected service environment file. The broker binds loopback port 8790 by default. The backend requires a current security review on the actual placement and runtime.
 
-Sahaya synthesizes speech through the existing provider, measures the resulting audio, and reuses the saved plan when a longer clip requires extending a beat. The renderer uses emitted frame boundaries for the final cues. The player can also adapt pacing to updated or longer clips at playback time, which lets narration edits and voice switches reuse the animation. Timing changes never require passing voice samples or TTS credentials to Manim. Downloading the animation produces the silent MP4. Lecture video and subtitle export currently reports Visualization courses as unsupported.
-
-## Jobs and storage
-
-Scene content requests return a job ID. While a job is active it reports planning, validation, queue position, rendering, or artifact processing. The renderer validates data before queuing, uses a private working directory, and enforces a process deadline. Cancelling a running render terminates its process group. Renderer restarts invalidate active job IDs. Successful artifacts and identical-plan cache entries persist.
-
-Artifacts are scoped to the authenticated faculty account. Next.js derives the owner namespace and checks the session on every media request, including byte ranges. A service token authenticates the private connection. An artifact is published only after the codec, dimensions, duration, poster, and hashes pass validation. The cache key includes the validated plan, renderer revision, output preset, and output limit. Changes to a plan or timing create a new artifact. Course ZIPs can reference these artifacts for the originating account. The visualization video lives in the renderer volume.
-
-Protect and back up the artifact volume alongside Sahaya course and voice data. The service removes abandoned working directories at startup and expires inactive job records from memory. Completed versions are retained until the operator clears unreferenced versions after checking course references. At the configured quota, new renders fail with a storage error. Run one renderer per artifact volume.
-
-## Local development
-
-Use a disposable test profile and the existing Sahaya provider configuration. Establish a shared token and start the CPU renderer:
+The administrator builds the worker from a trusted checkout on the execution host. Deploy the checked-out broker source as a managed service with the same revision.
 
 ```bash
-docker build -t sahaya-manim:local services/manim-renderer
-export MANIM_RENDERER_TOKEN="$(openssl rand -hex 32)"
-export OPENMAIC_ENABLE_MANIM=true
-export MANIM_RENDERER_URL=http://127.0.0.1:8780
-
-docker run --rm --name sahaya-manim-dev \
-  --publish 127.0.0.1:8780:8780 \
-  --env MANIM_RENDERER_TOKEN --env HOME=/tmp --env XDG_CACHE_HOME=/tmp \
-  --volume sahaya-manim-dev:/artifacts \
-  --read-only --tmpfs /tmp:size=512m,mode=1777 \
-  --cap-drop ALL --security-opt no-new-privileges \
-  --cpus 2 --memory 2g --pids-limit 128 \
-  sahaya-manim:local
+docker build -f services/manim-renderer/Dockerfile.sandbox -t sahaya-manim-worker:0.22.1 services/manim-renderer
+export MANIM_SANDBOX_IMAGE="$(docker image inspect --format '{{.Id}}' sahaya-manim-worker:0.22.1)"
+export MANIM_SANDBOX_APPROVED=true
+# MANIM_SANDBOX_TOKEN comes from the protected environment.
+python3 services/manim-renderer/sandbox_broker.py
 ```
 
-Run `pnpm dev` with the same three environment values in a second terminal. Sign in as a faculty member, choose a Teaching Voice, and request a course on tangent slopes or projectile motion. In the outline editor, choose **Visualization** for one item and keep a slide and a simulation in the course to exercise navigation. Generate, play, seek, move to another scene, return, then edit and regenerate the visualization in Pro mode. Enable `NEXT_PUBLIC_MAIC_EDITOR_ENABLED=true` if the Pro toggle is unavailable in the local build.
+Each worker uses `--runtime=runsc`, no network, UID 1000, a read-only image, no added capabilities or devices, separate IPC, and no privilege escalation. Limits are two CPU cores, 2 GiB memory including swap allocation, 128 processes, and a 512 MiB private scratch filesystem. Python and TeX run only inside the disposable worker. TeX shell escape is disabled. Inputs and outputs travel through bounded pipes. The worker receives the source, cue IDs and numeric durations. It receives neither narration media nor service secrets. The trusted publisher verifies the silent H.264 stream, decoded frame counts, timing, file size, contrast samples, and a JPEG poster before atomic publication. The media check is automated and does not grade composition or scientific accuracy.
 
-Run deterministic service checks and generate the demonstration videos without an LLM or TTS provider:
+Artifact storage keeps Python source, timing, render metadata and media distinct. Cache keys include the canonical request, immutable worker image, publisher revision and limits, under an owner directory. Temporary editor previews expire after two hours. Unpublished checks and failed attempts are cleaned up. Durable course media is preserved. The storage quota blocks further publication until an administrator can review stored usage and course references.
+
+## Teaching Voice
+
+Sahaya adopts the duration-tracker approach of Manim Voiceover. The plugin itself is not a runtime dependency. Its v0.3.7 package metadata broadly accepts Manim versions, so that metadata alone does not establish compatibility with the pinned Cairo renderer. Keeping voice synthesis in Sahaya also permits offline renders and the current Teaching Voice providers. [Manim Voiceover v0.3.7](https://voiceover.manim.community/en/stable/) · [Plugin package metadata](https://github.com/ManimCommunity/manim-voiceover/blob/v0.3.7/pyproject.toml) · [Manim v0.22.1 Cairo implementation](https://github.com/ManimCommunity/manim/blob/v0.22.1/manim/renderer/cairo_renderer.py)
+
+Generated scenes call `with self.cue("id"):` around native animations. The adapter tracks emitted frames and pads short cues against measured narration. On the classroom paths with a server voice, a playable preview can appear while the trusted app synthesizes the audio. The app then promotes the source to a final silent render using measured durations, without a model call. When recorded audio fits an existing final render, the player can reuse it. When synthesis or exact retiming fails, playable media and adaptive pacing remain available. Faculty can use preview and regeneration in Pro mode to render again with the currently selected voice. The headless content path can publish a silent final without a browser narration pass.
+
+New native results are labeled illustrative. Skill guidance calls for formula, unit, axis and boundary checks, and the regression suite independently verifies numerical relationships for diffraction and the retained numerical helpers. A successful render is a media result. Faculty review remains necessary for the generated scientific and visual claims.
+
+## Configuration and rollout
+
+The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three model requests, two documentation lookups, three previews, two final attempts, and 260 seconds per agent execution. See [environment examples](../.env.example). The publisher uses `MANIM_SANDBOX_URL` and `MANIM_SANDBOX_TOKEN` to reach the broker. The publisher queue defaults to one rendering worker and eight active jobs. The broker defaults to one execution slot, a 45-second preview, and a 105-second final attempt. It supports `MANIM_SANDBOX_CONCURRENCY`, `MANIM_SANDBOX_PREVIEW_SECONDS`, and `MANIM_SANDBOX_FINAL_SECONDS`, bounded by the deployment contract. Set publisher concurrency to match the approved broker capacity.
+
+Docker Compose retains the `manim` profile and persistent volume. Use the existing deployment service build and profile commands to update it. Podman and Quadlet use the same publisher image, original artifact mount, and a separate publisher egress network; the approved gVisor broker remains external to all three launch paths. The deployment preflight checks configuration, and publisher readiness separately checks actual broker availability.
+
+On the university HPC server, the standalone update script stages the new publisher image before stopping the Next.js pane. It checks the private broker before changing services, stops Next.js before rebuilding the workspace, verifies actual HTTP readiness, and preserves the previous renderer container for rollback. The original renderer token, port, resource limits, and `sahaya-manim-hpc:/artifacts` persist. Gemma and Teaching Voice services remain on their existing allocations. If Next.js cannot restart after an upgrade, rollback restores the old renderer and attempts to restart the prior app revision from a separate worktree. That app recovery uses the local pnpm store and the original environment. [Standalone update script](../scripts/update-manim-hpc.sh)
 
 ```bash
-docker run --rm --network none --env MANIM_REAL_TESTS=1 sahaya-manim:local \
-  python -m unittest -v test_plan test_service
-
-docker run --name sahaya-manim-demo --network none --cpus 2 --memory 2g \
-  sahaya-manim:local python demos.py /artifacts/demo
-mkdir -p data/manim-demos
-docker cp sahaya-manim-demo:/artifacts/demo/. data/manim-demos/
-docker rm sahaya-manim-demo
+(
+  set -euo pipefail
+  cd /home/danish/projects/OpenMAIC-llm-test
+  git fetch origin refs/heads/feat/manim-integration
+  git show FETCH_HEAD:scripts/update-manim-hpc.sh | bash -s -- FETCH_HEAD
+)
 ```
 
-## Container deployment
+The upgrade expects exported `MANIM_SANDBOX_URL` and `MANIM_SANDBOX_TOKEN` on the first native rollout. The first broker build and publisher rebuild are required. Subsequent upgrades can recover broker settings already attached to the publisher. Leave the current deployment running while the university provisions the broker.
 
-On an authorized test deployment, add `OPENMAIC_ENABLE_MANIM=true` and a private `MANIM_RENDERER_TOKEN` to the environment file. Set the same token for the app and the renderer. Compose needs the values in `.env` or its `--env-file` input for interpolation.
+## Live verification and troubleshooting
 
-| Runtime | Commands |
-| --- | --- |
-| Docker | `scripts/deployment-preflight.sh --runtime docker --env-file .env` followed by `docker compose --profile manim up -d --build` and `docker compose --profile manim ps`. |
-| Rootless Podman | `deploy/podman/sahaya-podman --mode basic --env-file .env preflight`, `build`, then `start` with the same options. Use the same mode and data directory across commands. Use `status` to verify health. |
-| Rootless Quadlet | Build with the native manager. Run `deploy/podman/sahaya-podman --mode basic --env-file .env quadlet-install` in a test environment managed by rootless systemd, then check `systemctl --user status sahaya-manim.service`. |
+1. Verify authenticated publisher readiness shows `secureExecution: true`, `isolation: verified`, and protocol 4. With broker availability intentionally removed in an approved test window, check that historical playback remains available and the app declines fresh generation before provider use.
+2. Generate or retry the existing single-slit intensity and grating scenes. Verify both formulas, central peak and minima, labels, spacing and animations. Test another topic that uses native geometry or 3D.
+3. Refresh while rendering and confirm the classroom rejoins the current job and keeps its outline order. Attempt a failed regeneration and confirm the previous video remains playable.
+4. Check cue transitions, seeking, captions, playback speed and voice switching with real Teaching Voice audio. Measure first-pass preview success and final acceptance on the actual Linux host.
 
-For later HPC validation, use the deployment's authorized Sahaya mode in place of `basic`, keep its configured model and voice profiles, and provision the Manim artifact directory on persistent storage. Validate one preview and one standard render, playback using a test Teaching Voice profile, cancellation, and a failed regeneration with the old artifact preserved. Keep the private renderer port unpublished. The renderer uses CPU and requires no CDI device entry.
+Monitor the publisher with `docker logs -f sahaya-manim-hpc`, the app with `tmux capture-pane -pt openmaic-llm-test -S -200`, and the sandbox broker’s approved service logs. App events include `Manim skill activated`, `Manim documentation read`, `Manim tool request`, `Manim render evaluated`, `Manim agent completed` and existing `SceneNarration` timing events. Publisher events include `manim-artifact-checked` and `manim-render-failed`. Use model call, preview/final, token, CPU, memory and elapsed-time fields when available.
 
-Configuration is listed in [.env.example](../.env.example). The defaults are one render worker, eight queued/running jobs, 2 CPU cores, 2 GiB memory, 512 MiB scratch space, 128 processes, a 120-second worker deadline, and a 90-second plan cap. Preview is 854×480 at 15 FPS, standard is 1280×720 at 30 FPS, and high is 1920×1080 at 30 FPS. The visualization pipeline caps each background request at 270 seconds including planning and queueing.
-
-If Visualization is unavailable, check the feature flag, matching token, and service health. For render failures, review the reported plan error, simplify the scene or reduce its quality, and inspect the renderer logs. The pinned image supplies Manim, Cairo, TeX, Noto fonts and FFmpeg. The service runs as a non-root user with a read-only root filesystem and private scratch space. [Official Manim container documentation](https://docs.manim.community/en/stable/installation/docker.html) · [Manim source and releases](https://github.com/ManimCommunity/manim)
-
-## Render validation
-
-The following measurements are from real local Cairo renders on Docker Desktop-compatible Colima, using an ARM64 VM with a 2-core CPU limit and a 2 GiB memory limit. Wall time covers renderer process startup through artifact validation. No provider calls were made. The renderer records validation, scientific computation, queue, Cairo, encoding, and artifact timings. Sahaya logs planning and Teaching Voice synthesis separately.
-
-| Visualization | Clip length at preview | Preview wall time | Preview MP4 | Standard wall time |
-| --- | ---: | ---: | ---: | ---: |
-| Derivative and tangent | 4.67 s | 1.93 s | 21,218 B | 2.12 s |
-| Projectile motion | 4.67 s | 1.69 s | 25,408 B | |
-| Wave interference | 4.67 s | 1.62 s | 32,633 B | |
-| Gradient descent, curve and iterates | 6.20 s | 1.83 s | 23,897 B | |
-| Gradient descent, 3D surface | 5.33 s | 4.92 s | 109,369 B | 8.70 s |
-| Gradient descent, numerical updates | 6.13 s | 1.97 s | 28,711 B | |
-| Insertion sort | 5.40 s | 1.79 s | 33,573 B | |
-
-Standard MP4s were 34,670 B for the derivative and 245,121 B for the surface. Maximum observed child memory for the two benchmark groups was approximately 252 MiB for preview and 397 MiB for standard. Render times depend on hardware, scene complexity, fonts, and camera movement.
-
-Scientific checks cover known numerical results, invalid expressions, physical boundaries, and plan limits. The real service test renders an equation and function graph, verifies range requests and owner checks, decodes the MP4, and confirms cache persistence across a service restart. The benchmark fixtures also exercise 3D, sequential and parallel beats, replacements, and motion along a calculated path. All nine benchmark MP4s played and sought successfully in Chrome. Representative preview frames were inspected for geometry, labels, and transitions.
-
-## HPC validation protocol 3
-
-The second HPC run exposed three independent failure paths. Sahaya accepted only two values per axis range even though Manim accepts a third tick interval. A field-only kind patch left incompatible fields on the same object. The validator stopped at structural errors and could reveal equation and scientific issues only on later calls. The repair prompt already received exact field paths. App logs hid unsupported names. The live plan bodies were unavailable, so the specific equation and model inputs remain unknown.
-
-The compiler normalizes fixed metadata, recognized aliases, two-dimensional coordinates, operation arguments, and equivalent display math. Axes preserve a bounded tick interval. Plot domains use two endpoints. The renderer collects independent schema, equation, expression, reference, and scientific issues before queuing valid plans. It reports up to 24 issues and identifies blocked checks. Whole-object kind repairs keep IDs and unaffected fields. Equation edits must retain mathematical tokens. Model parameters and executable expressions stay protected. Planning still has three calls, 150 seconds for planning and validation, and 270 seconds overall.
-
-Track first-pass acceptance, normalization, repair counts, and end-to-end success using the app's `Visualization generation metrics` entries. `Visualization plan validation` includes stage, outline, attempt, request, selected model, timing, issue paths, phases, and repair progress. `Visualization rendered` includes renderer timings. Renderer stdout also records job timing. The classroom reuses the existing authenticated status API after reload in the same browser tab. The app process holds job identities. An expired job or app restart can require a new attempt. Unsaved Pro mode previews and edits stay local to their editor session.
-
-Enable `MANIM_CAPTURE_REJECTED_PLANS=true` on the renderer for a diagnostic window. The private service stores at most eight captures per owner and 64 total, capped at 192 KiB each. They expire after 24 hours. App logs contain capture IDs, and authenticated `GET /diagnostics/<id>` returns a capture only with the matching `X-Manim-Owner` (SHA-256 of the authenticated user ID). Captures contain generated plans and validation results. Treat them as private course data. Provider credentials, documents, and Teaching Voice samples are outside the capture request.
-
-### Standalone university deployment
-
-**Rebuild the renderer.** From the HPC login shell, with the existing renderer and `openmaic-llm-test` tmux session running:
-
-```bash
-cd /home/danish/projects/OpenMAIC-llm-test
-git fetch origin feat/manim-integration
-git switch feat/manim-integration
-git merge --ff-only origin/feat/manim-integration
-bash scripts/update-manim-hpc.sh
-```
-
-The script builds the workspace and image before stopping the renderer. It reuses the `sahaya-manim-hpc` artifact volume, existing private token, loopback port 8780, two CPUs, and 2 GiB memory. It checks authenticated protocol-3 readiness before restarting Next.js in its existing tmux pane on port 3003. The prior renderer stays available as a stopped container. Export `MANIM_CAPTURE_REJECTED_PLANS=true` before calling the script when captures are needed.
-
-Watch `docker logs -f sahaya-manim-hpc` and `tmux capture-pane -pt openmaic-llm-test -S -200`. On HPC, retry both diffraction scenes and reload while a render is active. Check the original outline order, active phase, MP4 and Teaching Voice playback, and previous-artifact retention if a regeneration fails. Compare the measured first-pass and end-to-end success rates using live provider activity.
+Enable `MANIM_CAPTURE_REJECTED_PLANS=true` on the publisher only for a bounded diagnostic window. It stores rejected Python and the sanitized issue for at most 24 hours. Caps are eight captures per owner, 64 total. Authenticated internal `/diagnostics/<id>` requires the owning principal’s SHA-256 namespace. Generated source can contain course content and should be handled privately. Raw worker stdout and stderr stay outside logs and model feedback.

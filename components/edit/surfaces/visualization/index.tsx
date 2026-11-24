@@ -109,6 +109,7 @@ function Editor({ scene }: { scene: VisualizationScene }) {
       const revision: VisualizationRevision = {
         requestKey: attemptId,
         preview: previewOnly,
+        deferFinal: !previewOnly && !preview && outline.type === 'visualization',
         ...(!previewOnly && preview
           ? { sourceArtifactId: preview.content.artifact.artifactId }
           : updatedParameters
@@ -203,6 +204,14 @@ function Editor({ scene }: { scene: VisualizationScene }) {
           outline,
           allOutlines,
           signal,
+          (phase) => {
+            if (tracked.current()) {
+              tracked.progress(phase);
+              setPhase(
+                sceneAttemptLabel('visualization', { id: attemptId, phase, regeneration: true }),
+              );
+            }
+          },
         );
       }
       signal.throwIfAborted();

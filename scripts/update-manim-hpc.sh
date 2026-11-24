@@ -1,82 +1,231 @@
 #!/usr/bin/env bash
-# Update the standalone Manim renderer and its existing local Next.js tmux pane.
-set -euo pipefail
+# Standalone Sahaya upgrade. Run from the HPC checkout with the fetched revision as argument.
+set -Eeuo pipefail
 set +x
+umask 077
 
-cd "$(git rev-parse --show-toplevel)"
+repo=$(git rev-parse --show-toplevel)
+cd "$repo"
 test "$(git branch --show-current)" = feat/manim-integration
+git diff --quiet
+git diff --cached --quiet
+old=$(git rev-parse HEAD)
+target=$(git rev-parse "${1:-HEAD}^{commit}")
+git merge-base --is-ancestor "$old" "$target"
 
 renderer=sahaya-manim-hpc
-image="${renderer}:$(git rev-parse --short HEAD)"
-backup="$renderer-before-$(date +%Y%m%d%H%M%S)"
-staged="$backup-next"
-pane=$(tmux display-message -p -t openmaic-llm-test '#{pane_id}')
-test -n "$pane"
+session=openmaic-llm-test
+image="$renderer:${target:0:12}"
+stamp=$(date +%Y%m%d%H%M%S)
+backup="$renderer-before-$stamp"
+staged="$renderer-next-$stamp"
+work=$(mktemp -d)
+exit_on_error=1
+app_stopped=false
+renderer_state=unchanged
+pane=
+rollback=
+renderer_env="$work/renderer.env"
+client_env="$work/app.env"
+
 docker volume inspect "$renderer" >/dev/null
 test "$(docker inspect -f '{{.State.Running}}' "$renderer")" = true
 restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}{{if .HostConfig.RestartPolicy.MaximumRetryCount}}:{{.HostConfig.RestartPolicy.MaximumRetryCount}}{{end}}' "$renderer")
 restart=${restart:-no}
 
-umask 077
-env_file=$(mktemp)
-state=preparing
+port_free() {
+  python3 -c 'import socket; s=socket.socket(); s.settimeout(.4); raise SystemExit(s.connect_ex(("127.0.0.1",3003)) == 0)'
+}
+ready() {
+  local count
+  for count in {1..50}; do
+    if ! tmux has-session -t "=$session" 2>/dev/null ||
+        [[ $(tmux display-message -p -t "$pane" '#{pane_dead}') == 1 ]]; then
+      return 1
+    fi
+    if curl -fsS --max-time 3 http://127.0.0.1:3003/api/health |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("status",d.get("data",{}).get("status")); assert status=="ok"; print("Sahaya HTTP ready ("+str(d.get("version",d.get("data",{}).get("version","unknown")))+")")' 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+launch_app() {
+  local directory=$1 command
+  # Quote paths independently. The env file is mode 600 and populated from the
+  # original app process before the tmux pane is stopped.
+  printf -v command 'exec bash %q %q %q' "$work/launch" "$directory" "$client_env"
+  tmux respawn-pane -k -t "$pane" "$command"
+}
 cleanup() {
   local status=$?
-  rm -f "$env_file"
-  if ((status == 0)); then return; fi
-  case "$state" in
-    preparing) ;;
-    staged) docker rm "$staged" >/dev/null 2>&1 || true ;;
-    stopped)
-      docker rm "$staged" >/dev/null 2>&1 || true
-      docker start "$renderer" >/dev/null || true ;;
-    saved)
-      docker rm -f "$staged" >/dev/null 2>&1 || true
-      docker rename "$backup" "$renderer" && docker start "$renderer" >/dev/null || true ;;
-    replaced)
-      docker rm -f "$renderer" >/dev/null 2>&1 || true
-      docker rename "$backup" "$renderer" && docker start "$renderer" >/dev/null || true ;;
-  esac
+  trap - EXIT
+  if ((status != 0 && exit_on_error)); then
+    printf 'Upgrade failed. Restoring the previous services.\n' >&2
+    if $app_stopped && [[ -n "$pane" ]]; then
+      tmux respawn-pane -k -t "$pane" 'exec sleep 86400' 2>/dev/null || true
+    fi
+    case "$renderer_state" in
+      staged) docker rm "$staged" >/dev/null 2>&1 || true ;;
+      stopped) docker rm "$staged" >/dev/null 2>&1 || true; docker start "$renderer" >/dev/null || true ;;
+      saved) docker rm -f "$staged" >/dev/null 2>&1 || true
+             docker rename "$backup" "$renderer" && docker start "$renderer" >/dev/null || true ;;
+      replaced) docker rm -f "$renderer" >/dev/null 2>&1 || true
+                docker rename "$backup" "$renderer" && docker start "$renderer" >/dev/null || true ;;
+    esac
+    if $app_stopped && [[ -n "$pane" ]]; then
+      local restore="$repo"
+      if [[ $(git rev-parse HEAD) != "$old" ]]; then
+        rollback="$(dirname "$repo")/OpenMAIC-manim-rollback-$stamp"
+        if git worktree add --detach "$rollback" "$old"; then
+          for config in .env .env.local .env.development .env.development.local server-providers.yml; do
+            if [[ -e "$repo/$config" && ! -e "$rollback/$config" ]]; then
+              ln -s "$repo/$config" "$rollback/$config"
+            fi
+          done
+          restore="$rollback"
+        else
+          printf 'Could not stage the prior app revision %s.\n' "$old" >&2
+          restore=
+        fi
+      fi
+      if [[ -n "$restore" ]] &&
+          (cd "$restore" && { [[ "$restore" == "$repo" ]] || pnpm install --offline --frozen-lockfile; } &&
+           pnpm rebuild:workspace && pnpm check:workspace-build) &&
+          launch_app "$restore" && ready; then
+        printf 'Previous app restored from %s.\n' "$restore" >&2
+      else
+        printf 'Previous renderer was retained. Restore app revision %s and check tmux before retrying.\n' "$old" >&2
+      fi
+    fi
+  fi
+  rm -rf "$work"
+  exit "$status"
 }
 trap cleanup EXIT
 
-docker inspect --format '{{json .Config.Env}}' "$renderer" | python3 -c '
+docker inspect --format '{{json .}}' "$renderer" >"$work/previous.json"
+python3 - "$work/previous.json" "$renderer_env" <<'PY'
 import json, os, re, sys
-values = dict(entry.split("=", 1) for entry in json.load(sys.stdin))
-assert re.fullmatch(r"[A-Za-z0-9_-]{24,128}", values.get("MANIM_RENDERER_TOKEN", "")), "Missing renderer token"
-assert values.get("MANIM_ARTIFACT_DIR", "/artifacts") == "/artifacts", "Unexpected artifact path"
-capture = os.getenv("MANIM_CAPTURE_REJECTED_PLANS")
-if capture is not None:
-    assert capture in {"true", "false"}, "Capture must be true or false"
-    values["MANIM_CAPTURE_REJECTED_PLANS"] = capture
-values["HOME"] = values["XDG_CACHE_HOME"] = "/tmp"
-for key, value in values.items():
-    if key.startswith("MANIM_") or key in {"HOME", "XDG_CACHE_HOME"}:
-        assert "\n" not in value and "\r" not in value, "Invalid renderer environment"
-        print(f"{key}={value}")
-' > "$env_file"
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
-# The active deployment stays online while the workspace and image build.
-pnpm rebuild:workspace
-pnpm check:workspace-build
-docker build -t "$image" services/manim-renderer
+previous, target = sys.argv[1:]
+with open(previous) as handle:
+    current = json.load(handle)
+    values = dict(entry.split("=", 1) for entry in current["Config"]["Env"])
+assert any(m.get("Type")=="volume" and m.get("Name")=="sahaya-manim-hpc" and m.get("Destination")=="/artifacts"
+           for m in current["Mounts"]), "Unexpected publisher artifact mount"
+assert current["HostConfig"]["PortBindings"].get("8780/tcp") == [{"HostIp":"127.0.0.1", "HostPort":"8780"}], "Unexpected publisher port binding"
+for name in ("MANIM_SANDBOX_URL", "MANIM_SANDBOX_TOKEN", "MANIM_CAPTURE_REJECTED_PLANS"):
+    if name in os.environ:
+        values[name] = os.environ[name]
+assert re.fullmatch(r"[A-Za-z0-9_-]{24,128}", values.get("MANIM_RENDERER_TOKEN", "")), "Missing publisher token"
+assert values.get("MANIM_ARTIFACT_DIR", "/artifacts") == "/artifacts"
+endpoint = values.get("MANIM_SANDBOX_URL", "").rstrip("/")
+token = values.get("MANIM_SANDBOX_TOKEN", "")
+url = urlsplit(endpoint)
+assert url.scheme == "https" and url.hostname and not any((url.username, url.password, url.query, url.fragment)), "Set the approved HTTPS MANIM_SANDBOX_URL."
+assert re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token), "Set the approved MANIM_SANDBOX_TOKEN."
+from urllib.request import build_opener, HTTPRedirectHandler
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+try:
+    with build_opener(NoRedirect).open(Request(endpoint + "/ready", headers={"Authorization": "Bearer " + token}), timeout=5) as response:
+        ready = json.loads(response.read(4096))
+    assert (ready["isolation"], ready["backend"], ready["protocol"], ready["manimVersion"]) == ("verified", "gvisor", 1, "0.22.1")
+    assert re.fullmatch(r"sha256:[a-f0-9]{64}", ready["image"])
+except Exception:
+    raise SystemExit("The approved gVisor broker did not pass native Manim readiness.") from None
+with open(target, "w") as output:
+    for name, value in values.items():
+        if name.startswith("MANIM_"):
+            assert "\n" not in value and "\r" not in value
+            print(f"{name}={value}", file=output)
+    print("HOME=/tmp\nXDG_CACHE_HOME=/tmp", file=output)
+print("Administrator-approved gVisor broker verified.")
+PY
+
+mkdir "$work/image"
+git archive "$target" services/manim-renderer | tar -x -C "$work/image"
+docker build -t "$image" "$work/image/services/manim-renderer"
 docker create --name "$staged" --restart "$restart" --init \
   --publish 127.0.0.1:8780:8780 --volume "$renderer:/artifacts" \
-  --env-file "$env_file" --read-only --tmpfs /tmp:size=512m,mode=1777 \
+  --env-file "$renderer_env" --read-only --tmpfs /tmp:size=512m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
   --cpus 2 --memory 2g --pids-limit 128 \
   --health-cmd 'python /opt/sahaya-manim/healthcheck.py' "$image" >/dev/null
-state=staged
+renderer_state=staged
+
+if ! tmux has-session -t "=$session" 2>/dev/null; then
+  port_free || { printf 'Port 3003 is in use outside %s.\n' "$session" >&2; exit 1; }
+  tmux new-session -d -s "$session" -c "$repo" 'exec sleep 86400'
+fi
+pane=$(tmux display-message -p -t "$session" '#{pane_id}')
+pane_pid=$(tmux display-message -p -t "$pane" '#{pane_pid}')
+test -n "$pane"
+tmux set-window-option -t "$pane" remain-on-exit on
+
+# Recover startup environment from the running Next process or its tmux pane.
+# Existing dotenv files remain in place. Do not give the app the broker token.
+python3 - "$pane_pid" "$renderer_env" "$client_env" <<'PY'
+import os, re, shlex, sys
+from pathlib import Path
+pid, publisher, target = sys.argv[1:]
+pids = [pid]
+for parent in pids:
+    children = Path(f"/proc/{parent}/task/{parent}/children")
+    if children.is_file() and len(pids) < 64:
+        pids.extend(children.read_text().split()[:64 - len(pids)])
+for candidate in reversed(pids):
+    entry = Path(f"/proc/{candidate}/environ")
+    if not entry.is_file():
+        continue
+    values = dict(item.split("=", 1) for item in entry.read_bytes().decode(errors="surrogateescape").split("\0") if "=" in item)
+    break
+else:
+    values = {}
+excluded = {"_", "PWD", "OLDPWD", "SHLVL", "TMUX", "TMUX_PANE", "BASH_ENV", "ENV", "MANIM_SANDBOX_URL", "MANIM_SANDBOX_TOKEN"}
+with open(publisher) as source:
+    publisher_values = dict(line.rstrip("\n").split("=", 1) for line in source)
+values.update({"OPENMAIC_ENABLE_MANIM":"true", "MANIM_RENDERER_URL":"http://127.0.0.1:8780",
+               "MANIM_RENDERER_TOKEN":publisher_values["MANIM_RENDERER_TOKEN"]})
+with open(target, "w", errors="surrogateescape") as output:
+    for name, value in values.items():
+        if name not in excluded and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            print(f"export {name}={shlex.quote(value)}", file=output)
+PY
+cat >"$work/launch" <<'LAUNCH'
+#!/usr/bin/env bash
+set -e
+cd "$1"
+source "$2"
+exec pnpm dev --hostname 0.0.0.0 --port 3003
+LAUNCH
+
+# Keep the session alive independently of the foreground pnpm/Next process.
+app_stopped=true
+tmux respawn-pane -k -t "$pane" 'exec sleep 86400'
+for _ in {1..30}; do
+  if port_free; then break; fi
+  sleep 1
+done
+port_free
+git merge --ff-only "$target"
+pnpm rebuild:workspace
+pnpm check:workspace-build
 
 docker stop "$renderer" >/dev/null
-state=stopped
+renderer_state=stopped
 docker rename "$renderer" "$backup"
-state=saved
+renderer_state=saved
 docker rename "$staged" "$renderer"
-state=replaced
+renderer_state=replaced
 docker start "$renderer" >/dev/null
 
-ready=false
+publisher_ready=false
 for _ in {1..30}; do
   if docker exec "$renderer" python -c '
 import json, os
@@ -85,30 +234,19 @@ request = Request("http://127.0.0.1:8780/ready", headers={
     "Authorization": "Bearer " + os.environ["MANIM_RENDERER_TOKEN"],
     "X-Manim-Owner": "0" * 64,
 })
-with urlopen(request, timeout=2) as response:
-    assert json.load(response)["validationProtocol"] == 3
+with urlopen(request, timeout=3) as response:
+    ready=json.load(response)
+    assert ready["protocol"]==4 and ready["secureExecution"] and ready["isolation"]=="verified"
+    print("Publisher ready: "+ready["version"]+" (verified gVisor)")
 ' 2>/dev/null; then
-    ready=true
+    publisher_ready=true
     break
   fi
   sleep 1
 done
-test "$ready" = true
+test "$publisher_ready" = true
+launch_app "$repo"
+ready
 docker update --restart=no "$backup" >/dev/null
-state=ready
-
-# Restart only the host app through the original session, retaining its shell environment.
-tmux send-keys -t "$pane" C-c
-python3 - <<'PY'
-import socket, time
-for _ in range(40):
-    with socket.socket() as connection:
-        connection.settimeout(0.5)
-        if connection.connect_ex(("127.0.0.1", 3003)) != 0:
-            break
-    time.sleep(0.5)
-else:
-    raise SystemExit("Port 3003 is still in use. Check the openmaic-llm-test pane before restarting Next.js.")
-PY
-tmux send-keys -t "$pane" 'cd /home/danish/projects/OpenMAIC-llm-test && pnpm dev --hostname 0.0.0.0 --port 3003' C-m
-printf 'Renderer ready on protocol 3. Previous container retained as %s.\n' "$backup"
+exit_on_error=0
+printf 'Sahaya %s is ready in %s on port 3003. Previous renderer: %s.\n' "${target:0:12}" "$session" "$backup"
