@@ -1,5 +1,6 @@
 'use client';
 
+import { VISUALIZATION_FAILURES } from '@/lib/visualization/failure';
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -372,6 +373,37 @@ export function SceneSidebar({
             );
           })}
 
+          {failedOutlines
+            .filter(
+              (outline) =>
+                outline.type === 'visualization' && outline.id !== pendingScene?.outline.id,
+            )
+            .map((outline) => (
+              <div
+                key={outline.id}
+                className="rounded-lg border border-red-200 p-2 text-xs dark:border-red-900"
+              >
+                <p className="font-medium">{outline.title}</p>
+                <p className="mt-1 text-muted-foreground">
+                  {outline.visualizationFailure
+                    ? VISUALIZATION_FAILURES[outline.visualizationFailure]
+                    : 'The visualization could not be generated.'}
+                </p>
+                {onRetryOutline && (
+                  <button
+                    type="button"
+                    className="mt-1 rounded px-1 py-1 font-medium text-red-600 disabled:opacity-50 dark:text-red-400"
+                    disabled={retryingOutlineId !== null}
+                    onClick={() => void handleRetryOutline(outline.id)}
+                  >
+                    {retryingOutlineId === outline.id
+                      ? t('generation.retryingScene')
+                      : t('generation.retryScene')}
+                  </button>
+                )}
+              </div>
+            ))}
+
           {/* Single placeholder for the next generating page (clickable) */}
           {pendingScene &&
             (() => {
@@ -446,7 +478,7 @@ export function SceneSidebar({
                                 e.stopPropagation();
                                 handleRetryOutline(outline.id);
                               }}
-                              disabled={isRetrying}
+                              disabled={retryingOutlineId !== null}
                               className="p-1 -ml-1 rounded-md hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors active:scale-95 disabled:opacity-50 disabled:active:scale-100"
                               title={t('generation.retryScene')}
                             >
@@ -457,10 +489,17 @@ export function SceneSidebar({
                           ) : (
                             <AlertCircle className="w-3.5 h-3.5" />
                           )}
-                          <span>
+                          <span
+                            title={
+                              pendingScene.visualizationFailure &&
+                              VISUALIZATION_FAILURES[pendingScene.visualizationFailure]
+                            }
+                          >
                             {isRetrying
                               ? t('generation.retryingScene')
-                              : t('stage.generationFailed')}
+                              : pendingScene.visualizationFailure
+                                ? 'Visualization needs a retry'
+                                : t('stage.generationFailed')}
                           </span>
                         </div>
                       ) : (

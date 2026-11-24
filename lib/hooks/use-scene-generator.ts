@@ -1,5 +1,6 @@
 'use client';
 
+import { isVisualizationFailure, VISUALIZATION_FAILURES } from '@/lib/visualization/failure';
 import { useCallback, useEffect, useRef } from 'react';
 import { flushStageSave, useStageStore } from '@/lib/store/stage';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
@@ -270,7 +271,7 @@ async function pollSceneContentJob(
     return {
       success: false,
       error: initial.error || 'Scene content generation failed',
-      errorCode: 'GENERATION_FAILED',
+      errorCode: initial.errorCode || 'GENERATION_FAILED',
       jobId: initial.jobId,
       status: initial.status,
       jobTerminal: true,
@@ -1512,6 +1513,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               if (content !== currentScene.content) patch.content = content;
             } catch (error) {
               if (controller.signal.aborted) throw error;
+              patch.narrationError = VISUALIZATION_FAILURES.VISUALIZATION_NARRATION_SYNC;
               log.warn('[SceneNarration] Visualization will pace narration in the player', {
                 sceneId: scene.id,
                 error: messageFromError(error, 'Timing render failed'),
@@ -1893,7 +1895,14 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               });
               break;
             }
-            store.getState().addFailedOutline(outline);
+            store
+              .getState()
+              .addFailedOutline(
+                outline,
+                isVisualizationFailure(contentResult.errorCode)
+                  ? contentResult.errorCode
+                  : undefined,
+              );
             removeGeneratingOutline(outline.id);
             options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
             if (contentPromises) {
@@ -2167,8 +2176,23 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     async (outlineId: string) => {
       const state = store.getState();
       const outline = state.failedOutlines.find((o) => o.id === outlineId);
-      const params = lastParamsRef.current;
-      if (!outline || !state.stage || !params) return;
+      if (!outline || !state.stage) return;
+      // A reloaded course may have only failed outlines, so the automatic
+      // batch never initialized generation parameters in this component.
+      const params: GenerationParams | undefined =
+        lastParamsRef.current ??
+        (outline.type === 'visualization'
+          ? {
+              stageInfo: {
+                name: state.stage.name,
+                description: state.stage.description,
+                style: state.stage.style,
+              },
+              requirement: state.stage.description || state.stage.name,
+              languageDirective: state.stage.languageDirective,
+            }
+          : undefined);
+      if (!params) return;
       // A whole-outline retry runs content, actions and narration on the
       // operator's keys. The surfaces already withhold the affordance when
       // generation is not permitted; refusing here keeps the precondition and
@@ -2234,7 +2258,12 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
 
         if (!contentResult.success || !contentResult.content) {
           if (contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) return;
-          store.getState().addFailedOutline(outline);
+          store
+            .getState()
+            .addFailedOutline(
+              outline,
+              isVisualizationFailure(contentResult.errorCode) ? contentResult.errorCode : undefined,
+            );
           options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
           return;
         }

@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from plan import validate
+from plan import PlanValidationError, validate
 from render import COMPILER_REVISION, MAX_ARTIFACT, MAX_DURATION, QUALITIES, digest
 
 VERSION = f"0.22.1/{COMPILER_REVISION}"
@@ -49,6 +49,7 @@ class Job:
     created: float = field(default_factory=time.monotonic)
     ended: float = 0
     error: str | None = None
+    error_code: str | None = None
     artifact: dict | None = None
     process: subprocess.Popen | None = None
     cancelled: bool = False
@@ -56,6 +57,7 @@ class Job:
 
     def snapshot(self):
         return {"id": self.id, "status": self.status, "artifact": self.artifact, "error": self.error,
+                "errorCode": self.error_code,
                 "queuePosition": PENDING.index(self.id) + 1 if self.id in PENDING else None}
 
 
@@ -103,6 +105,7 @@ def run(job, body):
             except subprocess.TimeoutExpired:
                 stop(job.process)
                 job.process.wait()
+                job.error_code = "VISUALIZATION_RENDER_TIMEOUT"
                 raise ValueError("Visualization rendering exceeded its deadline") from None
         with LOCK:
             job.process = None
@@ -110,9 +113,7 @@ def run(job, body):
                 return
             job.status = "processing"
         if code:
-            with (work / "render.log").open("rb") as log:
-                log.seek(max(0, (work / "render.log").stat().st_size - 2000))
-                print(log.read().decode("utf-8", "replace"), file=sys.stderr, flush=True)
+            print(f"Manim worker {job.id} exited with code {code}", file=sys.stderr, flush=True)
             raise ValueError("Manim could not render the plan. Check equations, layout and plot domains.")
         metadata = json.loads((work / "metadata.json").read_text())
         metadata["timings"]["queueMs"] = queue_ms
@@ -217,8 +218,13 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict) or set(body) != {"plan", "quality"} or body["quality"] not in QUALITIES:
                 raise ValueError("Expected a visualization plan and supported quality")
             result = submit(owner, body["plan"], body["quality"])
-        except (TypeError, ValueError, RecursionError) as error:
-            self.send_json(422, {"error": str(error)[:250]})
+        except PlanValidationError as error:
+            self.send_json(422, {"error": "Visualization plan validation failed", "issues": error.issues})
+            return
+        except (TypeError, ValueError, RecursionError):
+            self.send_json(422, {"error": "Visualization plan is malformed or violates renderer constraints",
+                                 "issues": [{"path": [], "code": "constraints",
+                                             "message": "Check scientific domains, object layout and animation constraints"}]})
             return
         if result is None:
             self.send_json(429, {"error": "Visualization queue is full. Try again shortly."})
@@ -252,13 +258,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION})
+            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 2})
             return
         owner = self.owner()
         if owner is None:
             return
         if self.path == "/ready":
-            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION})
+            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 2})
             return
         if self.path.startswith("/jobs/"):
             self.job(owner)

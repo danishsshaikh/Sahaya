@@ -10,3 +10,7 @@
 - Rendered seven preview fixtures plus two standard-quality comparisons. Fixed the NumPy/3D boundary and measured actual encoded segment lengths for cue timing.
 - Verified Chrome playback and seeking for all nine videos. Added a JSON round-trip test for the authoritative scene attempt and a player test for navigation and resume.
 - Final checks passed for targeted lint and formatting, Docker configuration, and Podman preflight fixtures. Baseline comparison reproduced the existing broad regression failures, and the two retry cases that timed out under full-suite load passed their focused rerun.
+
+- Audited the HPC validation report. Schema-derived guidance now states the font scale, application-owned metadata is stamped, and renderer feedback drives exact-path patch repair.
+- Added scene-level failure categories and a retry regression for reloaded partial classrooms. Added a source fingerprint check for DSL and generation builds.
+- Validated and rendered the three diffraction demonstrations locally at 720p with the existing limits.

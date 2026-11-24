@@ -5,6 +5,9 @@ import math
 import re
 import time
 from pathlib import Path
+from itertools import islice
+
+from diagnostics import PlanValidationError, issue, require, schema_issues
 
 from jsonschema import Draft202012Validator
 
@@ -12,24 +15,12 @@ from science import compute, expression
 
 SCHEMA = json.loads(Path(__file__).with_name("plan-v1.json").read_text())
 VALIDATOR = Draft202012Validator(SCHEMA)
-TEX_COMMANDS = set("frac sqrt cdot times pm sin cos tan exp log ln sum int infty "
-                   "pi theta phi Delta delta alpha beta gamma partial nabla le ge "
-                   "approx neq left right mathbf mathrm vec overline".split())
+CONTRACT = SCHEMA["x-contract"]
+TEX_COMMANDS = set(CONTRACT["texCommands"])
 PLOT_KINDS = {"graph", "curve", "samples", "samples3d", "surface"}
-OBJECT_FIELDS = {
-    "text": {"text"}, "equation": {"text"}, "dot": set(),
-    "line": {"points"}, "arrow": {"points"}, "circle": set(), "rectangle": {"height"},
-    "polygon": {"points"}, "axes": {"xRange", "yRange", "height"},
-    "plane": {"xRange", "yRange", "height"}, "axes3d": {"xRange", "yRange", "zRange", "height"},
-    "graph": {"axes", "xRange", "source", "expression"},
-    "curve": {"axes", "xRange", "expression", "yExpression"},
-    "samples": {"axes", "source", "index"}, "array": {"index"},
-    "surface": {"axes", "xRange", "yRange", "source", "expression"},
-    "sphere": set(), "samples3d": {"axes", "source", "index"},
-    "modelValue": {"text", "source", "index", "component"},
-}
-ANIMATION_FIELDS = {"move": "to", "rotate": "value", "scale": "value",
-                    "replace": "target", "follow": "target"}
+OBJECT_FIELDS = CONTRACT["objects"]
+ANIMATION_FIELDS = CONTRACT["animationArguments"]
+LIMITS = CONTRACT["limits"]
 
 
 def safe_tex(text):
@@ -74,65 +65,101 @@ def domain(value):
 
 def validate(plan, max_duration=90, timings=None):
     finite_tree(plan)
-    error = next(VALIDATOR.iter_errors(plan), None)
-    if error:
-        location = ".".join(map(str, error.absolute_path)) or "plan"
-        raise ValueError(f"{location}: {error.message[:170]}")
+    errors = list(islice((entry for error in VALIDATOR.iter_errors(plan) for entry in schema_issues(error)), 12))
+    if errors:
+        raise PlanValidationError(errors)
     beats = plan["timeline"]
-    if sum(beat["seconds"] for beat in beats) > max_duration:
-        raise ValueError(f"Timeline exceeds {max_duration} seconds")
-    if sum(len(beat.get("animations", [])) for beat in beats) > 96:
-        raise ValueError("Timeline exceeds 96 animation operations")
+    require(sum(beat["seconds"] for beat in beats) <= max_duration, ["timeline"], "totalDuration",
+            f"Timeline exceeds {max_duration} seconds", limit=max_duration)
+    require(sum(len(beat.get("animations", [])) for beat in beats) <= LIMITS["operations"],
+            ["timeline"], "operationLimit", "Timeline exceeds its animation operation budget",
+            limit=LIMITS["operations"])
+
+    shape_errors = []
+    ids = set()
+    for index, obj in enumerate(plan["objects"]):
+        path = ["objects", index]
+        kind = obj["kind"]
+        contract = OBJECT_FIELDS[kind]
+        allowed = {"id", "kind", "color", "opacity", "size", "at"} | set(contract["fields"])
+        if kind in PLOT_KINDS:
+            allowed -= {"at", "size"}
+        for name in sorted(obj.keys() - allowed):
+            shape_errors.append(issue([*path, name], "unsupportedField", f"Remove this field from {kind}"))
+        for name in contract.get("required", []):
+            if name not in obj:
+                shape_errors.append(issue([*path, name], "required", f"{kind} requires this field"))
+        if obj["id"] in ids:
+            shape_errors.append(issue([*path, "id"], "duplicateId", "Use a unique object ID"))
+        ids.add(obj["id"])
+    for index, beat in enumerate(beats):
+        for offset, animation in enumerate(beat.get("animations", [])):
+            path = ["timeline", index, "animations", offset]
+            field = ANIMATION_FIELDS[animation["op"]]
+            if field and field not in animation:
+                shape_errors.append(issue([*path, field], "required", f"{animation['op']} requires this field"))
+            for name in sorted(animation.keys() - ({"op", "object"} | ({field} if field else set()))):
+                shape_errors.append(issue([*path, name], "unsupportedField", "Remove this field from the operation"))
+            for name in ("object", "target"):
+                if name in animation and animation[name] not in ids:
+                    shape_errors.append(issue([*path, name], "reference", "Reference an existing object ID"))
+    if shape_errors:
+        raise PlanValidationError(shape_errors)
 
     objects = {}
     science_started = time.monotonic()
-    computed = compute(plan.get("model"))
+    try:
+        computed = compute(plan.get("model"))
+    except ValueError as error:
+        raise PlanValidationError([issue(["model"], "scientific", str(error))]) from error
     if timings is not None:
         timings["scienceMs"] = round((time.monotonic() - science_started) * 1000)
     plots = {}
     complexity = 0
-    for obj in plan["objects"]:
+    for index, obj in enumerate(plan["objects"]):
+        path = ["objects", index]
         key, kind = obj["id"], obj["kind"]
-        if key in objects:
-            raise ValueError(f"Duplicate object {key}")
-        if set(obj) - ({"id", "kind", "color", "opacity", "size", "at"} | OBJECT_FIELDS[kind]):
-            raise ValueError(f"{key} contains fields unsupported by {kind}")
-        if "at" in obj and abs(obj["at"][1]) > 3.8:
-            raise ValueError(f"{key} is outside the vertical canvas")
+        require("at" not in obj or abs(obj["at"][1]) <= LIMITS["verticalCanvas"],
+                [*path, "at", 1], "canvasPosition", "Keep the vertical position inside the canvas",
+                limit=LIMITS["verticalCanvas"])
         for name in ("xRange", "yRange", "zRange"):
             if name in obj:
-                domain(obj[name])
+                try:
+                    domain(obj[name])
+                except ValueError as error:
+                    raise PlanValidationError([issue([*path, name], "range", str(error))]) from error
         if kind in ("text", "equation"):
             if not obj.get("text", "").strip():
-                raise ValueError(f"{key} requires text")
+                raise PlanValidationError([issue([*path, "text"], "blank", "Enter nonblank text")])
             if kind == "equation":
-                safe_tex(obj["text"])
+                try:
+                    safe_tex(obj["text"])
+                except ValueError as error:
+                    raise PlanValidationError([issue([*path, "text"], "equation", str(error))]) from error
         if kind in ("line", "arrow", "polygon"):
             points = obj.get("points", [])
             if len(points) < (3 if kind == "polygon" else 2) or len(set(map(tuple, points))) != len(points):
-                raise ValueError(f"{key} requires distinct points")
+                raise PlanValidationError([issue([*path, "points"], "geometry", "Provide the required number of distinct points")])
             if kind != "polygon" and len(points) != 2:
-                raise ValueError(f"{key} requires exactly two endpoints")
+                raise PlanValidationError([issue([*path, "points"], "geometry", "Use exactly two endpoints", limit=2)])
         if kind == "modelValue":
             samples = computed.samples.get(obj.get("source"))
             if not samples or obj.get("index", 0) >= len(samples) or "component" not in obj:
                 raise ValueError(f"{key} requires a supported model sample and component")
         if kind == "array" and obj.get("index", 0) >= len(computed.arrays):
-            raise ValueError(f"{key} references an unavailable sorting state")
+            raise PlanValidationError([issue([*path, "index"], "reference", "Choose an available insertion-sort state", limit=max(0, len(computed.arrays) - 1))])
         if kind in PLOT_KINDS:
             axes = objects.get(obj.get("axes"))
             expected = {"axes3d"} if kind in {"surface", "samples3d"} else {"axes", "plane"}
-            if not axes or axes["kind"] not in expected:
-                raise ValueError(f"{key} requires compatible axes declared earlier")
-            if "at" in obj or "size" in obj:
-                raise ValueError(f"{key} is positioned by its axes")
+            require(axes and axes["kind"] in expected, [*path, "axes"], "reference",
+                    "Reference compatible axes declared earlier", allowed=sorted(expected))
             source = obj.get("source")
             if kind in {"samples", "samples3d"}:
                 if kind == "samples3d" and source != "iterations":
                     raise ValueError(f"{key} requires gradient descent samples")
                 samples = computed.samples.get(source)
                 if not samples or ("index" in obj and obj["index"] >= len(samples)):
-                    raise ValueError(f"{key} references unavailable model samples")
+                    raise PlanValidationError([issue([*path, "index" if samples else "source"], "reference", "Choose an available scientific sample or index")])
                 plots[key] = [samples[obj["index"]]] if "index" in obj else samples
             else:
                 if bool(source) == bool(obj.get("expression")):
@@ -167,50 +194,51 @@ def validate(plan, max_duration=90, timings=None):
                     plots[key] = points
         complexity += {"surface": 14, "equation": 3, "sphere": 8, "plane": 3}.get(kind, 1)
         objects[key] = obj
-    if complexity > 85:
+    if complexity > LIMITS["complexity"]:
         raise ValueError("Objects exceed the scene complexity budget")
 
     visible = set()
     introduced = False
-    for beat in beats:
+    for index, beat in enumerate(beats):
+        path = ["timeline", index]
         if beat.get("narration") and not beat["narration"].strip():
-            raise ValueError("Narration must contain a spoken sentence")
+            raise PlanValidationError([issue([*path, "narration"], "blank", "Provide a short spoken sentence")])
         if "camera" in beat and beat.get("animations"):
-            raise ValueError("Camera transitions need a dedicated beat")
+            raise PlanValidationError([issue(["timeline"], "timeline", "Place the camera transition in a dedicated beat")])
         touched = set()
-        for animation in beat.get("animations", []):
+        for offset, animation in enumerate(beat.get("animations", [])):
+            animation_path = [*path, "animations", offset]
             key, op = animation["object"], animation["op"]
-            field = ANIMATION_FIELDS.get(op)
             target = animation.get("target")
-            if set(animation) != {"op", "object"} | ({field} if field else set()):
-                raise ValueError(f"{op} requires only its supported animation parameters")
-            if key not in objects or (target is not None and target not in objects):
-                raise ValueError(f"{op} references an unknown object")
             if key in touched or (target is not None and (target in touched or target == key)):
-                raise ValueError("Parallel animations cannot share an object")
+                raise PlanValidationError([issue([*animation_path, "object"], "reference", "Parallel animations cannot share an object")])
             touched.add(key)
             if target is not None:
                 touched.add(target)
             if op in {"create", "write", "fadeIn"}:
                 if key in visible:
-                    raise ValueError(f"{key} is already visible")
+                    raise PlanValidationError([issue([*animation_path, "object"], "visibility", "Object is already visible")])
                 visible.add(key)
                 introduced = True
             elif key not in visible:
-                raise ValueError(f"{op} requires {key} to be visible")
+                raise PlanValidationError([issue([*animation_path, "object"], "visibility", "Operation needs a visible object")])
             if op == "fadeOut":
                 visible.remove(key)
             elif op == "replace":
                 if target in visible:
-                    raise ValueError("Replacement target must be hidden")
+                    raise PlanValidationError([issue([*animation_path, "target"], "visibility", "Replacement target must be hidden")])
                 visible.remove(key)
                 visible.add(target)
             elif op == "follow" and objects[target]["kind"] not in {"graph", "curve", "line", "arrow"}:
-                raise ValueError("A follow target must be a path")
-            elif op == "scale" and not 0.2 <= animation["value"] <= 3:
-                raise ValueError("Scale factor must be between 0.2 and 3")
-            elif op == "move" and abs(animation["to"][1]) > 3.8:
-                raise ValueError("Move destination is outside the vertical canvas")
+                raise PlanValidationError([issue([*animation_path, "target"], "reference", "Follow needs a graph, curve, line or arrow")])
+            elif op == "scale":
+                lo, hi = CONTRACT["scaleRange"]
+                require(lo <= animation["value"] <= hi, [*animation_path, "value"], "scaleRange",
+                        f"Scale factor must be between {lo} and {hi}", allowed=[lo, hi], value=animation["value"])
+            elif op == "move":
+                require(abs(animation["to"][1]) <= LIMITS["verticalCanvas"],
+                        [*animation_path, "to", 1], "canvasPosition", "Move destination is outside the vertical canvas",
+                        limit=LIMITS["verticalCanvas"])
     if not introduced:
-        raise ValueError("Timeline must introduce visible objects")
+        raise PlanValidationError([issue(["timeline"], "timeline", "Introduce visible objects with create, write or fadeIn")])
     return computed, plots

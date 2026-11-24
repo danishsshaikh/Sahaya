@@ -383,6 +383,11 @@ export function VisualizationRenderer({
           </p>
         )}
       </div>
+      {scene.narrationError && (
+        <p role="status" className="px-3 py-1 text-xs text-amber-200">
+          {scene.narrationError}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2 border-t border-slate-700 px-2 py-1">
         <Button
           type="button"

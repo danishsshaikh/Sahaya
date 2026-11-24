@@ -12,6 +12,14 @@ FUNCTIONS = {name: getattr(math, name) for name in ("sin", "cos", "exp", "sqrt",
 CONSTANTS = {"pi": math.pi, "e": math.e}
 
 
+def sinc(x):
+    """Unnormalized sinc, with the continuous limiting value at zero."""
+    return 1.0 if x == 0 else math.sin(x) / x
+
+
+FUNCTIONS["sinc"] = sinc
+
+
 def bounded(value):
     if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > MAX_VALUE:
         raise ValueError("Calculation exceeded the finite numerical domain")

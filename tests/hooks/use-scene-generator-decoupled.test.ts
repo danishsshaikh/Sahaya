@@ -1160,4 +1160,62 @@ describe('scene generator visual and narration pipelines', () => {
     expect(mocks.stageState.failedOutlines).toEqual([]);
     expect(mocks.stageState.generationComplete).toBe(true);
   });
+
+  it('retries just the failed Visualization after reloading a partial classroom', async () => {
+    const failed: SceneOutline = { ...outlines[1], type: 'visualization' };
+    const { scene: completedSlide } = (await actionResponse(
+      1,
+      'attempt-1',
+      'version-1',
+    ).json()) as { scene: Scene };
+    mocks.stageState.outlines = [outlines[0], failed];
+    mocks.stageState.scenes = [completedSlide];
+    mocks.stageState.failedOutlines = [failed];
+    mocks.stageState.currentSceneId = completedSlide.id;
+    const content = { type: 'visualization', artifact: { artifactId: 'a'.repeat(64) } };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (url === '/api/generate/scene-content') {
+        expect(body.outline).toMatchObject({ id: failed.id, type: 'visualization' });
+        expect(body.stageInfo.name).toBe('Decoupled lesson');
+        return jsonResponse({
+          success: true,
+          content,
+          attemptId: 'attempt-2',
+          generationVersion: 'version-1',
+        });
+      }
+      if (url === '/api/generate/scene-actions') {
+        return jsonResponse({
+          success: true,
+          attemptId: 'attempt-2',
+          generationVersion: 'version-1',
+          scene: {
+            id: 'scene-2',
+            stageId: 'stage-1',
+            order: 2,
+            title: failed.title,
+            type: 'visualization',
+            content,
+            actions: [],
+          },
+          previousSpeeches: [],
+        });
+      }
+      if (url === '/api/generate/scene-attempt/commit')
+        return jsonResponse({ success: true, accepted: true });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { generator } = await mountGenerator(root);
+    await generator.retrySingleOutline(failed.id);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/generate/scene-content',
+      '/api/generate/scene-actions',
+      '/api/generate/scene-attempt/commit',
+    ]);
+    expect(mocks.stageState.scenes[0]).toBe(completedSlide);
+    expect(mocks.stageState.scenes[1]).toMatchObject({ id: 'scene-2', type: 'visualization' });
+    expect(mocks.stageState.failedOutlines).toEqual([]);
+  });
 });

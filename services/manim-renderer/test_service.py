@@ -70,6 +70,17 @@ class RendererServiceTests(unittest.TestCase):
             data = Path(directory)
             process = self.start(data)
             try:
+                fixture = Path(__file__).with_name("fixtures") / "llm-diffraction.json"
+                bad_request = {"plan": json.loads(fixture.read_text()), "quality": "preview"}
+                status, payload = self.request("/jobs", method="POST", body=bad_request)
+                self.assertEqual(status, 422)
+                refused = json.loads(payload)
+                self.assertNotIn("id", refused)
+                issues = {tuple(entry["path"]): entry for entry in refused["issues"]}
+                self.assertEqual(issues[("engine",)]["code"], "required")
+                self.assertEqual(issues[("objects", 1, "size")]["value"], 18)
+                self.assertEqual(issues[("objects", 1, "size")]["limit"], 10)
+
                 request = {"plan": demos()["derivative"], "quality": "preview"}
                 status, payload = self.request("/jobs", method="POST", body=request)
                 self.assertEqual(status, 202, payload)

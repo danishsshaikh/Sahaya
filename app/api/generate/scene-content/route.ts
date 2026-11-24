@@ -1,3 +1,4 @@
+import { visualizationJsonOutput } from '@/lib/visualization/llm-output';
 /**
  * Scene Content Generation API
  *
@@ -177,7 +178,11 @@ export async function POST(req: NextRequest) {
       }
       const capability = await getVisualizationCapability();
       if (!capability.available)
-        return apiError('INVALID_REQUEST', 503, capability.reason || 'Visualization unavailable');
+        return apiError(
+          'VISUALIZATION_UNAVAILABLE',
+          503,
+          capability.reason || 'Visualization unavailable',
+        );
     }
 
     // ── Model resolution from request headers/body ──
@@ -188,6 +193,8 @@ export async function POST(req: NextRequest) {
       model: languageModel,
       modelInfo,
       modelString,
+      providerId,
+      baseUrl,
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, stage);
     const timingCollector = createGenerationTimingCollector();
@@ -217,13 +224,7 @@ export async function POST(req: NextRequest) {
         ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
         ...(simulationBudget ? { simulationBudget } : {}),
       };
-      return callLLM(
-        { ...params, ...(visualizationSignal && { abortSignal: visualizationSignal }) },
-        'scene-content',
-        undefined,
-        thinkingConfig,
-        routingPolicy,
-      );
+      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
     };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
@@ -468,7 +469,18 @@ export async function POST(req: NextRequest) {
             requirement: requirements?.requirement,
             language: languageDirective ?? outline.languageNote,
             ownerId: user.id,
-            aiCall,
+            aiCall: async (system, prompt, abortSignal) =>
+              (
+                await invokeSceneContentLLM({
+                  model: languageModel,
+                  system,
+                  prompt,
+                  abortSignal,
+                  maxRetries: 0,
+                  maxOutputTokens: modelInfo?.outputWindow,
+                  ...visualizationJsonOutput(providerId, modelString, baseUrl),
+                })
+              ).text,
             signal: visualizationSignal,
             revision: visualizationRevision,
             onProgress: jobId
@@ -663,7 +675,9 @@ export async function POST(req: NextRequest) {
                 effectiveOutline: job.result.effectiveOutline,
               }
             : {}),
-          ...(job.status === 'failed' && job.error ? { error: job.error } : {}),
+          ...(job.status === 'failed' && job.error
+            ? { error: job.error, errorCode: job.errorCode }
+            : {}),
         },
         job.status === 'completed' ? 200 : 202,
       );

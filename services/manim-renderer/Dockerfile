@@ -7,6 +7,7 @@ RUN apt-get update \
     && install -d -o 1000 -g 1000 /artifacts /opt/sahaya-manim
 WORKDIR /opt/sahaya-manim
 COPY *.py plan-v1.json ./
+COPY fixtures ./fixtures
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 shell_escape=f openin_any=p openout_any=p
 USER 1000:1000
 EXPOSE 8780

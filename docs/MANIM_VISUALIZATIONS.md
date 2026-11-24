@@ -97,7 +97,7 @@ On an authorized test deployment, add `OPENMAIC_ENABLE_MANIM=true` and a private
 
 For later HPC validation, use the deployment's authorized Sahaya mode in place of `basic`, keep its configured model and voice profiles, and provision the Manim artifact directory on persistent storage. Validate one preview and one standard render, playback using a test Teaching Voice profile, cancellation, and a failed regeneration with the old artifact preserved. Keep the private renderer port unpublished. The renderer uses CPU and requires no CDI device entry.
 
-Configuration is listed in [.env.example](../.env.example). The defaults are one render worker, eight queued/running jobs, 2 CPU cores, 2 GiB memory, 512 MiB scratch space, 128 processes, a 120-second worker deadline, and a 90-second plan cap. Preview is 854×480 at 15 FPS, standard is 1280×720 at 30 FPS, and high is 1920×1080 at 30 FPS. The app caps each background scene request at 280 seconds including planning and queueing.
+Configuration is listed in [.env.example](../.env.example). The defaults are one render worker, eight queued/running jobs, 2 CPU cores, 2 GiB memory, 512 MiB scratch space, 128 processes, a 120-second worker deadline, and a 90-second plan cap. Preview is 854×480 at 15 FPS, standard is 1280×720 at 30 FPS, and high is 1920×1080 at 30 FPS. The visualization pipeline caps each background request at 270 seconds including planning and queueing.
 
 If Visualization is unavailable, check the feature flag, matching token, and service health. For render failures, review the reported plan error, simplify the scene or reduce its quality, and inspect the renderer logs. The pinned image supplies Manim, Cairo, TeX, Noto fonts and FFmpeg. The service runs as a non-root user with a read-only root filesystem and private scratch space. [Official Manim container documentation](https://docs.manim.community/en/stable/installation/docker.html) · [Manim source and releases](https://github.com/ManimCommunity/manim)
 
@@ -118,6 +118,54 @@ The following measurements are from real local Cairo renders on Docker Desktop-c
 Standard MP4s were 34,670 B for the derivative and 245,121 B for the surface. Maximum observed child memory for the two benchmark groups was approximately 252 MiB for preview and 397 MiB for standard. Render times depend on hardware, scene complexity, fonts, and camera movement.
 
 Scientific checks cover known numerical results, invalid expressions, physical boundaries, and plan limits. The real service test renders an equation and function graph, verifies range requests and owner checks, decodes the MP4, and confirms cache persistence across a service restart. The benchmark fixtures also exercise 3D, sequential and parallel beats, replacements, and motion along a calculated path. All nine benchmark MP4s played and sought successfully in Chrome. Representative preview frames were inspected for geometry, labels, and transitions.
+
+## HPC planning fix and update
+
+The first HPC run showed two independent contract failures. The original director described `size` as both geometry and a scaled font setting without giving its numeric range. A value of 18 exceeded the renderer maximum of 10. The original director also delegated fixed metadata to the model, so a missing `engine` failed validation. The renderer returned only its first validation error and the follow-up asked for a replacement plan, which could introduce new mistakes. The reported errors identify these failure modes. The original response bodies were unavailable for comparison.
+
+The director now derives fields, bounds, operation arguments and fixed metadata from the renderer contract. Geometry uses canvas units and text uses Manim font size divided by 10. The range remains 0.1–10. Sahaya sets `version`, `type`, and `engine` deterministically. The renderer reports up to 12 issues per admission. A repair may edit only reported fields and the whole result is checked before a worker starts. Science inputs and expressions are preserved during repair. Planning is limited to three model calls within 150 seconds, including repairs. The total generation deadline is 270 seconds.
+
+Native JSON mode is used for known direct OpenAI models on the official endpoint. Routed requests use JSON prompts so Nemotron Ultra, Nemotron Super and the Gemma fallback can receive the same request shape. Schema checking is mandatory for both modes. [AI SDK JSON output documentation](https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data) · [OpenAI structured output documentation](https://developers.openai.com/api/docs/guides/structured-outputs)
+
+Faculty see scene-level planning, validation, repair, renderer and timeout messages. Retry the failed Visualization from its classroom row. If Teaching Voice timing cannot be saved, the existing animation remains playable with adaptive pacing.
+
+**Rebuild the Manim image.** The app requires validation protocol 2 and checks the renderer before calling a model. Keep the existing artifact volume, token and runtime settings. In the existing Sahaya checkout, update only the requested branch and renderer service:
+
+```bash
+git fetch origin
+git switch feat/manim-integration
+git pull --ff-only origin feat/manim-integration
+docker compose --profile manim up -d --no-deps --build manim-renderer
+docker compose --profile manim ps manim-renderer
+```
+
+For a host-run Next.js app, rebuild the two workspace packages from source even when package manifests and the lockfile are unchanged. `pnpm dev` and `pnpm build` now check the source fingerprint and compiled DSL exports. After the following commands, restart the existing Next.js process with its usual supervisor or command. For a host production build, run `pnpm build` before restarting.
+
+```bash
+pnpm rebuild:workspace
+pnpm check:workspace-build
+```
+
+If the Next.js app runs under Compose, rebuild and recreate only its service. The app image builds the workspace packages from the copied sources before creating the production bundle.
+
+```bash
+docker compose --profile manim up -d --no-deps --build openmaic
+docker compose --profile manim ps openmaic manim-renderer
+```
+
+Return to the partial diffraction course and retry the failed scenes individually. The reduced-motion warning comes from Motion when the browser reports reduced motion, including when the preference is emulated in DevTools. Check `matchMedia('(prefers-reduced-motion: reduce)').matches` in the affected browser. The editor continues to honor that preference. [Motion reduced-motion warning documentation](https://motion.dev/troubleshooting/reduced-motion-disabled)
+
+### Diffraction smoke tests
+
+The three local clips were rendered at 1280×720 and 30 FPS. The intensity curve uses `sinc(pi*u)^2`, where `u = a sin(theta)/lambda` and the limiting central value is 1. The grating uses five equally weighted slits and a finite-slit envelope with slit width/spacing 0.24. The plot verifies the normalized array factor at the principal orders and the intervening cancellation points. These plans are labeled illustrative because they use the generic expression renderer. [Single-slit intensity and minima](https://openstax.org/books/university-physics-volume-3/pages/4-2-intensity-in-single-slit-diffraction) · [Diffraction grating orders](https://openstax.org/books/university-physics-volume-3/pages/4-4-diffraction-gratings)
+
+| Fixture | Duration | Local wall time |
+| --- | ---: | ---: |
+| Fraunhofer single-slit geometry | 8.20 s | 3.46 s |
+| Intensity distribution and minima | 6.30 s | 2.91 s |
+| Plane diffraction grating | 7.60 s | 2.99 s |
+
+Use `python demos.py /artifacts/diffraction --quality standard --only fraunhofer-slit diffraction-intensity plane-grating` in the renderer image to reproduce the clips.
 
 ## Extending the renderer
 

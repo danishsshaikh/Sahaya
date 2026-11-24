@@ -1,18 +1,21 @@
 import type { SceneOutline } from '@/lib/types/generation';
 import type { Scene } from '@/lib/types/stage';
+import type { VisualizationFailureCode } from '@/lib/visualization/failure';
+
+export type FailedSceneOutline = SceneOutline & { visualizationFailure?: VisualizationFailureCode };
 
 export interface RecoverableSceneOutline {
   outline: SceneOutline;
   failed: boolean;
+  visualizationFailure?: VisualizationFailureCode;
 }
 
 /** The next unresolved outline in deck order, with terminal failure taking precedence. */
 export function selectNextRecoverableOutline(
   outlines: readonly SceneOutline[],
   scenes: readonly Pick<Scene, 'order' | 'outlineId'>[],
-  failedOutlines: readonly SceneOutline[],
+  failedOutlines: readonly FailedSceneOutline[],
 ): RecoverableSceneOutline | null {
-  const failedIds = new Set(failedOutlines.map((outline) => outline.id));
   const completedOutlineIds = new Set(
     scenes.flatMap((scene) => (scene.outlineId ? [scene.outlineId] : [])),
   );
@@ -23,7 +26,13 @@ export function selectNextRecoverableOutline(
         !completedOutlineIds.has(candidate.id) && !completedOrders.has(candidate.order),
     )
     .sort((a, b) => a.order - b.order)[0];
-  return outline ? { outline, failed: failedIds.has(outline.id) } : null;
+  if (!outline) return null;
+  const failed = failedOutlines.find((candidate) => candidate.id === outline.id);
+  return {
+    outline,
+    failed: !!failed,
+    ...(failed?.visualizationFailure && { visualizationFailure: failed.visualizationFailure }),
+  };
 }
 
 export function restorePersistedSceneRecovery(

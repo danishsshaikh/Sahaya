@@ -38,3 +38,5 @@ docs
 # isolated MP4 render service — built as its own image (render-service/Dockerfile),
 # never part of the main app image.
 render-service
+
+packages/.workspace-build-stamp.json

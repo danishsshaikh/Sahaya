@@ -14,7 +14,7 @@ from plan import validate
 QUALITIES = {"preview": (854, 480, 15), "standard": (1280, 720, 30), "high": (1920, 1080, 30)}
 MAX_DURATION = min(120, int(os.getenv("MANIM_MAX_DURATION", "90")))
 MAX_ARTIFACT = int(os.getenv("MANIM_MAX_ARTIFACT_BYTES", str(48 * 1024 * 1024)))
-COMPILER_REVISION = "1"
+COMPILER_REVISION = "2"
 
 
 def digest(file):
@@ -64,7 +64,7 @@ def render(folder, plan, quality):
                 axis = objects[obj["axes"]]
                 coords = [axis.c2p(x, y) for x, y in plots[obj["id"]]]
                 if obj["kind"] == "samples":
-                    return m.VGroup(*(m.Dot(point, radius=obj.get("height", 0.065), color=color) for point in coords))
+                    return m.VGroup(*(m.Dot(point, radius=0.065, color=color) for point in coords))
                 return m.VMobject(color=color).set_points_as_corners(coords)
 
             def samples3d(obj, color):

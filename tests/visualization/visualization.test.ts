@@ -109,40 +109,13 @@ describe('Visualization scene integration', () => {
     expect(visualizationCueTiming(cues[0], 1.8, 1, 1)).toEqual({ offset: 1.8, rate: 1 });
   });
 
-  it('uses a bounded repair for an invalid plan and submits the next plan to the existing renderer', async () => {
-    configureRenderer(18781);
-    const transport = vi.fn(async (url: string, request?: RequestInit) => {
-      if (url.endsWith('/ready')) return Response.json({ version: '0.22.1/1', maxDuration: 90 });
-      const { plan } = JSON.parse(String(request?.body));
-      return plan.title === 'first'
-        ? Response.json({ error: 'Duplicate object' }, { status: 422 })
-        : Response.json({ status: 'completed', artifact: content.artifact });
-    });
-    vi.stubGlobal('fetch', transport);
-    const ai = vi
-      .fn()
-      .mockResolvedValueOnce(JSON.stringify({ title: 'first', timeline: [{ narration: 'A cue' }] }))
-      .mockResolvedValueOnce(
-        JSON.stringify({ title: 'second', timeline: [{ narration: 'A cue' }] }),
-      );
-    const result = await generateVisualization({
-      outline,
-      allOutlines: [outline],
-      aiCall: ai,
-      ownerId: 'faculty',
-    });
-    expect(ai).toHaveBeenCalledTimes(2);
-    expect(ai.mock.calls[1][1]).toContain('Duplicate object');
-    expect(result.artifact).toEqual(content.artifact);
-  });
-
   it('round-trips rendered content through the authoritative scene attempt and commits its scene', async () => {
     configureRenderer(18784);
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) =>
         url.endsWith('/ready')
-          ? Response.json({ version: '0.22.1/1', maxDuration: 90 })
+          ? Response.json({ version: '0.22.1/2', maxDuration: 90, validationProtocol: 2 })
           : Response.json({ status: 'completed', artifact: content.artifact }),
       ),
     );
@@ -189,7 +162,8 @@ describe('Visualization scene integration', () => {
     configureRenderer(18782);
     const plan = { timeline: [{ seconds: 2, narration: 'Draw the tangent.' }, { seconds: 2 }] };
     const transport = vi.fn(async (url: string, request?: RequestInit) => {
-      if (url.endsWith('/ready')) return Response.json({ version: '0.22.1/1', maxDuration: 90 });
+      if (url.endsWith('/ready'))
+        return Response.json({ version: '0.22.1/2', maxDuration: 90, validationProtocol: 2 });
       if (url.endsWith('/plan.json')) return Response.json(plan);
       const payload = JSON.parse(String(request?.body));
       expect(payload.plan.timeline).toEqual([

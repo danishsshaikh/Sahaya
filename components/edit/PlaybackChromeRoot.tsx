@@ -1,5 +1,6 @@
 'use client';
 
+import { VISUALIZATION_FAILURES } from '@/lib/visualization/failure';
 import {
   forwardRef,
   useCallback,
@@ -1935,6 +1936,13 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
               isPendingScene={isPendingScene}
               isCourseComplete={isCourseComplete}
               isGenerationFailed={isPendingScene && pendingScene?.failed === true}
+              generationFailureMessage={
+                pendingScene?.visualizationFailure
+                  ? VISUALIZATION_FAILURES[pendingScene.visualizationFailure]
+                  : pendingScene?.outline.type === 'visualization'
+                    ? 'The visualization could not be generated. Retry this scene.'
+                    : undefined
+              }
               onRetryGeneration={
                 onRetryOutline && pendingScene?.failed
                   ? () => onRetryOutline(pendingScene.outline.id)

@@ -29,6 +29,7 @@ type VisualizationScene = Extract<Scene, { type: 'visualization' }>;
 const PHASES: Record<string, string> = {
   planning: 'Planning animation',
   validating: 'Validating the plan',
+  repairing: 'Correcting the plan',
   rendering: 'Rendering frames',
   processing: 'Checking video and poster',
   completed: 'Preparing narration cues',

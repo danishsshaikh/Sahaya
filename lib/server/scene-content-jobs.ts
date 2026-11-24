@@ -1,3 +1,4 @@
+import { VisualizationFailure } from '@/lib/visualization/failure';
 import { createHash } from 'crypto';
 import { nanoid } from 'nanoid';
 import type { SceneOutline } from '@/lib/types/generation';
@@ -33,6 +34,7 @@ export interface SceneContentJob {
   cancellable?: boolean;
   result?: SceneContentJobResult;
   error?: string;
+  errorCode?: string;
 }
 
 export interface SceneContentJobStartInput {
@@ -233,6 +235,7 @@ export function runSceneContentJob(
         ...latest,
         status: 'failed',
         error: safeError,
+        ...(error instanceof VisualizationFailure && { errorCode: error.code }),
         updatedAt: completedAt,
         completedAt,
       });

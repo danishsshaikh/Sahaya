@@ -27,6 +27,7 @@ interface CanvasAreaProps extends CanvasToolbarProps {
   readonly isPendingScene?: boolean;
   readonly isCourseComplete?: boolean;
   readonly isGenerationFailed?: boolean;
+  readonly generationFailureMessage?: string;
   readonly onRetryGeneration?: () => void;
   readonly elementPickActive?: boolean;
   readonly onPickElement?: (element: PPTElement) => void;
@@ -61,6 +62,7 @@ export function CanvasArea({
   isPendingScene,
   isCourseComplete,
   isGenerationFailed,
+  generationFailureMessage,
   onRetryGeneration,
   elementPickActive,
   onPickElement,
@@ -198,8 +200,11 @@ export function CanvasArea({
                         />
                       </svg>
                     </div>
-                    <span className="text-sm text-red-500 dark:text-red-400 font-medium">
-                      {t('stage.generationFailed')}
+                    <span
+                      role="alert"
+                      className="max-w-sm px-3 text-center text-sm text-red-500 dark:text-red-400 font-medium"
+                    >
+                      {generationFailureMessage ?? t('stage.generationFailed')}
                     </span>
                     {onRetryGeneration && (
                       <button

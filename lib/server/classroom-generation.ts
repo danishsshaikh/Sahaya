@@ -1,3 +1,4 @@
+import { visualizationJsonOutput } from '@/lib/visualization/llm-output';
 import {
   generateVisualization,
   VISUALIZATION_OUTLINE_INSTRUCTION,
@@ -224,6 +225,7 @@ export async function generateClassroom(
     modelInfo,
     modelString,
     providerId,
+    baseUrl,
     apiKey,
     thinkingConfig: classroomThinking,
   } = await resolveModel({ stage: 'generate-classroom' });
@@ -279,6 +281,7 @@ export async function generateClassroom(
     LlmStage,
     {
       model: LanguageModel;
+      jsonOutput?: ReturnType<typeof visualizationJsonOutput>;
       outputWindow?: number;
       thinking: ThinkingConfig | undefined;
     }
@@ -288,6 +291,7 @@ export async function generateClassroom(
     stage: LlmStage,
   ): Promise<{
     model: LanguageModel;
+    jsonOutput?: ReturnType<typeof visualizationJsonOutput>;
     outputWindow?: number;
     thinking: ThinkingConfig | undefined;
   }> => {
@@ -298,6 +302,7 @@ export async function generateClassroom(
     if (!getStageModel(stage)) {
       const fallback = {
         model: languageModel,
+        jsonOutput: visualizationJsonOutput(providerId, modelString, baseUrl),
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
       };
@@ -309,6 +314,11 @@ export async function generateClassroom(
       const resolved = await resolveModel({ stage });
       const entry = {
         model: resolved.model,
+        jsonOutput: visualizationJsonOutput(
+          resolved.providerId,
+          resolved.modelString,
+          resolved.baseUrl,
+        ),
         outputWindow: resolved.modelInfo?.outputWindow,
         thinking: resolved.thinkingConfig,
       };
@@ -323,6 +333,7 @@ export async function generateClassroom(
       );
       const fallback = {
         model: languageModel,
+        jsonOutput: visualizationJsonOutput(providerId, modelString, baseUrl),
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
       };
@@ -343,7 +354,7 @@ export async function generateClassroom(
     timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
   ) => {
     const stage = (outlineType ? `scene-content:${outlineType}` : 'scene-content') as LlmStage;
-    const { model, outputWindow, thinking } = await resolveStageModel(stage);
+    const { model, outputWindow, thinking, jsonOutput } = await resolveStageModel(stage);
     const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
       const result = await callGenerationLLM(
         {
@@ -361,7 +372,28 @@ export async function generateClassroom(
       );
       return result.text;
     };
-    return { aiCall, model, thinking };
+    const visualizationAiCall: import('@/lib/visualization/generate').VisualizationAiCall = async (
+      system,
+      prompt,
+      abortSignal,
+    ) =>
+      (
+        await callGenerationLLM(
+          {
+            model,
+            system,
+            prompt,
+            abortSignal,
+            maxOutputTokens: outputWindow,
+            maxRetries: 0,
+            ...jsonOutput,
+          },
+          'generate-classroom-scene',
+          thinking,
+          timingCollector,
+        )
+      ).text;
+    return { aiCall, visualizationAiCall, model, thinking };
   };
 
   // agent-profiles routes via the `agent-profiles` stage (matches the browser
@@ -646,7 +678,7 @@ export async function generateClassroom(
                   requirement: requirements.requirement,
                   language: languageDirective,
                   ownerId: input.ownerUserId,
-                  aiCall: contentCall.aiCall,
+                  aiCall: contentCall.visualizationAiCall,
                 })
               : generateSceneContent(safeOutline, contentCall.aiCall, {
                   agents,
@@ -667,6 +699,7 @@ export async function generateClassroom(
                 }),
           {
             label: `scene ${index + 1}/${outlines.length} content`,
+            ...(safeOutline.type === 'visualization' && { maxRetries: 0 }),
             shouldRetryResult: (result) => result === null,
             onRetry: (event) => {
               contentRetryAttempts = event.attempt;

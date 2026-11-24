@@ -25,7 +25,11 @@ import type { DocumentProducer } from '@/lib/document-store/persistence-types';
 import type { PendingChange, StaleDroppedSave } from '@/lib/utils/stage-storage';
 import { collectStageAssetRefs } from '@/lib/media/collect-stage-asset-refs';
 import { reconcileSceneMediaAllocations } from '@/lib/media/reconcile-scene-media';
-import { restorePersistedSceneRecovery } from '@/lib/generation/scene-recovery';
+import {
+  restorePersistedSceneRecovery,
+  type FailedSceneOutline,
+} from '@/lib/generation/scene-recovery';
+import type { VisualizationFailureCode } from '@/lib/visualization/failure';
 import {
   isStageDeleted,
   isStageDeletionInFlight,
@@ -331,7 +335,7 @@ interface StageState {
   generationEpoch: number;
   generationStatus: 'idle' | 'generating' | 'paused' | 'completed' | 'error';
   currentGeneratingOrder: number;
-  failedOutlines: SceneOutline[];
+  failedOutlines: FailedSceneOutline[];
 
   // Workbench canvas-freshness projections (Mono #1960 Part 2 port).
   // The workbench stage-freshness sync records the manifest this browser has
@@ -369,7 +373,7 @@ interface StageState {
   setGenerationStatus: (status: 'idle' | 'generating' | 'paused' | 'completed' | 'error') => void;
   setCurrentGeneratingOrder: (order: number) => void;
   bumpGenerationEpoch: () => void;
-  addFailedOutline: (outline: SceneOutline) => void;
+  addFailedOutline: (outline: SceneOutline, failure?: VisualizationFailureCode) => void;
   clearFailedOutlines: () => void;
   retryFailedOutline: (outlineId: string) => void;
 
@@ -834,10 +838,16 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
 
   bumpGenerationEpoch: () => set((s) => ({ generationEpoch: s.generationEpoch + 1 })),
 
-  addFailedOutline: (outline) => {
-    const existed = get().failedOutlines.some((o) => o.id === outline.id);
-    if (existed) return;
-    set({ failedOutlines: [...get().failedOutlines, outline] });
+  addFailedOutline: (outline, failure) => {
+    const previous = get().failedOutlines;
+    const existing = previous.find((candidate) => candidate.id === outline.id);
+    if (existing && existing.visualizationFailure === failure) return;
+    const entry = failure ? { ...outline, visualizationFailure: failure } : outline;
+    set({
+      failedOutlines: existing
+        ? previous.map((candidate) => (candidate.id === outline.id ? entry : candidate))
+        : [...previous, entry],
+    });
     markPendingChanges(get().stage?.id, { kind: 'outline' });
   },
 

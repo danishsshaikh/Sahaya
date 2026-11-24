@@ -9,6 +9,8 @@ import tempfile
 import time
 
 
+from diffraction_demos import diffraction_demos
+
 def obj(id, kind, **kwargs):
     return {"id": id, "kind": kind, **kwargs}
 
@@ -99,7 +101,7 @@ def demos():
 
     return {"derivative": derivative, "projectile": projectile, "interference": waves,
             "gradient-curve": descent, "gradient-surface": surface, "gradient-updates": updates,
-            "sorting": sorting}
+            "sorting": sorting, **diffraction_demos(obj, beat, plan, BLUE, GOLD, ROSE)}
 
 
 def main():

@@ -46,7 +46,9 @@ export async function GET(req: NextRequest) {
             effectiveOutline: job.result.effectiveOutline,
           }
         : {}),
-      ...(job.status === 'failed' && job.error ? { error: job.error } : {}),
+      ...(job.status === 'failed' && job.error
+        ? { error: job.error, errorCode: job.errorCode }
+        : {}),
     });
   } catch (error) {
     log.error(`Scene content job retrieval failed [jobId=${jobId || 'unknown'}]:`, error);
