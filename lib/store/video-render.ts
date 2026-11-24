@@ -24,6 +24,7 @@ import { isVideoExportBurnedInCaptionsEnabled } from '@/lib/config/feature-flags
 import { runPolledTask } from '@/lib/media/polled-task';
 import {
   NoScenesError,
+  VisualizationExportError,
   sanitizeFilename,
   type VideoFps,
   type VideoQuality,
@@ -225,7 +226,9 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
       }
       ({ zipBlob, stageName, missingCount, errorCount } = built);
     } catch (error) {
-      if (error instanceof NoScenesError) {
+      if (error instanceof VisualizationExportError) {
+        toast.error(error.message, { id: toastId });
+      } else if (error instanceof NoScenesError) {
         toast.error(t('export.videoNoScenes'), { id: toastId });
       } else {
         log.error('Video render (compile) failed:', error);

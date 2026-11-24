@@ -152,7 +152,8 @@ export interface WidgetOutline {
  */
 export interface SceneOutline {
   id: string;
-  type: 'slide' | 'quiz' | 'interactive' | 'pbl';
+  type: import('@openmaic/dsl').SceneType;
+  visualization?: import('@openmaic/dsl').VisualizationOptions;
   title: string;
   description: string; // 1-2 sentences describing the purpose
   keyPoints: string[]; // 3-5 core key points

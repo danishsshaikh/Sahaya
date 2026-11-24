@@ -41,6 +41,7 @@ import {
 } from '@/lib/playback/action-resume';
 import { loadCursor, saveCursor, type PlaybackCursor } from '@/lib/playback/cursor';
 import { ActionEngine } from '@/lib/action/engine';
+import type { VisualizationPlayback } from '@/components/scene-renderers/visualization-renderer';
 import { createAudioPlayer } from '@/lib/utils/audio-player';
 import { useDiscussionTTS } from '@/lib/hooks/use-discussion-tts';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
@@ -266,6 +267,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // Selected agents from settings store (Zustand)
     const selectedAgentIds = useSettingsStore((s) => s.selectedAgentIds);
+    const visualizationRef = useRef<VisualizationPlayback | null>(null);
+    const visualizationAutoStartRef = useRef<string | null>(null);
     const ttsMuted = useSettingsStore((s) => s.ttsMuted);
     const ttsEnabled = useSettingsStore((s) => s.ttsEnabled);
 
@@ -602,6 +605,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       ref,
       () => ({
         teardown: async () => {
+          visualizationRef.current?.pause();
           pendingNarrationPlayRef.current = null;
           await chatAreaRef.current?.endActiveSession();
           if (discussionAbortRef.current) {
@@ -785,6 +789,21 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           engineRef.current = null;
           setEngineMode('idle');
           activeSceneIdRef.current = currentSceneId;
+          return;
+        }
+
+        if (currentScene?.type === 'visualization') {
+          engineRef.current?.stop();
+          engineRef.current = null;
+          activeSceneIdRef.current = currentScene.id;
+          if (autoStartRef.current) {
+            autoStartRef.current = false;
+            if (['pending', 'queued', 'running'].includes(currentScene.narrationStatus ?? '')) {
+              visualizationAutoStartRef.current = currentScene.id;
+            } else {
+              visualizationRef.current?.play();
+            }
+          }
           return;
         }
 
@@ -1308,6 +1327,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     // play/pause toggle
     const handlePlayPause = useCallback(async () => {
+      if (currentScene?.type === 'visualization') {
+        visualizationRef.current?.toggle();
+        return;
+      }
       const engine = engineRef.current;
       if (!engine) return;
 
@@ -1733,6 +1756,45 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       return () => window.removeEventListener('keydown', onF11);
     }, [togglePresentation]);
 
+    useEffect(() => {
+      if (!visualizationAutoStartRef.current) return;
+      if (
+        currentScene?.type !== 'visualization' ||
+        visualizationAutoStartRef.current !== currentScene.id
+      ) {
+        visualizationAutoStartRef.current = null;
+      } else if (!['pending', 'queued', 'running'].includes(currentScene.narrationStatus ?? '')) {
+        visualizationAutoStartRef.current = null;
+        visualizationRef.current?.play();
+      }
+    }, [currentScene?.id, currentScene?.type, currentScene?.narrationStatus]);
+
+    const handleVisualizationCue = useCallback(
+      (index: number, text: string | null) => {
+        if (index >= 0) updateCurrentPlaybackActionIndex(index);
+        setLectureSpeech(text);
+      },
+      [updateCurrentPlaybackActionIndex],
+    );
+    const handleVisualizationState = useCallback((state: 'playing' | 'paused' | 'idle') => {
+      setEngineMode(state);
+      if (state === 'playing') setPlaybackCompleted(false);
+    }, []);
+    const handleVisualizationComplete = useCallback(() => {
+      if (currentScene?.type !== 'visualization') return;
+      updateCurrentPlaybackActionIndex(currentScene.actions?.length ?? 0);
+      clearSceneResumePosition(currentScene.id);
+      setPlaybackCompleted(true);
+      if (!useSettingsStore.getState().autoPlayLecture) return;
+      const stageState = useStageStore.getState();
+      if (stageState.currentSceneId !== currentScene.id) return;
+      const enabled = filterEnabledScenes(stageState.scenes);
+      const index = enabled.findIndex((item) => item.id === currentScene.id);
+      const next = enabled[index + 1];
+      autoStartRef.current = true;
+      stageState.setCurrentSceneId(next?.id ?? PENDING_SCENE_ID);
+    }, [currentScene, clearSceneResumePosition, updateCurrentPlaybackActionIndex]);
+
     // Map engine mode to the CanvasArea's expected engine state
     const canvasEngineState = (() => {
       switch (engineMode) {
@@ -1826,6 +1888,12 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           >
             <CanvasArea
               currentScene={currentScene}
+              visualizationPlayback={{
+                controller: visualizationRef,
+                onCue: handleVisualizationCue,
+                onState: handleVisualizationState,
+                onComplete: handleVisualizationComplete,
+              }}
               currentSceneIndex={currentSceneIndex}
               scenesCount={totalScenesCount}
               mode={mode}

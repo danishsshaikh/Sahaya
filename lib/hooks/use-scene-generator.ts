@@ -20,6 +20,7 @@ import {
   normalizeTeachingVoiceLanguageId,
   resolveTeachingVoiceLanguage,
 } from '@/lib/voice-cloning/language';
+import { resolveAudioBlob } from '@/lib/media/resolve-audio-bytes';
 import { measureAudioDuration } from '@/lib/audio/audio-duration';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
 import { resolveAgentVoiceOptions, pickNarratorAgent } from '@/lib/audio/agent-voice';
@@ -76,7 +77,7 @@ function traceSceneGeneration(event: string, details: Record<string, unknown>) {
   log.info('[SceneGenerationTrace]', { event, ...details });
 }
 
-type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed';
+type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed' | 'cancelled';
 
 interface SceneContentResult {
   success: boolean;
@@ -89,6 +90,8 @@ interface SceneContentResult {
   jobId?: string;
   status?: SceneContentJobStatus;
   pollIntervalMs?: number;
+  phase?: string;
+  queuePosition?: number;
   jobTerminal?: boolean;
   stageId?: string;
   outlineId?: string;
@@ -249,7 +252,9 @@ async function pollSceneContentJob(
   expected: { stageId: string; outlineId: string },
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneContentResult>,
+  onProgress?: (phase: string, queuePosition?: number) => void,
 ): Promise<SceneContentResult> {
+  onProgress?.(initial.phase ?? initial.status ?? 'queued', initial.queuePosition);
   if (initial.status === 'completed' && initial.content) {
     return {
       success: true,
@@ -261,7 +266,7 @@ async function pollSceneContentJob(
       ...attemptIdentity(initial),
     };
   }
-  if (initial.status === 'failed') {
+  if (initial.status === 'failed' || initial.status === 'cancelled') {
     return {
       success: false,
       error: initial.error || 'Scene content generation failed',
@@ -307,6 +312,7 @@ async function pollSceneContentJob(
       };
     }
 
+    onProgress?.(data.phase ?? data.status ?? 'queued', data.queuePosition);
     if (data.status === 'completed') {
       if (data.content) {
         return {
@@ -330,7 +336,7 @@ async function pollSceneContentJob(
       };
     }
 
-    if (data.status === 'failed') {
+    if (data.status === 'failed' || data.status === 'cancelled') {
       return {
         success: false,
         error: data.error || 'Scene content generation failed',
@@ -372,9 +378,11 @@ export async function fetchSceneContent(
     languageDirective?: string;
     requirements?: UserRequirements;
     attemptId?: string;
+    visualizationRevision?: import('@/lib/visualization/generate').VisualizationRevision;
   },
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneContentResult>,
+  onProgress?: (phase: string, queuePosition?: number) => void,
 ): Promise<SceneContentResult> {
   const proposedAttemptId = params.attemptId ?? createSceneAttemptId();
   try {
@@ -412,12 +420,29 @@ export async function fetchSceneContent(
               jobTerminal: true,
             };
           }
-          return pollSceneContentJob(
-            result,
-            { stageId: params.stageId, outlineId: params.outline.id },
-            signal,
-            retryOptions,
-          );
+          const cancel = () => {
+            void fetch(
+              `/api/generate/scene-content/status?jobId=${encodeURIComponent(result.jobId)}`,
+              {
+                method: 'DELETE',
+                keepalive: true,
+              },
+            ).catch(() => {});
+          };
+          const cancellable = params.outline.type === 'visualization';
+          if (cancellable) signal?.addEventListener('abort', cancel, { once: true });
+          try {
+            if (cancellable && signal?.aborted) cancel();
+            return await pollSceneContentJob(
+              result,
+              { stageId: params.stageId, outlineId: params.outline.id },
+              signal,
+              retryOptions,
+              onProgress,
+            );
+          } finally {
+            if (cancellable) signal?.removeEventListener('abort', cancel);
+          }
         }
 
         return result;
@@ -437,6 +462,53 @@ export async function fetchSceneContent(
       ...errorMeta(error),
     };
   }
+}
+
+/**
+ * Fit longer narration clips into the rendered visual beats using the audio
+ * bytes already written by the selected Teaching Voice provider.
+ */
+export async function retimeVisualizationForNarration(
+  scene: Extract<Scene, { type: 'visualization' }>,
+  outline: SceneOutline,
+  allOutlines: SceneOutline[],
+  signal: AbortSignal,
+) {
+  const artifact = scene.content.artifact;
+  const cueDurations: Record<string, number> = {};
+  const durationStarted = Date.now();
+  for (const action of scene.actions ?? []) {
+    signal.throwIfAborted();
+    if (action.type !== 'speech' || !action.audioId || action.audioInvalidated) continue;
+    const cueId = action.id.replace(/_tts_\d+$/, '');
+    if (!artifact.cues.some((cue) => cue.id === cueId)) continue;
+    const blob = await resolveAudioBlob(action.audioId);
+    if (!blob) continue;
+    const duration = measureAudioDuration(await blob.arrayBuffer(), blob.type.split('/')[1]);
+    if (duration && duration > 0) cueDurations[cueId] = (cueDurations[cueId] ?? 0) + duration;
+  }
+  for (const cue of artifact.cues) {
+    if (cueDurations[cue.id] <= cue.end - cue.start + 0.065) delete cueDurations[cue.id];
+  }
+  if (Object.keys(cueDurations).length === 0) return scene.content;
+  const result = await fetchSceneContent(
+    {
+      outline,
+      allOutlines,
+      stageId: scene.stageId,
+      stageInfo: { name: scene.title },
+      visualizationRevision: { sourceArtifactId: artifact.artifactId, cueDurations },
+    },
+    signal,
+    { maxRetries: 0 },
+  );
+  if (!result.success || !result.content)
+    throw new Error(result.error || 'Could not render the narration timing.');
+  log.info('[SceneNarration] Visualization timing rendered', {
+    sceneId: scene.id,
+    durationMs: Date.now() - durationStarted,
+  });
+  return result.content as typeof scene.content;
 }
 
 /** Call POST /api/generate/scene-actions (step 2) */
@@ -1068,6 +1140,7 @@ export async function generateTTSForScene(
   outlineId?: string,
   options: {
     skipReadyActions?: boolean;
+    allocationNamespace?: string;
     onActionReady?: (
       action: SpeechAction,
       audioId: string,
@@ -1099,6 +1172,9 @@ export async function generateTTSForScene(
   // one bad clip never aborts the rest of the scene.
   const generateOne = async (action: SpeechAction) => {
     const requestId = `tts_s${sceneOrder}_${action.id}`;
+    const allocationId = options.allocationNamespace
+      ? `${requestId}_${options.allocationNamespace}`
+      : undefined;
     const startedAt = Date.now();
     let jobId: string | undefined;
     try {
@@ -1108,7 +1184,7 @@ export async function generateTTSForScene(
         language,
         signal,
         retryOptions,
-        undefined,
+        allocationId,
         scene.stageId,
         undefined,
         0,
@@ -1210,6 +1286,7 @@ export interface UseSceneGeneratorOptions {
 }
 
 export interface GenerationParams {
+  requirement?: string;
   pdfImages?: PdfImage[];
   imageMapping?: ImageMapping;
   stageInfo: {
@@ -1424,6 +1501,29 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             return;
           }
           const patch = mergeCompletedNarration(currentScene, narrationScene);
+          if (currentScene.type === 'visualization' && patch.narrationStatus === 'completed') {
+            try {
+              const content = await retimeVisualizationForNarration(
+                { ...currentScene, actions: patch.actions },
+                outline,
+                store.getState().outlines,
+                controller.signal,
+              );
+              if (content !== currentScene.content) patch.content = content;
+            } catch (error) {
+              if (controller.signal.aborted) throw error;
+              log.warn('[SceneNarration] Visualization will pace narration in the player', {
+                sceneId: scene.id,
+                error: messageFromError(error, 'Timing render failed'),
+              });
+            }
+            if (
+              controller.signal.aborted ||
+              store.getState().generationEpoch !== generationEpoch ||
+              store.getState().getSceneById(scene.id) !== currentScene
+            )
+              return;
+          }
           const retainedAudioIds = new Set(
             (patch.actions ?? []).flatMap((action: Action) =>
               action.type === 'speech' && action.audioId ? [action.audioId] : [],
@@ -1674,6 +1774,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               pdfImages: params.pdfImages,
               imageMapping: params.imageMapping,
               stageInfo: params.stageInfo,
+              ...(outline.type === 'visualization' && params.requirement
+                ? { requirements: { requirement: params.requirement } }
+                : {}),
               agents: params.agents,
               languageDirective: params.languageDirective,
             },
@@ -2120,6 +2223,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             pdfImages: params.pdfImages,
             imageMapping: params.imageMapping,
             stageInfo: params.stageInfo,
+            ...(outline.type === 'visualization' && params.requirement
+              ? { requirements: { requirement: params.requirement } }
+              : {}),
             agents: params.agents,
             languageDirective: params.languageDirective,
           },

@@ -15,6 +15,7 @@ import type {
   Scene as DslScene,
   SceneContent as DslSceneContent,
   Stage as DslStage,
+  VisualizationContent,
 } from '@openmaic/dsl';
 import type { Action } from '@/lib/types/action';
 import type { WidgetConfig } from '@/lib/types/widgets';
@@ -94,7 +95,11 @@ export type PBLContent = DslPBLContent & {
  * app-widened feature kinds. This is what `@/lib/types/stage` callers have
  * always known as `SceneContent` (all four cases).
  */
-export type AppSceneContent = DslSceneContent | InteractiveContent | PBLContent;
+export type AppSceneContent =
+  | DslSceneContent
+  | InteractiveContent
+  | PBLContent
+  | VisualizationContent;
 
 /**
  * The app's `SceneContent` — the full four-way union. Overrides the contract's

@@ -6,7 +6,11 @@ import type { SceneType } from '@/lib/types/stage';
  * registered editor surface (slide/quiz), PLUS view-only-canvas scenes that
  * still carry narration (interactive/pbl).
  */
-const NARRATION_ONLY_TYPES: ReadonlySet<SceneType> = new Set(['interactive', 'pbl']);
+const NARRATION_ONLY_TYPES: ReadonlySet<SceneType> = new Set([
+  'interactive',
+  'pbl',
+  'visualization',
+]);
 
 export function supportsNarrationTimeline(
   sceneType: SceneType,

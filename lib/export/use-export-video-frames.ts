@@ -1,5 +1,6 @@
 'use client';
 
+import { VISUALIZATION_EXPORT_MESSAGE } from '@/lib/video-export-app/export-options';
 import { useCallback, useRef, useState } from 'react';
 import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
@@ -63,6 +64,10 @@ export function useExportVideoFrames() {
       return;
     }
 
+    if (scenes.some((scene) => scene.type === 'visualization')) {
+      toast.error(VISUALIZATION_EXPORT_MESSAGE);
+      return;
+    }
     exportingRef.current = true;
     setExporting(true);
     const toastId = toast.loading(t('export.videoFrames.exporting'));

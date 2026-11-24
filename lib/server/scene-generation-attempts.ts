@@ -83,6 +83,7 @@ function fingerprint(value: unknown): string {
 export function createSceneGenerationVersion(input: {
   outline: unknown;
   allOutlines: unknown;
+  visualizationRevision?: unknown;
 }): string {
   return fingerprint(input);
 }

@@ -9,9 +9,11 @@ APP_IMAGE=${SAHAYA_APP_IMAGE:-localhost/sahaya-app:local}
 MING_IMAGE=${SAHAYA_MING_IMAGE:-localhost/sahaya-ming3-tts:local}
 QWEN_IMAGE=${SAHAYA_QWEN_IMAGE:-localhost/sahaya-qwen3-tts:local}
 RENDER_IMAGE=${SAHAYA_RENDER_IMAGE:-localhost/sahaya-render:local}
+MANIM_IMAGE=${SAHAYA_MANIM_IMAGE:-localhost/sahaya-manim:local}
 APP_NETWORK=sahaya-app
 INFERENCE_NETWORK=sahaya-inference
 RENDER_NETWORK=sahaya-render
+MANIM_NETWORK=sahaya-manim
 
 usage() {
   cat <<'EOF'
@@ -34,7 +36,7 @@ Commands:
   quadlet-install    Install rootless systemd Quadlets for the selected mode
   backup PATH        Create a private tar archive of Sahaya server data
 
-Optional .env switches: SAHAYA_WITH_POSTGRES=true and SAHAYA_WITH_VIDEO=true.
+Optional .env switches: SAHAYA_WITH_POSTGRES=true, SAHAYA_WITH_VIDEO=true, OPENMAIC_ENABLE_MANIM=true.
 The script never downloads model checkpoints or modifies host GPU configuration.
 EOF
 }
@@ -95,6 +97,7 @@ needs_ming() { [[ "$MODE" == ming || "$MODE" == gemma-ming || "$MODE" == full ]]
 needs_gemma() { [[ "$MODE" == gemma-ming || "$MODE" == full ]]; }
 needs_qwen() { [[ "$MODE" == full ]]; }
 with_postgres() { [[ $(env_value SAHAYA_WITH_POSTGRES false) == true ]]; }
+with_manim() { [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; }
 with_video() { [[ $(env_value SAHAYA_WITH_VIDEO false) == true ]]; }
 
 require_podman() {
@@ -179,6 +182,9 @@ build_images() {
       --file "$ROOT_DIR/services/qwen3-tts/Dockerfile" "$ROOT_DIR"
   fi
 
+  if with_manim; then
+    podman build --tag "$MANIM_IMAGE" --file "$ROOT_DIR/services/manim-renderer/Dockerfile" "$ROOT_DIR/services/manim-renderer"
+  fi
   if with_video; then
     podman build --tag "$RENDER_IMAGE" --file "$ROOT_DIR/render-service/Dockerfile" "$ROOT_DIR/render-service"
   fi
@@ -226,7 +232,7 @@ run_ming() {
     --volume "$model:/models/ming3-tts:ro" \
     --volume "$DATA_DIR/app:/app/data:z" \
     --volume "$DATA_DIR/cache/huggingface:/cache/huggingface:z" \
-    --health-cmd "python -c \"import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8773/health'))['ok']\"" \
+    --health-cmd "python /opt/sahaya-manim/healthcheck.py" \
     --health-interval 20s --health-timeout 10s --health-retries 30 --health-start-period 180s \
     "$MING_IMAGE" >/dev/null
 }
@@ -252,7 +258,7 @@ run_qwen() {
     --volume "$model:/models/qwen3-tts:ro" \
     --volume "$DATA_DIR/app:/app/data:ro,z" \
     --volume "$DATA_DIR/cache/huggingface:/cache/huggingface:z" \
-    --health-cmd "python -c \"import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8771/health'))['ok']\"" \
+    --health-cmd "python /opt/sahaya-manim/healthcheck.py" \
     --health-interval 20s --health-timeout 10s --health-retries 30 --health-start-period 180s \
     "$QWEN_IMAGE" >/dev/null
 }
@@ -300,6 +306,29 @@ run_render() {
     "$RENDER_IMAGE" >/dev/null
 }
 
+run_manim() {
+  local -x MANIM_RENDERER_TOKEN
+  MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)
+  remove_container sahaya-manim
+  podman run --detach --pull=never --name sahaya-manim --replace --restart=unless-stopped --init \
+    --network "$MANIM_NETWORK" --network-alias manim-renderer \
+    --cap-drop ALL --security-opt no-new-privileges --read-only \
+    --cpus "$(env_value MANIM_CPU_LIMIT 2)" --memory "$(env_value MANIM_MEMORY_LIMIT 2g)" \
+    --pids-limit "$(env_value MANIM_PID_LIMIT 128)" \
+    --tmpfs "/tmp:size=$(env_value MANIM_TMPFS_SIZE 512m),mode=1777" \
+    --volume "$DATA_DIR/manim:/artifacts:U,Z" \
+    --env HOME=/tmp --env XDG_CACHE_HOME=/tmp --env MANIM_RENDERER_TOKEN \
+    --env "MANIM_QUEUE_CONCURRENCY=$(env_value MANIM_QUEUE_CONCURRENCY 1)" \
+    --env "MANIM_QUEUE_CAPACITY=$(env_value MANIM_QUEUE_CAPACITY 8)" \
+    --env "MANIM_RENDER_TIMEOUT_SECONDS=$(env_value MANIM_RENDER_TIMEOUT_SECONDS 120)" \
+    --env "MANIM_MAX_DURATION=$(env_value MANIM_MAX_DURATION 90)" \
+    --env "MANIM_MAX_ARTIFACT_BYTES=$(env_value MANIM_MAX_ARTIFACT_BYTES 50331648)" \
+    --env "MANIM_STORAGE_LIMIT_BYTES=$(env_value MANIM_STORAGE_LIMIT_BYTES 10737418240)" \
+    --health-cmd "python /opt/sahaya-manim/healthcheck.py" \
+    --health-interval 15s --health-timeout 5s --health-retries 5 \
+    "$MANIM_IMAGE" >/dev/null
+}
+
 run_app() {
   local bind port
   bind=$(env_value SAHAYA_HTTP_BIND 127.0.0.1)
@@ -319,6 +348,9 @@ run_app() {
     --volume "$DATA_DIR/app:/app/data:U,z"
   )
   if with_video; then args+=(--network "$RENDER_NETWORK"); fi
+  if with_manim; then
+    args+=(--network "$MANIM_NETWORK" --env MANIM_RENDERER_URL=http://manim-renderer:8780)
+  fi
   podman "${args[@]}" "$APP_IMAGE" >/dev/null
 }
 
@@ -330,6 +362,11 @@ start_stack() {
   ensure_network "$APP_NETWORK"
   ensure_network "$INFERENCE_NETWORK" --internal
   if with_video; then ensure_network "$RENDER_NETWORK" --internal; fi
+  if with_manim; then
+    mkdir -p "$DATA_DIR/manim"
+    ensure_network "$MANIM_NETWORK" --internal
+    run_manim
+  fi
   if needs_gemma; then run_gemma; fi
   if needs_ming; then run_ming; fi
   if needs_qwen; then run_qwen; fi
@@ -342,7 +379,7 @@ start_stack() {
 stop_stack() {
   require_podman
   local name
-  for name in sahaya-app sahaya-render sahaya-qwen3-tts sahaya-ming3-tts sahaya-llama-gemma sahaya-postgres; do
+  for name in sahaya-app sahaya-manim sahaya-render sahaya-qwen3-tts sahaya-ming3-tts sahaya-llama-gemma sahaya-postgres; do
     podman container exists "$name" 2>/dev/null && podman stop --ignore "$name" >/dev/null
   done
   printf 'Sahaya containers stopped. Persistent data was not deleted.\n'
@@ -351,7 +388,7 @@ stop_stack() {
 restart_stack() {
   require_podman
   local found=false name
-  for name in sahaya-postgres sahaya-llama-gemma sahaya-ming3-tts sahaya-qwen3-tts sahaya-render sahaya-app; do
+  for name in sahaya-postgres sahaya-llama-gemma sahaya-ming3-tts sahaya-qwen3-tts sahaya-render sahaya-manim sahaya-app; do
     if podman container exists "$name" 2>/dev/null; then
       podman restart "$name" >/dev/null
       found=true

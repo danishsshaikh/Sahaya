@@ -7,6 +7,8 @@
  */
 
 import { after, NextRequest } from 'next/server';
+import { generateVisualization, type VisualizationRevision } from '@/lib/visualization/generate';
+import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { callLLM } from '@/lib/ai/llm';
 import {
   applyOutlineFallbacks,
@@ -32,9 +34,11 @@ import { sortDocumentImagesForVision } from '@/lib/document/bundle';
 import { requireSessionUser } from '@/lib/auth/server';
 import { buildRequestOrigin } from '@/lib/server/classroom-storage';
 import {
+  canAdmitVisualizationJob,
   createOrReuseSceneContentJob,
   createSceneContentDedupeKey,
   runSceneContentJob,
+  updateSceneContentJobPhase,
 } from '@/lib/server/scene-content-jobs';
 import {
   resolveVisionImagesForPrompt,
@@ -125,6 +129,7 @@ export async function POST(req: NextRequest) {
       languageDirective,
       requirements,
       attemptId: proposedAttemptId,
+      visualizationRevision,
     } = body as {
       outline: SceneOutline;
       allOutlines: SceneOutline[];
@@ -140,6 +145,7 @@ export async function POST(req: NextRequest) {
       languageDirective?: string;
       requirements?: UserRequirements;
       attemptId?: string;
+      visualizationRevision?: VisualizationRevision;
     };
 
     // Validate required fields
@@ -161,6 +167,18 @@ export async function POST(req: NextRequest) {
     if (user instanceof Response) return user;
 
     const outline: SceneOutline = { ...rawOutline };
+    const visualization = outline.type === 'visualization';
+    if (visualization) {
+      if (
+        visualizationRevision?.requestKey !== undefined &&
+        !/^[A-Za-z0-9_-]{1,64}$/.test(visualizationRevision.requestKey)
+      ) {
+        return apiError('INVALID_REQUEST', 400, 'Invalid visualization revision.');
+      }
+      const capability = await getVisualizationCapability();
+      if (!capability.available)
+        return apiError('INVALID_REQUEST', 503, capability.reason || 'Visualization unavailable');
+    }
 
     // ── Model resolution from request headers/body ──
     // Route per scene-content type (e.g. `scene-content:quiz`); getStageModel
@@ -173,6 +191,7 @@ export async function POST(req: NextRequest) {
       thinkingConfig,
     } = await resolveModelFromRequest(req, body, stage);
     const timingCollector = createGenerationTimingCollector();
+    let visualizationSignal: AbortSignal | undefined;
     let simulationBudget: LLMRoutingPolicy['simulationBudget'];
     const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
       if (isSimulationOutline(effectiveOutline)) {
@@ -198,7 +217,13 @@ export async function POST(req: NextRequest) {
         ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
         ...(simulationBudget ? { simulationBudget } : {}),
       };
-      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
+      return callLLM(
+        { ...params, ...(visualizationSignal && { abortSignal: visualizationSignal }) },
+        'scene-content',
+        undefined,
+        thinkingConfig,
+        routingPolicy,
+      );
     };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
@@ -255,7 +280,11 @@ export async function POST(req: NextRequest) {
     const effectiveOutline = applyOutlineFallbacks(outline, !!languageModel, {
       allowProceduralSkill: vocationalActive,
     });
-    const generationVersion = createSceneGenerationVersion({ outline, allOutlines });
+    const generationVersion = createSceneGenerationVersion({
+      outline,
+      allOutlines,
+      ...(visualizationRevision && { visualizationRevision }),
+    });
     const admission = admitSceneGenerationAttempt({
       ownerUserId: user.id,
       stageId,
@@ -406,7 +435,10 @@ export async function POST(req: NextRequest) {
 
     const userLocale = req.headers?.get('x-user-locale') ?? '';
 
-    const generateResolvedContent = async () => {
+    const generateResolvedContent = async (signal?: AbortSignal, jobId?: string) => {
+      visualizationSignal = visualization
+        ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(280_000)])
+        : signal;
       const phaseStartedAt = Date.now();
       const routeEventStart = timingCollector.events.length;
       log.info(
@@ -429,30 +461,44 @@ export async function POST(req: NextRequest) {
         status: 'started',
       });
 
-      const content = await generateSceneContent(effectiveOutline, aiCall, {
-        assignedImages,
-        imageMapping: visionImageMapping,
-        visionEnabled: hasVision,
-        generatedMediaMapping,
-        resolvedVisionImages,
-        agents,
-        languageDirective,
-        targetLanguage: userLocale || undefined,
-        userRequirements: requirements,
-        allowProceduralSkill: vocationalActive,
-        ...(effectiveOutline.type === 'pbl'
-          ? {
-              pblLoopFallback: (input) =>
-                generatePBLV2Project(
-                  input,
-                  languageModel,
-                  callLLM,
-                  { logger: log },
-                  thinkingConfig,
-                ),
-            }
-          : {}),
-      });
+      const content = visualization
+        ? await generateVisualization({
+            outline: effectiveOutline,
+            allOutlines,
+            requirement: requirements?.requirement,
+            language: languageDirective ?? outline.languageNote,
+            ownerId: user.id,
+            aiCall,
+            signal: visualizationSignal,
+            revision: visualizationRevision,
+            onProgress: jobId
+              ? (phase, position) => updateSceneContentJobPhase(jobId, phase, position)
+              : undefined,
+          })
+        : await generateSceneContent(effectiveOutline, aiCall, {
+            assignedImages,
+            imageMapping: visionImageMapping,
+            visionEnabled: hasVision,
+            generatedMediaMapping,
+            resolvedVisionImages,
+            agents,
+            languageDirective,
+            targetLanguage: userLocale || undefined,
+            userRequirements: requirements,
+            allowProceduralSkill: vocationalActive,
+            ...(effectiveOutline.type === 'pbl'
+              ? {
+                  pblLoopFallback: (input) =>
+                    generatePBLV2Project(
+                      input,
+                      languageModel,
+                      callLLM,
+                      { logger: log },
+                      thinkingConfig,
+                    ),
+                }
+              : {}),
+          });
 
       if (!content) {
         logSceneGenerationTiming(
@@ -529,15 +575,15 @@ export async function POST(req: NextRequest) {
 
       return { content, effectiveOutline };
     };
-    const generateAuthoritativeContent = async () => {
-      const result = await generateResolvedContent();
+    const generateAuthoritativeContent = async (signal?: AbortSignal, jobId?: string) => {
+      const result = await generateResolvedContent(signal, jobId);
       if (!result.content) {
         throw new Error(`Failed to generate content: ${effectiveOutline.title}`);
       }
       return { content: result.content, effectiveOutline: result.effectiveOutline };
     };
 
-    if (isSimulationOutline(effectiveOutline)) {
+    if (visualization || isSimulationOutline(effectiveOutline)) {
       const dedupeKey = createSceneContentDedupeKey({
         ownerUserId: user.id,
         stageId,
@@ -553,7 +599,15 @@ export async function POST(req: NextRequest) {
         userLocale,
         hasVision,
         generationVersion,
+        ...(visualization && { attemptId: attemptIdentity.attemptId }),
       });
+      if (visualization && !canAdmitVisualizationJob(user.id, dedupeKey)) {
+        return apiError(
+          'RATE_LIMITED',
+          429,
+          'The visualization planning queue is full. Try again shortly.',
+        );
+      }
       const { job, reused } = createOrReuseSceneContentJob({
         ownerUserId: user.id,
         dedupeKey,
@@ -564,15 +618,14 @@ export async function POST(req: NextRequest) {
         generationVersion: attemptIdentity.generationVersion,
         widgetType: effectiveOutline.widgetType,
         modelString,
+        cancellable: visualization,
       });
 
       if (!reused) {
         after(() =>
-          runSceneContentJob(job.id, async () => {
-            const result = await runSceneAttemptContent(
-              user.id,
-              attemptIdentity,
-              generateAuthoritativeContent,
+          runSceneContentJob(job.id, async (signal) => {
+            const result = await runSceneAttemptContent(user.id, attemptIdentity, () =>
+              generateAuthoritativeContent(signal, job.id),
             );
             return {
               content: result.content,
@@ -582,7 +635,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      log.info(`Simulation content job ${reused ? 'reused' : 'created'}: ${job.id}`, {
+      log.info(`Scene content job ${reused ? 'reused' : 'created'}: ${job.id}`, {
         stageId,
         outlineId: effectiveOutline.id,
         widgetType: effectiveOutline.widgetType,
@@ -595,13 +648,15 @@ export async function POST(req: NextRequest) {
           async: true,
           jobId: job.id,
           status: job.status,
+          phase: job.phase,
+          queuePosition: job.queuePosition,
           stageId: job.stageId,
           outlineId: job.outlineId,
           attemptId: job.attemptId,
           generationVersion: job.generationVersion,
           pollUrl: `${buildRequestOrigin(req)}/api/generate/scene-content/status?jobId=${job.id}`,
           pollIntervalMs: SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS,
-          done: job.status === 'completed' || job.status === 'failed',
+          done: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled',
           ...(job.status === 'completed' && job.result
             ? {
                 content: job.result.content,

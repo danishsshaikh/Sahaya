@@ -80,6 +80,9 @@ next-env.d.ts
 !/docs/DEPLOY_WITH_PODMAN.md
 !/docs/UNIVERSITY_DEPLOYMENT.md
 !/docs/ARCHITECTURE.md
+!/docs/MANIM_PROGRESS.md
+!/docs/MANIM_VISUALIZATIONS.md
+/services/manim-renderer/__pycache__/
 # Eval results
 eval/whiteboard-layout/results/
 eval/outline-language/results/

@@ -25,6 +25,7 @@ export function lessonGenerationPhaseLabel(
   if (phase === 'finalizing') return 'Finalizing lesson...';
   if (phase === 'narration') return 'Creating voice narration...';
   if (phase === 'actions') return 'Generating teaching actions...';
+  if (sceneType === 'visualization') return 'Planning and rendering visualization…';
   if (sceneType === 'quiz') return 'Building quiz...';
   if (sceneType === 'interactive' || sceneType === 'pbl') {
     return 'Building interactive simulation...';

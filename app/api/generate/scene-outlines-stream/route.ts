@@ -14,6 +14,8 @@
  *   { type: 'error', error: string }
  */
 
+import { VISUALIZATION_OUTLINE_INSTRUCTION } from '@/lib/visualization/generate';
+import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { NextRequest } from 'next/server';
 import { streamLLM } from '@/lib/ai/llm';
 import { buildPrompt, PROMPT_IDS } from '@/lib/prompts';
@@ -228,6 +230,7 @@ function normalizeTaskEngineSlideOutline(outline: SceneOutline): SceneOutline {
 const ORDINARY_WIDGET_TYPES = new Set(['simulation', 'diagram', 'code', 'game', 'visualization3d']);
 
 function normalizeTaskEngineOutline(outline: SceneOutline, requirement: string): SceneOutline {
+  if (outline.type === 'visualization') return outline;
   if (outline.type === 'slide') {
     return normalizeTaskEngineSlideOutline(outline);
   }
@@ -457,6 +460,8 @@ export async function POST(req: NextRequest) {
     log.info(
       `Generating outlines: "${requirements.requirement.substring(0, 50)}" [model=${modelString}]`,
     );
+    const visualizationAvailable = (await getVisualizationCapability()).available;
+    if (visualizationAvailable) prompts.system += VISUALIZATION_OUTLINE_INSTRUCTION;
     const outlineGenerationStartedAt = Date.now();
     const outlineRequestId = `outline:${outlineGenerationStartedAt}`;
     const resolveStreamLessonLanguage = (languageDirective?: string | null) =>
@@ -620,6 +625,7 @@ export async function POST(req: NextRequest) {
                     ? normalizeTaskEngineOutline(enrichedBase, requirements.requirement)
                     : sanitizeNonTaskEngineOutline(enrichedBase);
                   const normalized = applySahayaOutlineFeatureFallbacks(modeNormalized, {
+                    visualizationAvailable,
                     taskEngineMode,
                     hasLanguageModel: Boolean(languageModel),
                     logger: log,

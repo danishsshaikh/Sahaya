@@ -43,6 +43,7 @@ import { buildPrompt, PROMPT_IDS } from './prompts/index.js';
 import type {
   GeneratedInteractiveContent,
   GeneratedPBLContent,
+  GeneratedSceneContent,
   GeneratedQuizContent,
   GeneratedSlideContent,
   WidgetConfig,
@@ -2212,17 +2213,19 @@ function buildPBLProjectSummary(outline: SceneOutline, project: PBLProject | und
  */
 export async function generateSceneActions(
   outline: SceneOutline,
-  content:
-    | GeneratedSlideContent
-    | GeneratedQuizContent
-    | GeneratedInteractiveContent
-    | GeneratedPBLContent,
+  content: GeneratedSceneContent,
   aiCall: AICallFn,
   options: SceneActionsOptions = {},
 ): Promise<Action[]> {
   const { ctx, agents, userProfile, languageDirective } = options;
   const log = options.logger ?? noopGenerationLogger;
   const agentsText = formatAgentsForPrompt(agents);
+
+  if (outline.type === 'visualization' && 'artifact' in content) {
+    return content.artifact.cues.flatMap((cue) =>
+      cue.narration ? [{ type: 'speech', id: cue.id, text: cue.narration }] : [],
+    );
+  }
 
   // Debug: Log content type for interactive scenes
   if (outline.type === 'interactive') {

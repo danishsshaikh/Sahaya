@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { animate, motion, MotionConfig, useReducedMotion } from 'motion/react';
-import { FileText, HelpCircle, Gamepad2, Puzzle } from 'lucide-react';
+import { FileText, HelpCircle, Gamepad2, Puzzle, Film } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { useStageStore } from '@/lib/store';
@@ -23,9 +23,10 @@ const SCENE_TYPE_ICONS: Record<SceneType, typeof FileText> = {
   quiz: HelpCircle,
   interactive: Gamepad2,
   pbl: Puzzle,
+  visualization: Film,
 };
 
-const TYPE_ORDER: SceneType[] = ['slide', 'quiz', 'interactive', 'pbl'];
+const TYPE_ORDER: SceneType[] = ['slide', 'quiz', 'interactive', 'pbl', 'visualization'];
 
 const CONFETTI_COLORS = [
   '#fbbf24',
@@ -363,7 +364,8 @@ export function ClassroomCompletePage({ scenes, title }: ClassroomCompletePagePr
       type,
       count: summary.countsByType[type] ?? 0,
       Icon: SCENE_TYPE_ICONS[type],
-      label: t(`classroomComplete.trailLabels.${type}`),
+      label:
+        type === 'visualization' ? 'Visualization' : t(`classroomComplete.trailLabels.${type}`),
     }),
   );
 

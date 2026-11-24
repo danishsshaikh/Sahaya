@@ -57,6 +57,7 @@ services:
       # MP4 export disabled and degrades to the ZIP-download path — this URL
       # being set does not, by itself, advertise a working render.
       - RENDER_SERVICE_URL=http://render-service:9000
+      - MANIM_RENDERER_URL=http://manim-renderer:8780
       # Keep every server-owned recording/artifact beneath the durable volume.
       - OPENMAIC_AUTH_DATA_DIR=/app/data/auth
       - VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
@@ -70,6 +71,7 @@ services:
       - default # outbound internet (LLM/media provider APIs, etc.)
       - render # reach the render service over the isolated network
       - inference # reach private, profile-gated local model endpoints
+      - manim # private structured visualization service
     extra_hosts:
       # Linux equivalent of Docker Desktop's host alias. Use this hostname in
       # provider URLs when a model runs directly on the Docker host.
@@ -340,8 +342,43 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+
+  manim-renderer:
+    profiles: [manim]
+    build: ./services/manim-renderer
+    environment:
+      MANIM_RENDERER_TOKEN: ${MANIM_RENDERER_TOKEN:-}
+      MANIM_MAX_DURATION: ${MANIM_MAX_DURATION:-90}
+      MANIM_MAX_ARTIFACT_BYTES: ${MANIM_MAX_ARTIFACT_BYTES:-50331648}
+      MANIM_STORAGE_LIMIT_BYTES: ${MANIM_STORAGE_LIMIT_BYTES:-10737418240}
+      MANIM_QUEUE_CONCURRENCY: ${MANIM_QUEUE_CONCURRENCY:-1}
+      MANIM_QUEUE_CAPACITY: ${MANIM_QUEUE_CAPACITY:-8}
+      MANIM_RENDER_TIMEOUT_SECONDS: ${MANIM_RENDER_TIMEOUT_SECONDS:-120}
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp
+    networks: [manim]
+    volumes:
+      - manim-artifacts:/artifacts
+    tmpfs:
+      - /tmp:size=${MANIM_TMPFS_SIZE:-512m},mode=1777
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    cpus: ${MANIM_CPU_LIMIT:-2}
+    mem_limit: ${MANIM_MEMORY_LIMIT:-2g}
+    pids_limit: ${MANIM_PID_LIMIT:-128}
+    healthcheck:
+      test: ['CMD', 'python', '/opt/sahaya-manim/healthcheck.py']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 networks:
   default: {}
+  manim:
+    internal: true
   # Isolated network for app <-> render-service traffic. `internal: true` means
   # no route to the host or internet. Both services share it so the app can
   # reach the render service; the render container additionally blocks its own
@@ -358,3 +395,4 @@ volumes:
   openmaic-data:
   openmaic-postgres:
   sahaya-huggingface-cache:
+  manim-artifacts:

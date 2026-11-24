@@ -242,6 +242,55 @@ else
   fi
 fi
 
+if [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; then
+  manim_token=$(env_value MANIM_RENDERER_TOKEN)
+  if [[ ! "$manim_token" =~ ^[a-zA-Z0-9_-]{24,128}$ ]]; then
+    fail 'Manim requires an alphanumeric, underscore or hyphen token of 24–128 characters.'
+  else
+    ok 'Manim renderer token is configured (value hidden).'
+  fi
+  for spec in MANIM_QUEUE_CONCURRENCY:1:1:4 MANIM_QUEUE_CAPACITY:8:1:32 \
+    MANIM_RENDER_TIMEOUT_SECONDS:120:10:600 MANIM_MAX_DURATION:90:1:120 \
+    MANIM_MAX_ARTIFACT_BYTES:50331648:1024:1073741824 \
+    MANIM_STORAGE_LIMIT_BYTES:10737418240:1024:1099511627776 MANIM_PID_LIMIT:128:32:1024; do
+    IFS=: read -r key default minimum maximum <<<"$spec"
+    value=$(env_value "$key" "$default")
+    if [[ ! "$value" =~ ^[1-9][0-9]{0,12}$ ]] || ((value < minimum || value > maximum)); then
+      fail "$key must be between $minimum and $maximum."
+    fi
+  done
+  for key in MANIM_MEMORY_LIMIT MANIM_TMPFS_SIZE; do
+    value=$(env_value "$key" 512m)
+    [[ "$value" =~ ^[1-9][0-9]*[kKmMgG]$ ]] || fail "$key must be a size such as 512m or 2g."
+  done
+  value=$(env_value MANIM_CPU_LIMIT 2)
+  [[ "$value" =~ ^([1-9][0-9]*|0)([.][0-9]+)?$ && "$value" != 0 ]] || fail 'MANIM_CPU_LIMIT must be a positive CPU count.'
+  for key in MANIM_PREVIEW_QUALITY MANIM_FINAL_QUALITY; do
+    value=$(env_value "$key" standard)
+    [[ "$value" == preview || "$value" == standard || "$value" == high ]] || fail "$key must be preview, standard or high."
+  done
+  if [[ "$RUNTIME" == podman ]]; then
+    manim_data=$(resolve_path "$(env_value SAHAYA_DATA_DIR "${XDG_DATA_HOME:-$HOME/.local/share}/sahaya")")
+    if [[ -e "$manim_data/manim" && ! -d "$manim_data/manim" ]]; then
+      fail 'The Manim artifact path must be a directory.'
+    fi
+    if podman container exists sahaya-manim 2>/dev/null; then
+      [[ $(podman inspect --format '{{.State.Health.Status}}' sahaya-manim 2>/dev/null) == healthy ]] && ok 'Manim renderer is healthy.' || warn 'Manim renderer is not healthy yet.'
+    else
+      ok 'Manim storage and runtime dependencies will be checked by the container on startup.'
+    fi
+  elif docker compose --env-file "$ENV_FILE" --profile manim ps --status running --services 2>/dev/null | grep -qx manim-renderer; then
+    manim_id=$(docker compose --env-file "$ENV_FILE" --profile manim ps -q manim-renderer 2>/dev/null)
+    [[ $(docker inspect --format '{{.State.Health.Status}}' "$manim_id" 2>/dev/null) == healthy ]] \
+      && ok 'Manim renderer is healthy.' || warn 'Manim renderer is not healthy yet.'
+  else
+    ok 'Manim storage and runtime dependencies will be checked by the container on startup.'
+  fi
+fi
+if [[ $(env_value MANIM_EXPERIMENTAL_CUSTOM_PYTHON false) == true ]]; then
+  fail 'Experimental Manim Python requires separate verified execution isolation and is unavailable.'
+fi
+
 needs_ming=false
 needs_gemma=false
 needs_qwen=false

@@ -1,5 +1,6 @@
 'use client';
 
+import { visualizationMediaUrl } from '@/lib/visualization/client';
 import { BookOpen, Globe } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SlideThumbnail } from '@/components/slide-renderer/SlideThumbnail';
@@ -54,6 +55,18 @@ export function SceneThumbnailContent({
         visible={visible}
       />
     );
+  }
+
+  if (scene.type === 'visualization') {
+    return visible ? (
+      // The owner-scoped poster is served directly with the session cookie.
+      <img
+        src={visualizationMediaUrl(scene.content.artifact.artifactId, 'poster.jpg')}
+        alt=""
+        loading="lazy"
+        className="h-full w-full bg-slate-950 object-contain"
+      />
+    ) : null;
   }
 
   if (scene.type === 'quiz') {

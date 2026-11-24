@@ -72,4 +72,22 @@ if PATH="$TEST_DIR/bin:$PATH" "$ROOT_DIR/scripts/deployment-preflight.sh" \
   exit 1
 fi
 
-printf 'Deployment preflight tests passed (basic, full CDI, and all-GPU rejection).\n'
+cp "$TEST_DIR/basic.env" "$TEST_DIR/manim.env"
+cat >>"$TEST_DIR/manim.env" <<'EOF'
+OPENMAIC_ENABLE_MANIM=true
+MANIM_RENDERER_TOKEN=renderer-test-token-123456789
+EOF
+PATH="$TEST_DIR/bin:$PATH" "$ROOT_DIR/scripts/deployment-preflight.sh" \
+  --runtime podman --mode basic --env-file "$TEST_DIR/manim.env" >"$TEST_DIR/manim.log"
+if grep -q 'renderer-test-token-123456789' "$TEST_DIR/manim.log"; then
+  printf 'The Manim token must not appear in preflight output.\n' >&2
+  exit 1
+fi
+printf 'MANIM_EXPERIMENTAL_CUSTOM_PYTHON=true\n' >>"$TEST_DIR/manim.env"
+if PATH="$TEST_DIR/bin:$PATH" "$ROOT_DIR/scripts/deployment-preflight.sh" \
+  --runtime podman --mode basic --env-file "$TEST_DIR/manim.env" >/dev/null 2>&1; then
+  printf 'Expected preflight to reject unavailable custom Python isolation.\n' >&2
+  exit 1
+fi
+
+printf 'Deployment preflight tests passed, including structured Manim and unavailable custom Python.\n'

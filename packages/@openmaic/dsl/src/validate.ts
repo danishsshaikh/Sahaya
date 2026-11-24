@@ -283,6 +283,24 @@ function checkScene(doc: unknown, path: string, errors: ValidationIssue[]): void
       checkInteractiveContent(content, `${path}/content`, errors);
     } else if (t === 'pbl') {
       checkPBLContent(content, `${path}/content`, errors);
+    } else if (t === 'visualization') {
+      const artifact = content.artifact;
+      const artifactPath = `${path}/content/artifact`;
+      if (
+        !isObject(artifact) ||
+        typeof artifact.artifactId !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(artifact.artifactId) ||
+        artifact.specVersion !== 1 ||
+        typeof artifact.duration !== 'number' ||
+        !Number.isFinite(artifact.duration) ||
+        artifact.duration <= 0 ||
+        !Array.isArray(artifact.cues)
+      ) {
+        errors.push({
+          path: artifactPath,
+          message: 'visualization content requires a valid versioned artifact reference',
+        });
+      }
     }
   }
 

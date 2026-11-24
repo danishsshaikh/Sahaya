@@ -4,6 +4,7 @@ import { useCallback, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Play } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { VisualizationPlaybackProps } from '@/components/scene-renderers/visualization-renderer';
 import { SceneRenderer } from '@/components/stage/scene-renderer';
 import { SceneProvider } from '@/lib/contexts/scene-context';
 import { Whiteboard } from '@/components/whiteboard';
@@ -21,6 +22,7 @@ import { isWhiteboardEnabled } from '@/lib/config/feature-flags';
 interface CanvasAreaProps extends CanvasToolbarProps {
   readonly currentScene: Scene | null;
   readonly mode: StageMode;
+  readonly visualizationPlayback?: VisualizationPlaybackProps;
   readonly hideToolbar?: boolean;
   readonly isPendingScene?: boolean;
   readonly isCourseComplete?: boolean;
@@ -33,6 +35,7 @@ interface CanvasAreaProps extends CanvasToolbarProps {
 
 export function CanvasArea({
   currentScene,
+  visualizationPlayback,
   currentSceneIndex,
   scenesCount,
   mode,
@@ -135,7 +138,11 @@ export function CanvasArea({
           {currentScene && !visibleWhiteboardOpen && (
             <div className="absolute inset-0">
               <SceneProvider>
-                <SceneRenderer scene={currentScene} mode={mode} />
+                <SceneRenderer
+                  scene={currentScene}
+                  mode={mode}
+                  visualizationPlayback={visualizationPlayback}
+                />
               </SceneProvider>
             </div>
           )}

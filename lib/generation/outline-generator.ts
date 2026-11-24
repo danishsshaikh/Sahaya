@@ -85,6 +85,7 @@ export function applySahayaOutlineFeatureFallbacks(
   options: {
     taskEngineMode: boolean;
     hasLanguageModel: boolean;
+    visualizationAvailable?: boolean;
     logger?: OutlineFallbackLogger;
   },
 ): SceneOutline {
@@ -93,6 +94,12 @@ export function applySahayaOutlineFeatureFallbacks(
     allowProceduralSkill: options.taskEngineMode,
     ...(logger ? { logger } : {}),
   });
+
+  if (packageFallback.type === 'visualization' && !options.visualizationAvailable) {
+    const fallback = fallbackOutlineToSlide(packageFallback);
+    delete fallback.visualization;
+    return fallback;
+  }
 
   if (options.taskEngineMode) return packageFallback;
 

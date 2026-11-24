@@ -1,13 +1,7 @@
 import { nanoid } from 'nanoid';
 import type { Action, Slide, SlideTheme } from '@openmaic/dsl';
 import type { SceneOutline } from './outline-types.js';
-import type {
-  CompleteScene,
-  GeneratedInteractiveContent,
-  GeneratedPBLContent,
-  GeneratedQuizContent,
-  GeneratedSlideContent,
-} from './scene-types.js';
+import type { CompleteScene, GeneratedSceneContent } from './scene-types.js';
 
 export interface BuildCompleteSceneOptions {
   /**
@@ -21,17 +15,27 @@ export interface BuildCompleteSceneOptions {
 /** Build a complete, store-independent scene from generated primitives. */
 export function buildCompleteScene(
   outline: SceneOutline,
-  content:
-    | GeneratedSlideContent
-    | GeneratedQuizContent
-    | GeneratedInteractiveContent
-    | GeneratedPBLContent,
+  content: GeneratedSceneContent,
   actions: Action[],
   stageId: string,
   options: BuildCompleteSceneOptions = {},
 ): CompleteScene | null {
   const sceneId = options.sceneId ?? nanoid();
   const timestamps = { createdAt: Date.now(), updatedAt: Date.now() };
+
+  if (outline.type === 'visualization' && 'artifact' in content) {
+    return {
+      id: sceneId,
+      outlineId: outline.id,
+      stageId,
+      type: 'visualization',
+      title: outline.title,
+      order: outline.order,
+      content,
+      actions,
+      ...timestamps,
+    };
+  }
 
   if (outline.type === 'slide' && 'elements' in content) {
     const defaultTheme: SlideTheme = {

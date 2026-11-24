@@ -19,6 +19,15 @@ export type VideoQuality = (typeof VIDEO_QUALITIES)[number];
 
 export class NoScenesError extends Error {}
 
+export const VISUALIZATION_EXPORT_MESSAGE =
+  'Lecture video export is unavailable for courses with Visualization scenes. You can download each visualization from its classroom player.';
+
+export class VisualizationExportError extends Error {
+  constructor() {
+    super(VISUALIZATION_EXPORT_MESSAGE);
+  }
+}
+
 export function sanitizeFilename(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '_') || 'classroom';
 }

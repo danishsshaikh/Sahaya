@@ -21,6 +21,7 @@ import { isVideoExportBurnedInCaptionsEnabled } from '@/lib/config/feature-flags
 import { acquireExport, releaseExport } from './export-in-flight';
 import {
   NoScenesError,
+  VisualizationExportError,
   sanitizeFilename,
   VIDEO_RESOLUTIONS,
   type VideoResolution,
@@ -67,7 +68,9 @@ export function useExportVideo() {
           );
         }
       } catch (error) {
-        if (error instanceof NoScenesError) {
+        if (error instanceof VisualizationExportError) {
+          toast.error(error.message, { id: toastId });
+        } else if (error instanceof NoScenesError) {
           toast.error(t('export.videoNoScenes'), { id: toastId });
         } else {
           log.error('Video export failed:', error);

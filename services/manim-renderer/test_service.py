@@ -128,3 +128,27 @@ class RendererServiceTests(unittest.TestCase):
                 raise
             finally:
                 self.stop(process)
+
+
+class WorkerDeadlineTests(unittest.TestCase):
+    def test_deadline_terminates_process_group_and_releases_work_directory(self):
+        from unittest.mock import Mock, patch
+
+        import server
+
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            tmp = data / "jobs"
+            tmp.mkdir()
+            job = server.Job("a" * 64, "b" * 64, "c" * 64, "preview")
+            process = Mock(pid=123)
+            process.wait.side_effect = [subprocess.TimeoutExpired("manim", 1), -9]
+            with (patch.object(server, "ROOT", data / "artifacts"),
+                  patch.object(server, "TMP", tmp),
+                  patch.object(server.subprocess, "Popen", return_value=process),
+                  patch.object(server.os, "killpg") as kill):
+                server.run(job, b"{}")
+            kill.assert_called_once_with(process.pid, server.signal.SIGKILL)
+            self.assertEqual(job.status, "failed")
+            self.assertIn("deadline", job.error)
+            self.assertFalse((tmp / job.id).exists())

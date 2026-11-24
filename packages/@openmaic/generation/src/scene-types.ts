@@ -9,6 +9,7 @@ import type {
   Scene,
   SlideBackground,
   SlideContent,
+  VisualizationContent,
   WidgetConfigBase,
   WidgetType,
 } from '@openmaic/dsl';
@@ -49,9 +50,15 @@ export type GeneratedSceneContent =
   | GeneratedSlideContent
   | GeneratedQuizContent
   | GeneratedInteractiveContent
-  | GeneratedPBLContent;
+  | GeneratedPBLContent
+  | VisualizationContent;
 
-export type CompleteSceneContent = SlideContent | QuizContent | InteractiveContent | PBLContent;
+export type CompleteSceneContent =
+  | SlideContent
+  | QuizContent
+  | InteractiveContent
+  | PBLContent
+  | VisualizationContent;
 
 /** Scene assembled by the package, including the originating outline identity. */
 export type CompleteScene = Scene<Action, CompleteSceneContent> & { outlineId: string };

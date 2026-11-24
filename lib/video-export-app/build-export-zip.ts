@@ -21,7 +21,12 @@ import { resolveExportStageName } from './resolve-stage-name';
 import { createVideoTimelineDeps } from './timeline-deps';
 import { collectVideoAssets } from './collect';
 import { getVideoExportCoverLabels, resolveVideoExportCta } from './cover-config';
-import { NoScenesError, VIDEO_RESOLUTIONS, type VideoResolution } from './export-options';
+import {
+  NoScenesError,
+  VisualizationExportError,
+  VIDEO_RESOLUTIONS,
+  type VideoResolution,
+} from './export-options';
 import { createQuizLayoutProbe } from './quiz-layout';
 import { packageVideoZip } from './package-zip';
 
@@ -88,6 +93,7 @@ async function compileStageIr(options: {
     throw new NoScenesError('No scenes to export');
   }
 
+  if (scenes.some((scene) => scene.type === 'visualization')) throw new VisualizationExportError();
   const stageName = await resolveExportStageName(stage);
   const { width, height } = VIDEO_RESOLUTIONS[options.resolution];
 

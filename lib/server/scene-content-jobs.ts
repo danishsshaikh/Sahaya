@@ -5,7 +5,7 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('SceneContentJob');
 
-export type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed';
+export type SceneContentJobStatus = 'queued' | 'generating' | 'completed' | 'failed' | 'cancelled';
 
 export interface SceneContentJobResult {
   content: unknown;
@@ -17,6 +17,8 @@ export interface SceneContentJob {
   ownerUserId: string;
   dedupeKey: string;
   status: SceneContentJobStatus;
+  phase?: string;
+  queuePosition?: number;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -28,6 +30,7 @@ export interface SceneContentJob {
   generationVersion?: string;
   widgetType?: string;
   modelString?: string;
+  cancellable?: boolean;
   result?: SceneContentJobResult;
   error?: string;
 }
@@ -42,6 +45,7 @@ export interface SceneContentJobStartInput {
   generationVersion?: string;
   widgetType?: string;
   modelString?: string;
+  cancellable?: boolean;
 }
 
 const TERMINAL_JOB_TTL_MS = 30 * 60 * 1000;
@@ -50,6 +54,7 @@ const MAX_JOBS = 100;
 const jobs = new Map<string, SceneContentJob>();
 const dedupeToJobId = new Map<string, string>();
 const runningJobs = new Map<string, Promise<void>>();
+const controllers = new Map<string, AbortController>();
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -71,14 +76,16 @@ function nowMs(): number {
 }
 
 function isTerminal(job: SceneContentJob): boolean {
-  return job.status === 'completed' || job.status === 'failed';
+  return job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
 }
 
 function pruneJob(jobId: string): void {
   const job = jobs.get(jobId);
-  if (job) dedupeToJobId.delete(job.dedupeKey);
+  if (job && dedupeToJobId.get(job.dedupeKey) === jobId) dedupeToJobId.delete(job.dedupeKey);
   jobs.delete(jobId);
   runningJobs.delete(jobId);
+  controllers.get(jobId)?.abort();
+  controllers.delete(jobId);
 }
 
 export function cleanupSceneContentJobs(now = nowMs()): void {
@@ -97,6 +104,7 @@ export function cleanupSceneContentJobs(now = nowMs()): void {
         error: 'Scene content job expired before completion. Retry generation.',
       });
       runningJobs.delete(jobId);
+      controllers.get(jobId)?.abort();
     }
   }
 
@@ -111,6 +119,14 @@ export function cleanupSceneContentJobs(now = nowMs()): void {
   }
 }
 
+export function canAdmitVisualizationJob(ownerUserId: string, dedupeKey: string): boolean {
+  cleanupSceneContentJobs();
+  const active = [...jobs.values()].filter((job) => job.cancellable && !isTerminal(job));
+  if (active.some((job) => job.ownerUserId === ownerUserId && job.dedupeKey === dedupeKey))
+    return true;
+  return active.length < 8 && active.filter((job) => job.ownerUserId === ownerUserId).length < 3;
+}
+
 export function createOrReuseSceneContentJob(input: SceneContentJobStartInput): {
   job: SceneContentJob;
   reused: boolean;
@@ -120,7 +136,12 @@ export function createOrReuseSceneContentJob(input: SceneContentJobStartInput): 
 
   const existingJobId = dedupeToJobId.get(input.dedupeKey);
   const existing = existingJobId ? jobs.get(existingJobId) : undefined;
-  if (existing && existing.ownerUserId === input.ownerUserId && existing.status !== 'failed') {
+  if (
+    existing &&
+    existing.ownerUserId === input.ownerUserId &&
+    existing.status !== 'failed' &&
+    existing.status !== 'cancelled'
+  ) {
     return { job: existing, reused: true };
   }
 
@@ -138,6 +159,7 @@ export function createOrReuseSceneContentJob(input: SceneContentJobStartInput): 
     generationVersion: input.generationVersion,
     widgetType: input.widgetType,
     modelString: input.modelString,
+    ...(input.cancellable && { cancellable: true }),
   };
 
   jobs.set(job.id, job);
@@ -163,7 +185,7 @@ function safeJobError(error: unknown): string {
 
 export function runSceneContentJob(
   jobId: string,
-  generate: () => Promise<SceneContentJobResult>,
+  generate: (signal?: AbortSignal) => Promise<SceneContentJobResult>,
 ): Promise<void> {
   const existingRun = runningJobs.get(jobId);
   if (existingRun) return existingRun;
@@ -180,11 +202,13 @@ export function runSceneContentJob(
       updatedAt: startedAt,
     });
 
+    const controller = queued.cancellable ? new AbortController() : undefined;
+    if (controller) controllers.set(jobId, controller);
     try {
-      const result = await generate();
+      const result = await generate(controller?.signal);
       const completedAt = nowMs();
       const latest = jobs.get(jobId);
-      if (!latest) return;
+      if (!latest || isTerminal(latest)) return;
 
       jobs.set(jobId, {
         ...latest,
@@ -202,7 +226,7 @@ export function runSceneContentJob(
     } catch (error) {
       const completedAt = nowMs();
       const latest = jobs.get(jobId);
-      if (!latest) return;
+      if (!latest || isTerminal(latest)) return;
 
       const safeError = safeJobError(error);
       jobs.set(jobId, {
@@ -220,6 +244,7 @@ export function runSceneContentJob(
         error: safeError,
       });
     } finally {
+      controllers.delete(jobId);
       runningJobs.delete(jobId);
     }
   })();
@@ -228,7 +253,27 @@ export function runSceneContentJob(
   return run;
 }
 
+export function updateSceneContentJobPhase(jobId: string, phase: string, queuePosition?: number) {
+  const job = jobs.get(jobId);
+  if (job && !isTerminal(job)) {
+    jobs.set(jobId, { ...job, phase, queuePosition, updatedAt: nowMs() });
+  }
+}
+
+export function cancelSceneContentJob(jobId: string, ownerId: string): boolean {
+  const job = jobs.get(jobId);
+  if (!job || job.ownerUserId !== ownerId || !job.cancellable) return false;
+  if (!isTerminal(job)) {
+    const now = nowMs();
+    jobs.set(jobId, { ...job, status: 'cancelled', completedAt: now, updatedAt: now });
+    controllers.get(jobId)?.abort();
+  }
+  return true;
+}
+
 export function clearSceneContentJobsForTests(): void {
+  for (const controller of controllers.values()) controller.abort();
+  controllers.clear();
   jobs.clear();
   dedupeToJobId.clear();
   runningJobs.clear();

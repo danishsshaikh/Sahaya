@@ -72,6 +72,8 @@ export interface CompileDeps {
 /** Human-readable reason a scene family is not rendered by this compiler slice. */
 function unsupportedReason(type: SceneType): string {
   switch (type) {
+    case 'visualization':
+      return 'Synchronized Manim visualization export is unavailable.';
     case 'interactive':
       return 'Interactive HTML was not prepared for static rendering; represented by markers.';
     default:

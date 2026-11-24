@@ -136,6 +136,7 @@ export const LLM_STAGES = [
   'scene-content:quiz',
   'scene-content:interactive',
   'scene-content:pbl',
+  'scene-content:visualization',
   'scene-actions',
   'agent-profiles',
   'quiz-grade',

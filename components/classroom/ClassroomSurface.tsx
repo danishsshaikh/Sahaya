@@ -472,6 +472,7 @@ export function ClassroomSurface({
       >;
       const finishResume = (imageMapping: Record<string, string>) =>
         generateRemaining({
+          requirement: params.requirement,
           pdfImages: params.pdfImages,
           imageMapping,
           stageInfo: {

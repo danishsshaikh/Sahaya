@@ -1,7 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { requireSessionUser } from '@/lib/auth/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { isValidSceneContentJobId, readSceneContentJob } from '@/lib/server/scene-content-jobs';
+import {
+  cancelSceneContentJob,
+  isValidSceneContentJobId,
+  readSceneContentJob,
+} from '@/lib/server/scene-content-jobs';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('Scene Content Job API');
@@ -27,13 +31,15 @@ export async function GET(req: NextRequest) {
       async: true,
       jobId: job.id,
       status: job.status,
+      phase: job.phase,
+      queuePosition: job.queuePosition,
       stageId: job.stageId,
       outlineId: job.outlineId,
       outlineTitle: job.outlineTitle,
       attemptId: job.attemptId,
       generationVersion: job.generationVersion,
       widgetType: job.widgetType,
-      done: job.status === 'completed' || job.status === 'failed',
+      done: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled',
       ...(job.status === 'completed' && job.result
         ? {
             content: job.result.content,
@@ -51,4 +57,14 @@ export async function GET(req: NextRequest) {
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+export async function DELETE(req: NextRequest) {
+  const user = await requireSessionUser(req);
+  if (user instanceof Response) return user;
+  const jobId = req.nextUrl.searchParams.get('jobId') || '';
+  if (!isValidSceneContentJobId(jobId) || !cancelSceneContentJob(jobId, user.id)) {
+    return apiError('INVALID_REQUEST', 404, 'Scene content job not found');
+  }
+  return apiSuccess({ cancelled: true });
 }

@@ -16,14 +16,8 @@ import {
   type AgentInfo,
 } from '@openmaic/generation';
 import type { SceneOutline } from '@/lib/types/generation';
-import type {
-  GeneratedSlideContent,
-  GeneratedQuizContent,
-  GeneratedInteractiveContent,
-  GeneratedPBLContent,
-} from '@/lib/types/generation';
-import type { SpeechAction } from '@/lib/types/action';
-import type { PBLContent } from '@/lib/types/stage';
+import type { GeneratedSceneContent } from '@openmaic/generation';
+import type { Scene, PBLContent } from '@/lib/types/stage';
 import { createLogger } from '@/lib/logger';
 import { normalizeLegacyPBLContent } from '@/lib/pbl/legacy/read';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
@@ -82,12 +76,7 @@ export async function POST(req: NextRequest) {
     } = body as {
       outline: SceneOutline;
       allOutlines: SceneOutline[];
-      content:
-        | GeneratedSlideContent
-        | GeneratedQuizContent
-        | GeneratedInteractiveContent
-        | GeneratedPBLContent
-        | PBLContent;
+      content: GeneratedSceneContent | PBLContent;
       stageId: string;
       agents?: AgentInfo[];
       previousSpeeches?: string[];
@@ -123,6 +112,9 @@ export async function POST(req: NextRequest) {
     }
     let ownerUserId: string | undefined;
     let attemptIdentity: SceneGenerationAttemptIdentity | undefined;
+    if (outline.type === 'visualization' && (!attemptId || !generationVersion)) {
+      return apiError('INVALID_REQUEST', 400, 'A visualization generation attempt is required');
+    }
     if (attemptId && generationVersion) {
       const user = await requireSessionUser(req);
       if (user instanceof Response) return user;
@@ -195,11 +187,7 @@ export async function POST(req: NextRequest) {
 
     const generationContent = (
       'type' in content && content.type === 'pbl' ? normalizeLegacyPBLContent(content) : content
-    ) as
-      | GeneratedSlideContent
-      | GeneratedQuizContent
-      | GeneratedInteractiveContent
-      | GeneratedPBLContent;
+    ) as GeneratedSceneContent;
     const generateResolvedActions = async () => {
       log.info(`Generating actions: "${outline.title}" (${outline.type}) [model=${modelString}]`);
       phaseStartedAt = Date.now();
@@ -265,10 +253,10 @@ export async function POST(req: NextRequest) {
 
       const builtScene = buildCompleteScene(outline, generationContent, actions, stageId);
       if (!builtScene) throw new Error(`Failed to build scene: ${outline.title}`);
-      const scene = { ...builtScene, outlineId: outline.id };
+      const scene = { ...builtScene, outlineId: outline.id } as Scene;
       const previousSpeeches = (scene.actions || [])
-        .filter((action: SpeechAction): action is SpeechAction => action.type === 'speech')
-        .map((action: SpeechAction) => action.text);
+        .filter((action) => action.type === 'speech')
+        .map((action) => action.text);
       log.info(
         `Scene assembled successfully: "${outline.title}" — ${scene.actions?.length ?? 0} actions`,
       );

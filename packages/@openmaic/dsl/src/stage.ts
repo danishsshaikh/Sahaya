@@ -19,7 +19,7 @@ import type { Slide } from './slides.js';
 import type { Action } from './action.js';
 
 /** All scene kinds owned by the contract. */
-export type SceneType = 'slide' | 'quiz' | 'interactive' | 'pbl';
+export type SceneType = 'slide' | 'quiz' | 'interactive' | 'pbl' | 'visualization';
 
 /** Frozen set of every valid {@link SceneType}, for cheap membership checks. */
 export const SCENE_TYPES = [
@@ -27,6 +27,7 @@ export const SCENE_TYPES = [
   'quiz',
   'interactive',
   'pbl',
+  'visualization',
 ] as const satisfies readonly SceneType[];
 
 // Compile-time exhaustiveness: every SceneType must appear in SCENE_TYPES.
@@ -218,11 +219,45 @@ export interface QuizContent {
   questions: QuizQuestion[];
 }
 
-/**
- * The universal scene-content subset used by {@link Scene}'s compatibility
- * default. Interactive and PBL content are also contract-owned and are composed
- * into concrete scene unions through the generic content parameter.
- */
+export const VISUALIZATION_STYLES = [
+  'automatic',
+  'mathematical',
+  'conceptual',
+  'technical',
+  'spatial',
+  'custom',
+] as const;
+
+export const VISUALIZATION_DIFFICULTIES = ['introductory', 'intermediate', 'advanced'] as const;
+
+export interface VisualizationOptions {
+  style?: (typeof VISUALIZATION_STYLES)[number];
+  difficulty?: (typeof VISUALIZATION_DIFFICULTIES)[number];
+  instructions?: string;
+}
+
+/** An owner-scoped render reference. Media bytes stay outside the classroom document. */
+export interface VisualizationContent {
+  type: 'visualization';
+  artifact: {
+    artifactId: string;
+    duration: number;
+    width: number;
+    height: number;
+    fps: number;
+    bytes: number;
+    sha256: string;
+    rendererVersion: string;
+    specVersion: 1;
+    quality: 'preview' | 'standard' | 'high';
+    classification: 'verified-components' | 'illustrative';
+    cues: { id: string; start: number; end: number; narration?: string; caption?: string }[];
+  };
+  options?: VisualizationOptions;
+  model?: { kind: string } & Record<string, string | number | number[]>;
+}
+
+/** The compatibility default for generic Scene consumers. */
 export type SceneContent = SlideContent | QuizContent;
 
 /**

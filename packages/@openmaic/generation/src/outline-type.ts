@@ -69,6 +69,9 @@ export function changeOutlineType(outline: SceneOutline, newType: SceneType): Sc
       };
     }
 
+    case 'visualization':
+      return { ...baseOutline, visualization: { style: 'automatic' } };
+
     case 'slide':
     default:
       return baseOutline;

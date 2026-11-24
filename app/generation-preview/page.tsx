@@ -1402,6 +1402,7 @@ function GenerationPreviewContent() {
             'generationParams',
             JSON.stringify({
               pdfImages: currentSession.pdfImages,
+              requirement: currentSession.requirements.requirement,
               agents,
               userProfile,
               languageDirective,

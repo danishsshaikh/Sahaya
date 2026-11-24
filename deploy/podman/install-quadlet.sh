@@ -9,6 +9,7 @@ UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/sahaya
 APP_IMAGE=${SAHAYA_APP_IMAGE:-localhost/sahaya-app:local}
 MING_IMAGE=${SAHAYA_MING_IMAGE:-localhost/sahaya-ming3-tts:local}
 QWEN_IMAGE=${SAHAYA_QWEN_IMAGE:-localhost/sahaya-qwen3-tts:local}
+MANIM_IMAGE=${SAHAYA_MANIM_IMAGE:-localhost/sahaya-manim:local}
 
 while (($#)); do
   case "$1" in
@@ -48,6 +49,7 @@ case "$MODE" in basic | ming | gemma-ming | full) ;; *) printf 'Unsupported mode
 needs_ming() { [[ "$MODE" == ming || "$MODE" == gemma-ming || "$MODE" == full ]]; }
 needs_gemma() { [[ "$MODE" == gemma-ming || "$MODE" == full ]]; }
 needs_qwen() { [[ "$MODE" == full ]]; }
+with_manim() { [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; }
 quadlet_gpu_args() {
   local device=$1
   if [[ $(env_value PODMAN_KEEP_GROUPS false) == true ]]; then
@@ -68,7 +70,8 @@ done
 podman image exists "$APP_IMAGE" || { printf 'Build %s before installing Quadlet.\n' "$APP_IMAGE" >&2; exit 1; }
 if needs_ming; then podman image exists "$MING_IMAGE" || { printf 'Build %s first.\n' "$MING_IMAGE" >&2; exit 1; }; fi
 if needs_qwen; then podman image exists "$QWEN_IMAGE" || { printf 'Build %s first.\n' "$QWEN_IMAGE" >&2; exit 1; }; fi
-for container in sahaya-app sahaya-llama-gemma sahaya-ming3-tts sahaya-qwen3-tts; do
+if with_manim; then podman image exists "$MANIM_IMAGE" || { printf 'Build %s first.\n' "$MANIM_IMAGE" >&2; exit 1; }; fi
+for container in sahaya-app sahaya-llama-gemma sahaya-ming3-tts sahaya-qwen3-tts sahaya-manim; do
   if podman container exists "$container" 2>/dev/null; then
     printf '%s\n' \
       "Existing container $container would conflict with Quadlet." \
@@ -100,6 +103,57 @@ EOF
 
 dependencies='sahaya-app-network.service sahaya-inference-network.service'
 wants=''
+manim_app_config=''
+if with_manim; then
+  mkdir -p "$DATA_DIR/manim"
+  cat >"$UNIT_DIR/sahaya-manim.network" <<'EOF'
+[Network]
+NetworkName=sahaya-manim
+Driver=bridge
+Internal=true
+EOF
+  (
+    umask 077
+    printf '%s\n' "MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)" >"$UNIT_DIR/sahaya-manim.env"
+  )
+  chmod 600 "$UNIT_DIR/sahaya-manim.env"
+  cat >"$UNIT_DIR/sahaya-manim.container" <<EOF
+[Unit]
+Description=Sahaya Manim visualization renderer
+After=sahaya-manim-network.service
+
+[Container]
+ContainerName=sahaya-manim
+Image=$MANIM_IMAGE
+EnvironmentFile="$UNIT_DIR/sahaya-manim.env"
+Environment=HOME=/tmp
+Environment=XDG_CACHE_HOME=/tmp
+Environment=MANIM_QUEUE_CONCURRENCY=$(env_value MANIM_QUEUE_CONCURRENCY 1)
+Environment=MANIM_QUEUE_CAPACITY=$(env_value MANIM_QUEUE_CAPACITY 8)
+Environment=MANIM_RENDER_TIMEOUT_SECONDS=$(env_value MANIM_RENDER_TIMEOUT_SECONDS 120)
+Environment=MANIM_MAX_DURATION=$(env_value MANIM_MAX_DURATION 90)
+Environment=MANIM_MAX_ARTIFACT_BYTES=$(env_value MANIM_MAX_ARTIFACT_BYTES 50331648)
+Environment=MANIM_STORAGE_LIMIT_BYTES=$(env_value MANIM_STORAGE_LIMIT_BYTES 10737418240)
+Network=sahaya-manim.network
+NetworkAlias=manim-renderer
+Volume="$DATA_DIR/manim:/artifacts:U,Z"
+PodmanArgs=--cap-drop=ALL --security-opt=no-new-privileges --read-only --cpus=$(env_value MANIM_CPU_LIMIT 2) --memory=$(env_value MANIM_MEMORY_LIMIT 2g) --pids-limit=$(env_value MANIM_PID_LIMIT 128) --tmpfs=/tmp:size=$(env_value MANIM_TMPFS_SIZE 512m),mode=1777
+RunInit=true
+HealthCmd=python /opt/sahaya-manim/healthcheck.py
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=5
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+  dependencies+=" sahaya-manim.service"
+  wants+=" sahaya-manim.service"
+  manim_app_config=$'Network=sahaya-manim.network\nEnvironment=MANIM_RENDERER_URL=http://manim-renderer:8780'
+fi
 if needs_gemma; then dependencies+=" sahaya-gemma.service"; wants+=" sahaya-gemma.service"; fi
 if needs_ming; then dependencies+=" sahaya-ming.service"; wants+=" sahaya-ming.service"; fi
 if needs_qwen; then dependencies+=" sahaya-qwen.service"; wants+=" sahaya-qwen.service"; fi
@@ -124,6 +178,7 @@ Environment=MING3_TTS_BASE_URL=http://ming3-tts:8773
 Environment=QWEN3_TTS_BASE_URL=http://qwen3-tts:8771
 Network=sahaya-app.network
 Network=sahaya-inference.network
+$manim_app_config
 PublishPort=$bind:$port:3000
 Volume="$DATA_DIR/app:/app/data:U,z"
 RunInit=true

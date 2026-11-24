@@ -12,6 +12,7 @@ import {
   AlertCircle,
   RefreshCw,
   Trophy,
+  Play,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { SlideThumbnail } from '@/components/slide-renderer/SlideThumbnail';
@@ -22,6 +23,7 @@ import { useNearViewport } from '@/lib/hooks/use-near-viewport';
 import type { SceneType, SlideContent, InteractiveContent } from '@/lib/types/stage';
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { BrandWordmark } from '@/components/branding/brand-wordmark';
+import { SceneThumbnailContent } from './scene-thumbnail-content';
 import { filterEnabledScenes } from '@/lib/config/feature-flags';
 import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
 
@@ -114,6 +116,7 @@ export function SceneSidebar({
       quiz: PieChart,
       interactive: MousePointer2,
       pbl: Cpu,
+      visualization: Play,
     };
     return icons[type] || BookOpen;
   };
@@ -302,6 +305,12 @@ export function SceneSidebar({
                           </div>
                         </div>
                       </div>
+                    ) : scene.type === 'visualization' ? (
+                      <SceneThumbnailContent
+                        scene={scene}
+                        viewportSize={1000}
+                        viewportRatio={0.5625}
+                      />
                     ) : scene.type === 'pbl' ? (
                       /* PBL: kanban board with 3 columns */
                       <div className="flex h-full w-full flex-col bg-[linear-gradient(135deg,var(--brand-secondary-soft),var(--background))] p-1.5">

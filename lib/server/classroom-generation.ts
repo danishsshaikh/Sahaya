@@ -1,3 +1,8 @@
+import {
+  generateVisualization,
+  VISUALIZATION_OUTLINE_INSTRUCTION,
+} from '@/lib/visualization/generate';
+import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { nanoid } from 'nanoid';
 import { callLLM } from '@/lib/ai/llm';
 import { createStageAPI } from '@/lib/api/stage-api';
@@ -498,11 +503,18 @@ export async function generateClassroom(
     scenesGenerated: 0,
   });
 
+  const visualizationAvailable =
+    !!input.ownerUserId && (await getVisualizationCapability()).available;
   const outlinesResult = await generateSceneOutlinesFromRequirements(
     requirements,
     pdfText,
     undefined,
-    aiCall,
+    (system, user, images) =>
+      aiCall(
+        system + (visualizationAvailable ? VISUALIZATION_OUTLINE_INSTRUCTION : ''),
+        user,
+        images,
+      ),
     {
       imageGenerationEnabled: input.enableImageGeneration,
       videoGenerationEnabled: input.enableVideoGeneration,
@@ -585,6 +597,7 @@ export async function generateClassroom(
 
   for (const [index, outline] of outlines.entries()) {
     const safeOutline = applySahayaOutlineFeatureFallbacks(outline, {
+      visualizationAvailable,
       taskEngineMode: vocationalActive,
       hasLanguageModel: true,
       logger: log,
@@ -625,24 +638,33 @@ export async function generateClassroom(
     const content = await (async () => {
       try {
         return await withGenerationRetry(
-          () =>
-            generateSceneContent(safeOutline, contentCall.aiCall, {
-              agents,
-              languageDirective,
-              allowProceduralSkill: vocationalActive,
-              ...(safeOutline.type === 'pbl'
-                ? {
-                    pblLoopFallback: (input) =>
-                      generatePBLV2Project(
-                        input,
-                        contentCall.model,
-                        callLLM,
-                        { logger: log },
-                        contentCall.thinking,
-                      ),
-                  }
-                : {}),
-            }),
+          async () =>
+            safeOutline.type === 'visualization' && input.ownerUserId
+              ? generateVisualization({
+                  outline: safeOutline,
+                  allOutlines: outlines,
+                  requirement: requirements.requirement,
+                  language: languageDirective,
+                  ownerId: input.ownerUserId,
+                  aiCall: contentCall.aiCall,
+                })
+              : generateSceneContent(safeOutline, contentCall.aiCall, {
+                  agents,
+                  languageDirective,
+                  allowProceduralSkill: vocationalActive,
+                  ...(safeOutline.type === 'pbl'
+                    ? {
+                        pblLoopFallback: (input) =>
+                          generatePBLV2Project(
+                            input,
+                            contentCall.model,
+                            callLLM,
+                            { logger: log },
+                            contentCall.thinking,
+                          ),
+                      }
+                    : {}),
+                }),
           {
             label: `scene ${index + 1}/${outlines.length} content`,
             shouldRetryResult: (result) => result === null,

@@ -19,7 +19,7 @@ import { useI18n } from '@/lib/hooks/use-i18n';
 import { createLogger } from '@/lib/logger';
 import { useVideoRenderStore } from '@/lib/store/video-render';
 import { acquireExport, releaseExport } from './export-in-flight';
-import { NoScenesError, sanitizeFilename } from './export-options';
+import { NoScenesError, VisualizationExportError, sanitizeFilename } from './export-options';
 
 const log = createLogger('DownloadSubtitles');
 
@@ -54,7 +54,9 @@ export function useDownloadSubtitles() {
         saveAs(blob, `${sanitizeFilename(stageName)}.${format}`);
         toast.success(t('export.subtitlesSuccess'), { id: toastId });
       } catch (error) {
-        if (error instanceof NoScenesError) {
+        if (error instanceof VisualizationExportError) {
+          toast.error(error.message, { id: toastId });
+        } else if (error instanceof NoScenesError) {
           toast.error(t('export.videoNoScenes'), { id: toastId });
         } else {
           log.error('Subtitle download failed:', error);

@@ -30,6 +30,8 @@ import type { SceneOutline } from '@/lib/types/generation';
 import type { WidgetType } from '@/lib/types/widgets';
 import { changeOutlineType } from '@/lib/generation/outline-type';
 import { getGenerationSceneTypeOptions } from '@/lib/generation/scene-type-options';
+import { useVisualizationCapability } from '@/lib/visualization/client';
+import { VisualizationOptionsFields } from '@/components/visualization/options';
 import { countBlockingOutlines, validateOutline } from '@/lib/edit/content-validation';
 
 type SceneType = SceneOutline['type'];
@@ -77,6 +79,12 @@ const TYPE_THEME: Record<
     accent: 'bg-emerald-500',
     dot: 'bg-emerald-400',
   },
+  visualization: {
+    chip: 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300',
+    chipHover: 'hover:bg-cyan-100/80 dark:hover:bg-cyan-500/15',
+    accent: 'bg-cyan-600',
+    dot: 'bg-cyan-500',
+  },
   pbl: {
     chip: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
     chipHover: 'hover:bg-amber-100/80 dark:hover:bg-amber-500/15',
@@ -100,6 +108,8 @@ function useSceneTypeLabel() {
         return t('generation.sceneTypeQuiz');
       case 'interactive':
         return t('generation.sceneTypeInteractive');
+      case 'visualization':
+        return 'Visualization';
       case 'pbl':
         return t('generation.sceneTypePbl');
       case 'slide':
@@ -122,6 +132,7 @@ export function OutlinesEditor({
 }: OutlinesEditorProps) {
   const { t } = useI18n();
   const sceneTypeLabel = useSceneTypeLabel();
+  const visualizationCapability = useVisualizationCapability();
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const lastScrollTargetRef = useRef<string | null>(null);
@@ -133,6 +144,9 @@ export function OutlinesEditor({
   // "N / M ready" counter by the button explains the gate and jumps to the
   // first offending section.
   const blockingCount = countBlockingOutlines(outlines);
+  const rendererUnavailable =
+    visualizationCapability?.available === false &&
+    outlines.some((outline) => outline.type === 'visualization');
   const totalCount = outlines.length;
   const readyCount = totalCount - blockingCount;
   const firstBlockingId =
@@ -319,6 +333,7 @@ export function OutlinesEditor({
                       canMoveUp={index > 0}
                       canMoveDown={index < outlines.length - 1}
                       sceneTypeLabel={sceneTypeLabel}
+                      visualizationCapability={visualizationCapability}
                       disabled={editingDisabled}
                       isStreamingTip={isStreamingTip}
                       isDragging={draggingId === outline.id}
@@ -401,7 +416,13 @@ export function OutlinesEditor({
           )}
           <Button
             onClick={onConfirm}
-            disabled={isLoading || isStreaming || outlines.length === 0 || blockingCount > 0}
+            disabled={
+              isLoading ||
+              isStreaming ||
+              outlines.length === 0 ||
+              blockingCount > 0 ||
+              rendererUnavailable
+            }
             className="rounded-full px-6 shadow-lg shadow-blue-500/20"
           >
             {isLoading ? (
@@ -442,6 +463,7 @@ interface SceneRowProps {
   canMoveUp: boolean;
   canMoveDown: boolean;
   sceneTypeLabel: (type: SceneType) => string;
+  visualizationCapability: ReturnType<typeof useVisualizationCapability>;
   disabled: boolean;
   isStreamingTip: boolean;
   isDragging: boolean;
@@ -463,6 +485,7 @@ function SceneRow({
   canMoveUp,
   canMoveDown,
   sceneTypeLabel,
+  visualizationCapability,
   disabled,
   isStreamingTip,
   isDragging,
@@ -641,12 +664,29 @@ function SceneRow({
                   disabled={disabled}
                   label={sceneTypeLabel(outline.type)}
                   theme={theme}
-                  connected={!disabled && outline.type !== 'slide'}
+                  connected={
+                    !disabled && outline.type !== 'slide' && outline.type !== 'visualization'
+                  }
+                  visualizationCapability={visualizationCapability}
                 />
               </div>
               {!disabled && <DeleteSceneButton onConfirm={onRemove} />}
             </div>
           </div>
+          {outline.type === 'visualization' && !isStreamingTip && (
+            <div className="my-3 grid gap-2">
+              <VisualizationOptionsFields
+                value={outline.visualization}
+                disabled={disabled}
+                onChange={(visualization) => onUpdate({ visualization })}
+              />
+              {visualizationCapability?.available === false && (
+                <p role="status" className="text-xs text-muted-foreground">
+                  {visualizationCapability.reason} Choose another scene type to continue.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Description */}
           <textarea
@@ -761,12 +801,14 @@ function TypePill({
   label,
   theme,
   connected = false,
+  visualizationCapability,
 }: {
   type: SceneType;
   onChange: (type: SceneType) => void;
   disabled: boolean;
   label: string;
   theme: (typeof TYPE_THEME)[SceneType];
+  visualizationCapability: ReturnType<typeof useVisualizationCapability>;
   /** When part of a cascading group, drop own rounding so the wrapper clips it. */
   connected?: boolean;
 }) {
@@ -789,22 +831,30 @@ function TypePill({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[140px]">
-        {SCENE_TYPES.map((option) => {
+        {[...SCENE_TYPES, 'visualization' as const].map((option) => {
           const optionTheme = TYPE_THEME[option];
           return (
             <DropdownMenuItem
               key={option}
+              disabled={option === 'visualization' && !visualizationCapability?.available}
               onClick={() => onChange(option)}
               className="flex items-center justify-between gap-2"
             >
               <span className="flex items-center gap-2">
                 <span className={cn('size-2 rounded-full', optionTheme.accent)} />
-                {t(`generation.sceneType${capitalize(option)}`)}
+                {option === 'visualization'
+                  ? 'Visualization'
+                  : t(`generation.sceneType${capitalize(option)}`)}
               </span>
               {option === type && <Check className="size-3.5 text-muted-foreground" />}
             </DropdownMenuItem>
           );
         })}
+        {visualizationCapability?.available === false && (
+          <p className="max-w-52 px-2 py-1 text-xs text-muted-foreground">
+            {visualizationCapability.reason}
+          </p>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

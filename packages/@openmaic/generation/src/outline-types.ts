@@ -1,4 +1,4 @@
-import type { WidgetType } from '@openmaic/dsl';
+import type { SceneType, VisualizationOptions, WidgetType } from '@openmaic/dsl';
 
 export type { WidgetType } from '@openmaic/dsl';
 
@@ -69,7 +69,8 @@ export interface MediaGenerationRequest {
 /** A generation-ready description of one course scene. */
 export interface SceneOutline {
   id: string;
-  type: 'slide' | 'quiz' | 'interactive' | 'pbl';
+  type: SceneType;
+  visualization?: VisualizationOptions;
   title: string;
   description: string;
   keyPoints: string[];

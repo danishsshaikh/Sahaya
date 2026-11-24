@@ -160,6 +160,12 @@ inference; perform an explicit authorized live test on the target server.
 
 ---
 
+## Sahaya Manim visualizations
+
+Faculty can add a **Visualization** scene for an animated explanation, play it in the classroom with the selected Teaching Voice, and preview or regenerate it in Pro mode. A **Simulation** remains the scene type for interactive parameter exploration.
+
+Manim runs as an optional private CPU service in Docker, rootless Podman, and Quadlet. See the [Visualization guide](docs/MANIM_VISUALIZATIONS.md) for setup, supported models, and reproducible render demonstrations.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
