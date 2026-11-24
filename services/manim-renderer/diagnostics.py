@@ -1,8 +1,12 @@
 """Bounded validation feedback for the app's targeted repair protocol."""
 
+ISSUE_LIMIT = 24
+
 class PlanValidationError(ValueError):
-    def __init__(self, issues):
-        self.issues = issues[:12]
+    def __init__(self, issues, blocked=()):
+        self.issues = issues[:ISSUE_LIMIT]
+        self.blocked = list(blocked)
+        self.truncated = len(issues) > ISSUE_LIMIT
         first = self.issues[0]
         path = ".".join(map(str, first["path"])) or "plan"
         super().__init__(f"{path}: {first['message']}")
@@ -30,7 +34,7 @@ def schema_issues(error):
                 yield issue([*path, name], "required", "This field is required")
     elif rule == "additionalProperties":
         properties = error.schema.get("properties", {})
-        for name in value.keys() - properties.keys():
+        for name in sorted(value.keys() - properties.keys()):
             yield issue([*path, name], "unsupportedField", "Remove this unsupported field")
     elif rule in ("minimum", "maximum"):
         yield issue(path, rule, f"Value must satisfy {rule} {expected}", limit=expected,

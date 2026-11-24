@@ -115,7 +115,7 @@ describe('Visualization scene integration', () => {
       'fetch',
       vi.fn(async (url: string) =>
         url.endsWith('/ready')
-          ? Response.json({ version: '0.22.1/2', maxDuration: 90, validationProtocol: 2 })
+          ? Response.json({ version: '0.22.1/3', maxDuration: 90, validationProtocol: 3 })
           : Response.json({ status: 'completed', artifact: content.artifact }),
       ),
     );
@@ -163,7 +163,7 @@ describe('Visualization scene integration', () => {
     const plan = { timeline: [{ seconds: 2, narration: 'Draw the tangent.' }, { seconds: 2 }] };
     const transport = vi.fn(async (url: string, request?: RequestInit) => {
       if (url.endsWith('/ready'))
-        return Response.json({ version: '0.22.1/2', maxDuration: 90, validationProtocol: 2 });
+        return Response.json({ version: '0.22.1/3', maxDuration: 90, validationProtocol: 3 });
       if (url.endsWith('/plan.json')) return Response.json(plan);
       const payload = JSON.parse(String(request?.body));
       expect(payload.plan.timeline).toEqual([

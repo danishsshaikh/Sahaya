@@ -14,3 +14,7 @@
 - Audited the HPC validation report. Schema-derived guidance now states the font scale, application-owned metadata is stamped, and renderer feedback drives exact-path patch repair.
 - Added scene-level failure categories and a retry regression for reloaded partial classrooms. Added a source fingerprint check for DSL and generation builds.
 - Validated and rendered the three diffraction demonstrations locally at 720p with the existing limits.
+
+- Confirmed that native tick intervals, kind-only repairs, and serial validation contributed to the second HPC rejection sequence. The original LLM responses remain unavailable.
+- Added protocol 3 compilation, collected validation feedback, transactional kind repair, bounded private diagnostics, and same-tab job reattachment with ordered classroom rows.
+- Verified seven synthetic compositions against the authoritative validator and rendered one end to end in the offline Cairo smoke test. Live provider generation, Teaching Voice synchronization, and interactive browser checks remain on HPC.

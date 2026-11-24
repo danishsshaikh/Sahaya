@@ -318,6 +318,7 @@ run_manim() {
     --tmpfs "/tmp:size=$(env_value MANIM_TMPFS_SIZE 512m),mode=1777" \
     --volume "$DATA_DIR/manim:/artifacts:U,Z" \
     --env HOME=/tmp --env XDG_CACHE_HOME=/tmp --env MANIM_RENDERER_TOKEN \
+    --env "MANIM_CAPTURE_REJECTED_PLANS=$(env_value MANIM_CAPTURE_REJECTED_PLANS false)" \
     --env "MANIM_QUEUE_CONCURRENCY=$(env_value MANIM_QUEUE_CONCURRENCY 1)" \
     --env "MANIM_QUEUE_CAPACITY=$(env_value MANIM_QUEUE_CAPACITY 8)" \
     --env "MANIM_RENDER_TIMEOUT_SECONDS=$(env_value MANIM_RENDER_TIMEOUT_SECONDS 120)" \

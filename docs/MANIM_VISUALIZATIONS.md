@@ -119,56 +119,28 @@ Standard MP4s were 34,670 B for the derivative and 245,121 B for the surface. Ma
 
 Scientific checks cover known numerical results, invalid expressions, physical boundaries, and plan limits. The real service test renders an equation and function graph, verifies range requests and owner checks, decodes the MP4, and confirms cache persistence across a service restart. The benchmark fixtures also exercise 3D, sequential and parallel beats, replacements, and motion along a calculated path. All nine benchmark MP4s played and sought successfully in Chrome. Representative preview frames were inspected for geometry, labels, and transitions.
 
-## HPC planning fix and update
+## HPC validation protocol 3
 
-The first HPC run showed two independent contract failures. The original director described `size` as both geometry and a scaled font setting without giving its numeric range. A value of 18 exceeded the renderer maximum of 10. The original director also delegated fixed metadata to the model, so a missing `engine` failed validation. The renderer returned only its first validation error and the follow-up asked for a replacement plan, which could introduce new mistakes. The reported errors identify these failure modes. The original response bodies were unavailable for comparison.
+The second HPC run exposed three independent failure paths. Sahaya accepted only two values per axis range even though Manim accepts a third tick interval. A field-only kind patch left incompatible fields on the same object. The validator stopped at structural errors and could reveal equation and scientific issues only on later calls. The repair prompt already received exact field paths. App logs hid unsupported names. The live plan bodies were unavailable, so the specific equation and model inputs remain unknown.
 
-The director now derives fields, bounds, operation arguments and fixed metadata from the renderer contract. Geometry uses canvas units and text uses Manim font size divided by 10. The range remains 0.1–10. Sahaya sets `version`, `type`, and `engine` deterministically. The renderer reports up to 12 issues per admission. A repair may edit only reported fields and the whole result is checked before a worker starts. Science inputs and expressions are preserved during repair. Planning is limited to three model calls within 150 seconds, including repairs. The total generation deadline is 270 seconds.
+The compiler normalizes fixed metadata, recognized aliases, two-dimensional coordinates, operation arguments, and equivalent display math. Axes preserve a bounded tick interval. Plot domains use two endpoints. The renderer collects independent schema, equation, expression, reference, and scientific issues before queuing valid plans. It reports up to 24 issues and identifies blocked checks. Whole-object kind repairs keep IDs and unaffected fields. Equation edits must retain mathematical tokens. Model parameters and executable expressions stay protected. Planning still has three calls, 150 seconds for planning and validation, and 270 seconds overall.
 
-Native JSON mode is used for known direct OpenAI models on the official endpoint. Routed requests use JSON prompts so Nemotron Ultra, Nemotron Super and the Gemma fallback can receive the same request shape. Schema checking is mandatory for both modes. [AI SDK JSON output documentation](https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data) · [OpenAI structured output documentation](https://developers.openai.com/api/docs/guides/structured-outputs)
+Track first-pass acceptance, normalization, repair counts, and end-to-end success using the app's `Visualization generation metrics` entries. `Visualization plan validation` includes stage, outline, attempt, request, selected model, timing, issue paths, phases, and repair progress. `Visualization rendered` includes renderer timings. Renderer stdout also records job timing. The classroom reuses the existing authenticated status API after reload in the same browser tab. The app process holds job identities. An expired job or app restart can require a new attempt. Unsaved Pro mode previews and edits stay local to their editor session.
 
-Faculty see scene-level planning, validation, repair, renderer and timeout messages. Retry the failed Visualization from its classroom row. If Teaching Voice timing cannot be saved, the existing animation remains playable with adaptive pacing.
+Enable `MANIM_CAPTURE_REJECTED_PLANS=true` on the renderer for a diagnostic window. The private service stores at most eight captures per owner and 64 total, capped at 192 KiB each. They expire after 24 hours. App logs contain capture IDs, and authenticated `GET /diagnostics/<id>` returns a capture only with the matching `X-Manim-Owner` (SHA-256 of the authenticated user ID). Captures contain generated plans and validation results. Treat them as private course data. Provider credentials, documents, and Teaching Voice samples are outside the capture request.
 
-**Rebuild the Manim image.** The app requires validation protocol 2 and checks the renderer before calling a model. Keep the existing artifact volume, token and runtime settings. In the existing Sahaya checkout, update only the requested branch and renderer service:
+### Standalone university deployment
+
+**Rebuild the renderer.** From the HPC login shell, with the existing renderer and `openmaic-llm-test` tmux session running:
 
 ```bash
-git fetch origin
+cd /home/danish/projects/OpenMAIC-llm-test
+git fetch origin feat/manim-integration
 git switch feat/manim-integration
-git pull --ff-only origin feat/manim-integration
-docker compose --profile manim up -d --no-deps --build manim-renderer
-docker compose --profile manim ps manim-renderer
+git merge --ff-only origin/feat/manim-integration
+bash scripts/update-manim-hpc.sh
 ```
 
-For a host-run Next.js app, rebuild the two workspace packages from source even when package manifests and the lockfile are unchanged. `pnpm dev` and `pnpm build` now check the source fingerprint and compiled DSL exports. After the following commands, restart the existing Next.js process with its usual supervisor or command. For a host production build, run `pnpm build` before restarting.
+The script builds the workspace and image before stopping the renderer. It reuses the `sahaya-manim-hpc` artifact volume, existing private token, loopback port 8780, two CPUs, and 2 GiB memory. It checks authenticated protocol-3 readiness before restarting Next.js in its existing tmux pane on port 3003. The prior renderer stays available as a stopped container. Export `MANIM_CAPTURE_REJECTED_PLANS=true` before calling the script when captures are needed.
 
-```bash
-pnpm rebuild:workspace
-pnpm check:workspace-build
-```
-
-If the Next.js app runs under Compose, rebuild and recreate only its service. The app image builds the workspace packages from the copied sources before creating the production bundle.
-
-```bash
-docker compose --profile manim up -d --no-deps --build openmaic
-docker compose --profile manim ps openmaic manim-renderer
-```
-
-Return to the partial diffraction course and retry the failed scenes individually. The reduced-motion warning comes from Motion when the browser reports reduced motion, including when the preference is emulated in DevTools. Check `matchMedia('(prefers-reduced-motion: reduce)').matches` in the affected browser. The editor continues to honor that preference. [Motion reduced-motion warning documentation](https://motion.dev/troubleshooting/reduced-motion-disabled)
-
-### Diffraction smoke tests
-
-The three local clips were rendered at 1280×720 and 30 FPS. The intensity curve uses `sinc(pi*u)^2`, where `u = a sin(theta)/lambda` and the limiting central value is 1. The grating uses five equally weighted slits and a finite-slit envelope with slit width/spacing 0.24. The plot verifies the normalized array factor at the principal orders and the intervening cancellation points. These plans are labeled illustrative because they use the generic expression renderer. [Single-slit intensity and minima](https://openstax.org/books/university-physics-volume-3/pages/4-2-intensity-in-single-slit-diffraction) · [Diffraction grating orders](https://openstax.org/books/university-physics-volume-3/pages/4-4-diffraction-gratings)
-
-| Fixture | Duration | Local wall time |
-| --- | ---: | ---: |
-| Fraunhofer single-slit geometry | 8.20 s | 3.46 s |
-| Intensity distribution and minima | 6.30 s | 2.91 s |
-| Plane diffraction grating | 7.60 s | 2.99 s |
-
-Use `python demos.py /artifacts/diffraction --quality standard --only fraunhofer-slit diffraction-intensity plane-grating` in the renderer image to reproduce the clips.
-
-## Extending the renderer
-
-Add fields to the versioned schema and validate their bounds in `plan.py`. Add a factory to the object registry in `render.py` and describe the fields to the director in `lib/visualization/generate.ts`. For scientific models, compute testable values in `science.py` first. Expose those values through reusable objects and add numerical tests and a small real rendering fixture. Increment the compiler revision when outputs or cache semantics change.
-
-Custom Python execution is disabled. The configuration reports unavailable isolation if it is requested. An experimental path would require an independently verified per-job launcher with no network, GPU, secrets, voice data, host mounts, or other jobs' files. There is no Python submission or fallback execution endpoint in the structured service.
+Watch `docker logs -f sahaya-manim-hpc` and `tmux capture-pane -pt openmaic-llm-test -S -200`. On HPC, retry both diffraction scenes and reload while a render is active. Check the original outline order, active phase, MP4 and Teaching Voice playback, and previous-artifact retention if a regeneration fails. Compare the measured first-pass and end-to-end success rates using live provider activity.

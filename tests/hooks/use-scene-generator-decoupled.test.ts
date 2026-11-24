@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SceneOutline } from '@/lib/types/generation';
 import type { Scene } from '@/lib/types/stage';
+import type { SceneAttemptStatus } from '@/lib/generation/scene-attempt-status';
+import { writeSceneDispatch } from '@/lib/generation/scene-job-recovery';
 
 const mocks = vi.hoisted(() => ({
   stageState: null as unknown as ReturnType<typeof makeStageState>,
@@ -34,6 +36,11 @@ vi.mock('@/lib/store/stage', () => ({
   flushStageSave: () => mocks.stageState.saveToStorage(),
   useStageStore: {
     getState: () => mocks.stageState,
+    setState: (
+      update: (
+        state: ReturnType<typeof makeStageState>,
+      ) => Partial<ReturnType<typeof makeStageState>>,
+    ) => Object.assign(mocks.stageState, update(mocks.stageState)),
     subscribe: (listener: (state: ReturnType<typeof makeStageState>) => void) => {
       mocks.stageSubscribers.add(listener);
       return () => mocks.stageSubscribers.delete(listener);
@@ -114,6 +121,7 @@ function makeStageState() {
     scenes: [] as Scene[],
     currentSceneId: null as string | null,
     generatingOutlines: [] as SceneOutline[],
+    sceneAttempts: {} as Record<string, SceneAttemptStatus>,
     failedOutlines: [] as SceneOutline[],
     generationEpoch: 1,
     generationStatus: 'idle',
@@ -149,6 +157,8 @@ function makeStageState() {
     },
     bumpGenerationEpoch() {
       state.generationEpoch += 1;
+      state.sceneAttempts = {};
+      state.generatingOutlines = [];
     },
     retryFailedOutline(outlineId: string) {
       state.failedOutlines = state.failedOutlines.filter((outline) => outline.id !== outlineId);
@@ -231,6 +241,7 @@ describe('scene generator visual and narration pipelines', () => {
   const additionalRoots: Array<{ root: Root; container: HTMLDivElement }> = [];
 
   beforeEach(() => {
+    sessionStorage.clear();
     mocks.stageState = makeStageState();
     mocks.mediaGeneration.mockClear();
     mocks.audioPut.mockClear();
@@ -241,6 +252,40 @@ describe('scene generator visual and narration pipelines', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
+  });
+
+  it('reattaches to a retried job after hydration even when the old failure still exists', async () => {
+    const outline = { ...outlines[0], type: 'visualization' as const };
+    mocks.stageState.outlines = [outline];
+    mocks.stageState.failedOutlines = [outline];
+    writeSceneDispatch('stage-1', outline.id, {
+      attemptId: 'dispatch-1',
+      regeneration: true,
+      job: { jobId: 'existing-job', attemptId: 'server-attempt', generationVersion: 'version-1' },
+    });
+    let resolveReply!: (response: Response) => void;
+    const reply = new Promise<Response>((resolve) => {
+      resolveReply = resolve;
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/status?jobId=existing-job')) return reply;
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.useFakeTimers();
+    const { generator } = await mountGenerator(root);
+    const run = generator.generateRemaining({ stageInfo: { name: 'Recovery lesson' } });
+    expect(mocks.stageState.sceneAttempts[outline.id]).toMatchObject({ regeneration: true });
+    await generator.retrySingleOutline(outline.id);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/generate/scene-content/status?jobId=existing-job',
+    ]);
+    resolveReply(
+      new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } }),
+    );
+    await run;
+    expect(mocks.stageState.sceneAttempts[outline.id]).toMatchObject({ outcome: 'interrupted' });
   });
 
   afterEach(async () => {

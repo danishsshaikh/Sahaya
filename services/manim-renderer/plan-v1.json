@@ -121,7 +121,7 @@
     "range": {
       "type": "array",
       "minItems": 2,
-      "maxItems": 2,
+      "maxItems": 3,
       "items": { "$ref": "#/$defs/number" }
     },
     "camera": {
@@ -232,7 +232,22 @@
     "limits": {
       "operations": 96,
       "complexity": 85,
+      "axisIntervals": 40,
       "verticalCanvas": 3.8
+    },
+    "objectAliases": {
+      "Text": "text",
+      "MathTex": "equation",
+      "Dot": "dot",
+      "Line": "line",
+      "Arrow": "arrow",
+      "Circle": "circle",
+      "Rectangle": "rectangle",
+      "Polygon": "polygon",
+      "Axes": "axes",
+      "NumberPlane": "plane",
+      "ThreeDAxes": "axes3d",
+      "Sphere": "sphere"
     },
     "objects": {
       "text": {
@@ -361,6 +376,11 @@
       "int",
       "infty",
       "pi",
+      "lambda",
+      "ell",
+      "sigma",
+      "omega",
+      "varepsilon",
       "theta",
       "phi",
       "Delta",

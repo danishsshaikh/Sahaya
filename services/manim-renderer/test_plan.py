@@ -112,7 +112,9 @@ class LivePlanningRegressionTests(unittest.TestCase):
         plan["timeline"][0]["animations"][0]["object"] = "unknownObject"
         with self.assertRaises(PlanValidationError) as result:
             validate(plan)
-        self.assertEqual(result.exception.issues[0]["path"], ["timeline", 0, "animations", 0, "object"])
+        self.assertEqual({tuple(entry["path"]) for entry in result.exception.issues}, {
+            ("timeline", 0, "animations", 0, "object"), ("objects", 2, "axes"),
+        })
         plan["timeline"][0]["animations"][0]["object"] = "heading"
         with self.assertRaises(PlanValidationError) as result:
             validate(plan)
@@ -122,6 +124,42 @@ class LivePlanningRegressionTests(unittest.TestCase):
 
     def test_expression_guidance_matches_supported_functions(self):
         self.assertEqual(set(CONTRACT["expressionFunctions"]), set(FUNCTIONS))
+
+    def test_collects_independent_equation_expression_and_model_errors_with_bad_kind(self):
+        plan = demos()["derivative"]
+        plan["objects"][0]["kind"] = "unknownKind"
+        plan["objects"][2]["expression"] = "unknown(x)"
+        plan["objects"].append({"id": "equation", "kind": "equation",
+                                "text": r"\text{arbitrary}", "points": [[0, 0], [1, 1]],
+                                "font_size": 40})
+        plan["model"]["expression"] = "abs(x)"
+        with self.assertRaises(PlanValidationError) as result:
+            validate(plan)
+        by_path = {tuple(entry["path"]): entry for entry in result.exception.issues}
+        self.assertEqual(by_path[("objects", 0, "kind")]["code"], "enum")
+        self.assertEqual(by_path[("objects", 2, "expression")]["code"], "expression")
+        equation = len(plan["objects"]) - 1
+        self.assertEqual(by_path[("objects", equation, "text")]["code"], "equation")
+        for field in ("points", "font_size"):
+            self.assertEqual(by_path[("objects", equation, field)]["code"], "unsupportedField")
+        self.assertEqual(by_path[("model", "expression")]["code"], "scientific")
+        self.assertIn("kind-specific properties", result.exception.blocked)
+
+    def test_tick_spacing_kept_separate_from_plot_domain(self):
+        plan = demos()["derivative"]
+        axes = next(obj for obj in plan["objects"] if obj["kind"] == "axes")
+        graph = next(obj for obj in plan["objects"] if obj["kind"] == "graph")
+        axes["xRange"] = [-3, 3, 0.5]
+        axes["yRange"] = [-4, 9, 1]
+        validate(plan)
+        graph["xRange"] = [-3, 3, 0.5]
+        with self.assertRaisesRegex(PlanValidationError, "plot domain"):
+            validate(plan)
+        del graph["xRange"]
+        for step in (0, -1, 0.01, 10):
+            axes["xRange"][2] = step
+            with self.assertRaisesRegex(PlanValidationError, "positive tick interval"):
+                validate(plan)
 
     def test_diffraction_intensity_and_five_slit_factor(self):
         intensity = expression(SLIT_INTENSITY)

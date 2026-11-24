@@ -16,7 +16,8 @@ import {
   PLAN_GUIDANCE,
   applyPlanRepair,
   facultyIssueLocation,
-  normalizePlan,
+  compilePlan,
+  operatorIssueLocation,
   parsePlanObject,
   repairableIssue,
   type Plan,
@@ -57,7 +58,16 @@ type Context = {
   signal?: AbortSignal;
   revision?: VisualizationRevision;
   onProgress?: (phase: string, position?: number) => void;
+  trace?: { stageId: string; attemptId?: string; requestId: string; model: string };
 };
+
+const REPAIR = `Repair the Sahaya visualization draft. Return only {"edits":[{"op":"replace","path":["objects",1,"size"],"value":1.8}]}.
+Use exact issue paths. Add required fields, remove unsupported fields (omit value), and replace invalid values. For an invalid kind, replace that entire object at ["objects",index] using a supported kind and only its compatible properties. Keep its ID and all compatible unaffected fields. Keep the scientific model, expressions, sources and mathematics intact. Use the reported reason and constraints to address all independently repairable issues in this pass.
+${PLAN_GUIDANCE}`;
+
+function issueKey(issue: PlanIssue) {
+  return JSON.stringify([issue.path, issue.code, issue.message, issue.limit]);
+}
 
 export async function generateVisualization(context: Context): Promise<VisualizationContent> {
   const { outline, onProgress } = context;
@@ -102,8 +112,15 @@ export async function generateVisualization(context: Context): Promise<Visualiza
   let issues: PlanIssue[] = [];
   let phase: 'planning' | 'schema' | 'repair' | 'render' = 'planning';
   let planningMs = 0;
+  let repairMs = 0;
   let admissionMs = 0;
   let acceptedPlan: Record<string, unknown> | undefined;
+  const trace = { ...context.trace, outlineId: outline.id };
+  let calls = 0;
+  let repairCalls = 0;
+  let normalized = false;
+  let accepted = false;
+  let rejectedByRenderer = 0;
   try {
     let sourcePlan: Record<string, unknown> | undefined;
     let fixedModel: Record<string, unknown> | undefined;
@@ -167,14 +184,18 @@ export async function generateVisualization(context: Context): Promise<Visualiza
       ? `${prompt}
 Recompose for this fixed scientific model. Update all labels, narration and ranges to match: ${JSON.stringify(fixedModel)}.`
       : prompt;
-    const admit = async (candidate: Plan) => {
+    const admit = async (candidate: Plan, repairing: boolean) => {
       onProgress?.('validating');
       const admissionStarted = Date.now();
       try {
         job = await readRenderJob(
           await rendererFetch(context.ownerId, '/jobs', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(repairing && { 'X-Manim-Candidate': 'repair' }),
+              ...(!sourcePlan && { 'X-Manim-Require-Narration': '1' }),
+            },
             body: JSON.stringify({
               plan: candidate,
               quality: configuredQuality(context.revision?.preview === true),
@@ -183,37 +204,47 @@ Recompose for this fixed scientific model. Update all labels, narration and rang
           }),
         );
         acceptedPlan = candidate;
-        return [];
+        return { issues: [], diagnosticId: job.diagnosticId };
       } catch (error) {
         if (!(error instanceof RendererError) || error.status !== 422) throw error;
-        return error.issues.length
-          ? error.issues
-          : [{ path: [], code: 'constraints', message: 'Plan violates renderer constraints.' }];
+        rejectedByRenderer++;
+        return {
+          ...error.validation,
+          issues: error.issues.length
+            ? error.issues
+            : [{ path: [], code: 'constraints', message: 'Plan violates renderer constraints.' }],
+        };
       } finally {
         admissionMs += Date.now() - admissionStarted;
       }
     };
 
     let invalidJson = false;
-    let patchRejected = false;
+    let feedback: string | undefined;
+    const seenDrafts = new Set<string>();
+    const seenIssueSets = new Set<string>();
     // Three model calls total, including any JSON-format retry. An admitted plan
     // is submitted only once. A stored plan revision never calls a model.
     for (let attempt = 0; attempt < (sourcePlan ? 1 : 3); attempt++) {
       planningSignal.throwIfAborted();
+      const previousPlan = plan;
+      const previousIssues = issues;
+      const repairing = !sourcePlan && !!plan;
+      let actions: string[] = [];
+      let modelMs = 0;
       if (!sourcePlan) {
-        const repairing = !!plan;
         phase = repairing ? 'repair' : 'planning';
         onProgress?.(repairing ? 'repairing' : 'planning');
         const planningStarted = Date.now();
+        calls++;
+        if (repairing) repairCalls++;
         const response = repairing
           ? await context.aiCall(
-              'Repair the Sahaya visualization draft. Return only a JSON patch object, for example {"edits":[{"op":"replace","path":["objects",1,"size"],"value":1.8}]}. Use only exact issue paths. Use add for required fields, remove for unsupported fields (omit value), and replace otherwise. Preserve all other values and the existing sequence. For text and equations, size is the Manim font size divided by 10. Geometry size uses canvas units. Preserve scientific parameters, model sources, and expressions.',
+              REPAIR,
               JSON.stringify({
                 draft: plan,
                 issues: issues.filter(repairableIssue),
-                ...(patchRejected && {
-                  feedback: 'The previous patch did not use the exact paths and operations.',
-                }),
+                feedback,
               }),
               planningSignal,
             )
@@ -225,59 +256,118 @@ Recompose for this fixed scientific model. Update all labels, narration and rang
                   : ''),
               planningSignal,
             );
-        planningMs += Date.now() - planningStarted;
+        modelMs = Date.now() - planningStarted;
+        if (repairing) repairMs += modelMs;
+        else planningMs += modelMs;
         planningSignal.throwIfAborted();
         const proposal = parsePlanObject(response);
         if (!proposal) {
           invalidJson = true;
-          patchRejected = repairing;
+          feedback = 'The previous response was not a complete JSON patch.';
+          log.info('Visualization draft skipped', {
+            ...trace,
+            attempt: calls,
+            phase,
+            reason: 'invalidJson',
+            modelMs,
+          });
           continue;
         }
+        let candidate: Plan;
         if (repairing && plan) {
           const revised = applyPlanRepair(plan, proposal, issues);
           if (!revised) {
-            patchRejected = true;
+            feedback =
+              'The previous patch used invalid paths, operations or dependent object fields.';
+            log.info('Visualization draft skipped', {
+              ...trace,
+              attempt: calls,
+              phase,
+              reason: 'invalidPatch',
+              modelMs,
+            });
             continue;
           }
-          plan = revised;
-          patchRejected = false;
+          candidate = revised;
         } else {
-          plan = normalizePlan(proposal);
-          if (fixedModel) plan.model = fixedModel;
+          candidate = proposal;
         }
+        const compiled = compilePlan(candidate);
+        actions = compiled.actions;
+        if (fixedModel) compiled.plan.model = fixedModel;
+        const fingerprint = JSON.stringify(compiled.plan);
+        if (repairing && seenDrafts.has(fingerprint)) {
+          feedback =
+            'The previous edits did not change the compiled draft. Apply a different correction.';
+          log.info('Visualization draft skipped', {
+            ...trace,
+            attempt: calls,
+            phase,
+            reason: 'noChange',
+            modelMs,
+            actions,
+          });
+          continue;
+        }
+        seenDrafts.add(fingerprint);
+        if (actions.some((action) => action !== 'setMetadata')) normalized = true;
+        plan = compiled.plan;
       }
       if (!plan) continue;
       if (phase !== 'repair') phase = 'schema';
-      const beats = plan.timeline;
-      if (
-        !sourcePlan &&
-        Array.isArray(beats) &&
-        beats.length &&
-        beats.every((beat) => beat && typeof beat === 'object' && !Array.isArray(beat)) &&
-        !beats.some((beat) => typeof beat.narration === 'string' && beat.narration.trim()) &&
-        !Object.hasOwn(beats[0], 'narration')
-      ) {
-        issues = [
-          {
-            path: ['timeline', 0, 'narration'],
-            code: 'required',
-            message: 'Add one short spoken cue.',
-          },
-        ];
-      } else {
-        issues = await admit(plan);
-      }
-      if (job) break;
-      log.info('Visualization plan rejected', {
-        outlineId: outline.id,
+      const validationStarted = Date.now();
+      const result = await admit(plan, repairing);
+      issues = result.issues;
+      const oldKeys = new Set(previousIssues.map(issueKey));
+      const repeated = issues.filter((issue) => oldKeys.has(issueKey(issue))).length;
+      const introduced = repairing ? issues.length - repeated : 0;
+      const resolved = repairing ? oldKeys.size - repeated : 0;
+      const issueSet = JSON.stringify(issues.map(issueKey).sort());
+      const cycled = issues.length > 0 && seenIssueSets.has(issueSet);
+      seenIssueSets.add(issueSet);
+      log.info('Visualization plan validation', {
+        ...trace,
         attempt: attempt + 1,
+        phase: 'validation',
+        accepted: !!job,
+        modelMs,
+        validationMs: Date.now() - validationStarted,
+        actions,
+        repeated,
+        introduced,
+        resolved,
+        cycled,
+        blocked: result.blocked,
+        truncated: result.truncated,
+        diagnosticId: result.diagnosticId,
         issues: issues.map((issue) => ({
-          path: facultyIssueLocation(issue.path),
+          path: operatorIssueLocation(issue.path),
+          phase: issue.phase,
           code: issue.code,
+          reason: issue.message,
+          expected: issue.allowed,
           limit: issue.limit,
           ...(typeof issue.value === 'number' && { value: issue.value }),
         })),
       });
+      if (job) break;
+      // Same-field changes can refine a bound. Regressions on other fields
+      // and patches that leave every diagnostic unchanged keep the prior draft.
+      const oldPaths = new Set(previousIssues.map((issue) => JSON.stringify(issue.path)));
+      const regressed =
+        repairing &&
+        issues.some(
+          (issue) => !oldKeys.has(issueKey(issue)) && !oldPaths.has(JSON.stringify(issue.path)),
+        );
+      if (repairing && (regressed || cycled || (!resolved && !introduced))) {
+        feedback = regressed
+          ? 'The previous patch introduced errors on other fields. The draft was kept unchanged.'
+          : 'The previous patch left the same validation issues. The draft was kept unchanged.';
+        plan = previousPlan;
+        issues = previousIssues;
+      } else {
+        feedback = undefined;
+      }
       if (sourcePlan || !issues.some(repairableIssue)) break;
     }
     if (!job) {
@@ -315,10 +405,9 @@ Recompose for this fixed scientific model. Update all labels, narration and rang
       );
     }
     const artifact = job.artifact;
+    accepted = true;
     log.info('Visualization rendered', {
-      planningMs,
-      admissionMs,
-      totalMs: Date.now() - started,
+      ...trace,
       timings: 'timings' in artifact ? artifact.timings : undefined,
     });
     const model = acceptedPlan?.model as VisualizationContent['model'];
@@ -345,9 +434,22 @@ Recompose for this fixed scientific model. Update all labels, narration and rang
               : phase === 'schema'
                 ? 'VISUALIZATION_SCHEMA'
                 : 'VISUALIZATION_PLANNING';
-    log.warn('Visualization generation stopped', { outlineId: outline.id, phase, code });
+    log.warn('Visualization generation stopped', { ...trace, phase, code });
     throw new VisualizationFailure(code);
   } finally {
+    log.info('Visualization generation metrics', {
+      ...trace,
+      calls,
+      repairCalls,
+      normalized,
+      firstPassAccepted: rejectedByRenderer === 0 && calls === 1 && !!acceptedPlan,
+      rejectedByRenderer,
+      accepted,
+      planningMs,
+      repairMs,
+      admissionMs,
+      totalMs: Date.now() - started,
+    });
     if (
       renderJobId &&
       (job?.status === 'queued' || job?.status === 'rendering' || job?.status === 'processing')

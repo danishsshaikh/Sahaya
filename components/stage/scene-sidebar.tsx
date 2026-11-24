@@ -11,7 +11,7 @@ import {
   BookOpen,
   Globe,
   AlertCircle,
-  RefreshCw,
+  LoaderCircle,
   Trophy,
   Play,
 } from 'lucide-react';
@@ -26,7 +26,8 @@ import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { BrandWordmark } from '@/components/branding/brand-wordmark';
 import { SceneThumbnailContent } from './scene-thumbnail-content';
 import { filterEnabledScenes } from '@/lib/config/feature-flags';
-import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
+import { classroomSceneRows, selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
+import { sceneAttemptLabel } from '@/lib/generation/scene-attempt-status';
 
 interface SceneSidebarProps {
   readonly collapsed: boolean;
@@ -49,43 +50,34 @@ export function SceneSidebar({
 }: SceneSidebarProps) {
   const { t } = useI18n();
   const router = useRouter();
-  const {
-    scenes,
-    outlines,
-    currentSceneId,
-    setCurrentSceneId,
-    generationStatus,
-    generationComplete,
-  } = useStageStore();
+  const { scenes, outlines, currentSceneId, setCurrentSceneId, sceneAttempts, generationComplete } =
+    useStageStore();
   const failedOutlines = useStageStore.use.failedOutlines();
   const viewportSize = useCanvasStore.use.viewportSize();
   const viewportRatio = useCanvasStore.use.viewportRatio();
   const visibleScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
   const pendingScene = useMemo(
     () =>
-      generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
-    [failedOutlines, generationComplete, outlines, scenes],
+      generationComplete
+        ? null
+        : selectNextRecoverableOutline(outlines, scenes, failedOutlines, sceneAttempts),
+    [failedOutlines, generationComplete, outlines, scenes, sceneAttempts],
   );
 
-  const [retryingOutlineId, setRetryingOutlineId] = useState<string | null>(null);
-
-  const handleRetryOutline = async (outlineId: string) => {
-    if (!onRetryOutline) return;
-    setRetryingOutlineId(outlineId);
-    try {
-      await onRetryOutline(outlineId);
-    } finally {
-      setRetryingOutlineId(null);
-    }
-  };
+  const rows = useMemo(() => {
+    const visibleIds = new Set(visibleScenes.map((scene) => scene.id));
+    return classroomSceneRows(outlines, scenes, generationComplete).filter(
+      ({ scene }) => !scene || visibleIds.has(scene.id),
+    );
+  }, [outlines, scenes, generationComplete, visibleScenes]);
 
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
-  const isDraggingRef = useRef(false);
+  const [isDragging, setDragging] = useState(false);
 
   const handleDragStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      isDraggingRef.current = true;
+      setDragging(true);
       const startX = e.clientX;
       const startWidth = sidebarWidth;
 
@@ -96,7 +88,7 @@ export function SceneSidebar({
       };
 
       const handleMouseUp = () => {
-        isDraggingRef.current = false;
+        setDragging(false);
         document.removeEventListener('mousemove', handleMouseMove);
         document.removeEventListener('mouseup', handleMouseUp);
         document.body.style.cursor = '';
@@ -128,7 +120,7 @@ export function SceneSidebar({
     <div
       style={{
         width: displayWidth,
-        transition: isDraggingRef.current ? 'none' : 'width 0.3s ease',
+        transition: isDragging ? 'none' : 'width 0.3s ease',
       }}
       className="relative z-20 flex shrink-0 flex-col overflow-visible border-r border-sidebar-border bg-sidebar/90 shadow-[2px_0_28px_rgb(var(--brand-shadow)/0.05)] backdrop-blur-xl"
     >
@@ -165,7 +157,83 @@ export function SceneSidebar({
           data-testid="scene-list"
           className="flex-1 overflow-y-auto overflow-x-hidden p-2 space-y-2 scrollbar-hide pt-1"
         >
-          {visibleScenes.map((scene, index) => {
+          {rows.map(({ id, scene, outline }, index) => {
+            const identity = outline?.id ?? scene?.outlineId ?? scene?.id ?? '';
+            const attempt = sceneAttempts[identity] ?? (scene && sceneAttempts[scene.id]);
+            const narrating =
+              scene?.narrationStatus === 'running' || scene?.narrationStatus === 'pending';
+            const active = attempt ? !attempt.outcome : narrating;
+            const failedOutline = active
+              ? undefined
+              : failedOutlines.find((item) => item.id === identity);
+            const descriptor = outline ?? scene;
+            if (!descriptor) return null;
+            const status = attempt
+              ? sceneAttemptLabel(descriptor.type, attempt)
+              : narrating
+                ? 'Preparing narration'
+                : failedOutline
+                  ? t('stage.generationFailed')
+                  : 'Waiting in queue';
+            const detail = failedOutline?.visualizationFailure
+              ? VISUALIZATION_FAILURES[failedOutline.visualizationFailure]
+              : undefined;
+            const statusText = (
+              <div
+                role="status"
+                className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground"
+              >
+                {active && (
+                  <LoaderCircle
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 shrink-0 motion-safe:animate-spin"
+                  />
+                )}
+                <span>{status}</span>
+              </div>
+            );
+            if (!scene) {
+              const isPending = !failedOutline && outline?.id === pendingScene?.outline.id;
+              return (
+                <div
+                  key={id}
+                  data-testid="scene-item"
+                  data-outline-id={identity}
+                  className="rounded-lg border border-sidebar-border p-2"
+                >
+                  {isPending ? (
+                    <button
+                      type="button"
+                      className="block w-full truncate text-left text-xs font-bold"
+                      onClick={() =>
+                        onSceneSelect
+                          ? onSceneSelect(PENDING_SCENE_ID)
+                          : setCurrentSceneId(PENDING_SCENE_ID)
+                      }
+                    >
+                      <span className="mr-2">{index + 1}</span>
+                      <span data-testid="scene-title">{descriptor.title}</span>
+                    </button>
+                  ) : (
+                    <p className="truncate text-xs font-bold">
+                      <span className="mr-2">{index + 1}</span>
+                      <span data-testid="scene-title">{descriptor.title}</span>
+                    </p>
+                  )}
+                  {statusText}
+                  {detail && <p className="mt-1 text-[11px] text-muted-foreground">{detail}</p>}
+                  {failedOutline && onRetryOutline && (
+                    <button
+                      type="button"
+                      className="mt-1 rounded px-1 py-1 text-xs font-medium text-red-600 dark:text-red-400"
+                      onClick={() => void onRetryOutline(identity)}
+                    >
+                      {t('generation.retryScene')}
+                    </button>
+                  )}
+                </div>
+              );
+            }
             const isActive = currentSceneId === scene.id;
             const Icon = getSceneTypeIcon(scene.type);
             const isSlide = scene.type === 'slide';
@@ -175,8 +243,9 @@ export function SceneSidebar({
 
             return (
               <div
-                key={scene.id}
+                key={id}
                 data-testid="scene-item"
+                data-outline-id={identity}
                 onClick={() => {
                   if (onSceneSelect) {
                     onSceneSelect(scene.id);
@@ -369,166 +438,13 @@ export function SceneSidebar({
                     )}
                   </div>
                 </div>
+                {(attempt || narrating) && statusText}
+                {attempt?.outcome && (
+                  <p className="px-1 text-[11px] text-muted-foreground">Open Edit to retry.</p>
+                )}
               </div>
             );
           })}
-
-          {failedOutlines
-            .filter(
-              (outline) =>
-                outline.type === 'visualization' && outline.id !== pendingScene?.outline.id,
-            )
-            .map((outline) => (
-              <div
-                key={outline.id}
-                className="rounded-lg border border-red-200 p-2 text-xs dark:border-red-900"
-              >
-                <p className="font-medium">{outline.title}</p>
-                <p className="mt-1 text-muted-foreground">
-                  {outline.visualizationFailure
-                    ? VISUALIZATION_FAILURES[outline.visualizationFailure]
-                    : 'The visualization could not be generated.'}
-                </p>
-                {onRetryOutline && (
-                  <button
-                    type="button"
-                    className="mt-1 rounded px-1 py-1 font-medium text-red-600 disabled:opacity-50 dark:text-red-400"
-                    disabled={retryingOutlineId !== null}
-                    onClick={() => void handleRetryOutline(outline.id)}
-                  >
-                    {retryingOutlineId === outline.id
-                      ? t('generation.retryingScene')
-                      : t('generation.retryScene')}
-                  </button>
-                )}
-              </div>
-            ))}
-
-          {/* Single placeholder for the next generating page (clickable) */}
-          {pendingScene &&
-            (() => {
-              const { outline, failed: isFailed } = pendingScene;
-              const isRetrying = retryingOutlineId === outline.id;
-              const isPaused = generationStatus === 'paused';
-              const isActive = currentSceneId === PENDING_SCENE_ID;
-
-              return (
-                <div
-                  key={`generating-${outline.id}`}
-                  onClick={() => {
-                    if (isFailed) return;
-                    if (onSceneSelect) {
-                      onSceneSelect(PENDING_SCENE_ID);
-                    } else {
-                      setCurrentSceneId(PENDING_SCENE_ID);
-                    }
-                  }}
-                  className={cn(
-                    'group relative rounded-lg flex flex-col gap-1 p-1.5 transition-all duration-200',
-                    isFailed
-                      ? 'opacity-100 cursor-default'
-                      : 'cursor-pointer hover:bg-sidebar-accent/70',
-                    !isFailed && !isActive && 'opacity-60',
-                    isActive && !isFailed && 'bg-primary/10 ring-1 ring-primary/25 opacity-100',
-                  )}
-                >
-                  {/* Scene Header */}
-                  <div className="flex justify-between items-center px-2 pt-0.5">
-                    <div className="flex items-center gap-2 max-w-full">
-                      <span
-                        className={cn(
-                          'text-[10px] font-black w-4 h-4 rounded-full flex items-center justify-center shrink-0',
-                          isActive && !isFailed
-                            ? 'bg-primary text-primary-foreground shadow-sm shadow-primary/20'
-                            : 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500',
-                        )}
-                      >
-                        {outline.order}
-                      </span>
-                      <span
-                        className={cn(
-                          'text-xs font-bold truncate transition-colors',
-                          isActive && !isFailed
-                            ? 'text-primary'
-                            : isFailed
-                              ? 'text-gray-700 dark:text-gray-200'
-                              : 'text-gray-400 dark:text-gray-500',
-                        )}
-                      >
-                        {outline.title}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Skeleton Thumbnail */}
-                  <div
-                    className={cn(
-                      'relative aspect-video w-full rounded overflow-hidden ring-1',
-                      isFailed
-                        ? 'bg-red-50/30 dark:bg-red-950/10 ring-red-100 dark:ring-red-900/20'
-                        : 'bg-gray-100 dark:bg-gray-800 ring-black/5 dark:ring-white/5',
-                    )}
-                  >
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5">
-                      {isFailed ? (
-                        <div className="flex items-center gap-1 text-xs font-medium text-red-500/90 dark:text-red-400">
-                          {onRetryOutline ? (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRetryOutline(outline.id);
-                              }}
-                              disabled={retryingOutlineId !== null}
-                              className="p-1 -ml-1 rounded-md hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors active:scale-95 disabled:opacity-50 disabled:active:scale-100"
-                              title={t('generation.retryScene')}
-                            >
-                              <RefreshCw
-                                className={cn('w-3.5 h-3.5', isRetrying && 'animate-spin')}
-                              />
-                            </button>
-                          ) : (
-                            <AlertCircle className="w-3.5 h-3.5" />
-                          )}
-                          <span
-                            title={
-                              pendingScene.visualizationFailure &&
-                              VISUALIZATION_FAILURES[pendingScene.visualizationFailure]
-                            }
-                          >
-                            {isRetrying
-                              ? t('generation.retryingScene')
-                              : pendingScene.visualizationFailure
-                                ? 'Visualization needs a retry'
-                                : t('stage.generationFailed')}
-                          </span>
-                        </div>
-                      ) : (
-                        <>
-                          <div
-                            className={cn(
-                              'h-2 w-3/5 rounded bg-muted',
-                              !isPaused && 'animate-pulse',
-                            )}
-                          />
-                          <div
-                            className={cn(
-                              'h-1.5 w-2/5 rounded bg-muted',
-                              !isPaused && 'animate-pulse',
-                            )}
-                          />
-                          <span className="text-[9px] font-medium text-gray-400 dark:text-gray-500 mt-0.5">
-                            {isPaused ? t('stage.paused') : t('stage.generating')}
-                          </span>
-                        </>
-                      )}
-                    </div>
-                    {!isFailed && !isPaused && (
-                      <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/40 dark:via-white/10 to-transparent" />
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
 
           {/* Course-complete placeholder (shown when outline is exhausted) */}
           {isCourseComplete &&

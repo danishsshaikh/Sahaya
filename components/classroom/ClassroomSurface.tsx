@@ -27,7 +27,7 @@
  */
 
 import { Stage } from '@/components/stage';
-import { LessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
+import { ClassroomLessonGenerationProgress } from '@/components/generation/lesson-generation-progress';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -66,6 +66,7 @@ import {
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
 import type { LessonGenerationPhase, TeachingVoiceQueueProgress } from '@/lib/generation/progress';
 import { lessonGenerationEtaLabel } from '@/lib/generation/progress';
+import { readSceneDispatch } from '@/lib/generation/scene-job-recovery';
 import type { SceneOutline } from '@/lib/types/generation';
 
 const log = createLogger('Classroom');
@@ -453,7 +454,11 @@ export function ClassroomSurface({
     const failedIds = new Set(failedOutlines.map((outline) => outline.id));
     const hasPending =
       !generationComplete &&
-      outlines.some((outline) => !failedIds.has(outline.id) && !completedOrders.has(outline.order));
+      outlines.some(
+        (outline) =>
+          !completedOrders.has(outline.order) &&
+          (!failedIds.has(outline.id) || (stage && !!readSceneDispatch(stage.id, outline.id))),
+      );
 
     if (hasPending && stage) {
       generationStartedRef.current = true;
@@ -593,16 +598,7 @@ export function ClassroomSurface({
                 classroomId={classroomId}
                 onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
                 generationStatus={
-                  generationProgress ? (
-                    <LessonGenerationProgress
-                      sceneIndex={generationProgress.sceneIndex}
-                      totalScenes={generationProgress.totalScenes}
-                      phase={generationProgress.phase}
-                      sceneType={generationProgress.sceneType}
-                      etaLabel={generationProgress.etaLabel}
-                      teachingVoiceQueue={generationProgress.teachingVoiceQueue}
-                    />
-                  ) : undefined
+                  <ClassroomLessonGenerationProgress progress={generationProgress} />
                 }
               />
             </>

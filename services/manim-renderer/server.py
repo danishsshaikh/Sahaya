@@ -29,6 +29,10 @@ CAPACITY = max(CONCURRENCY, min(32, int(os.getenv("MANIM_QUEUE_CAPACITY", "8")))
 TIMEOUT = max(10, min(600, int(os.getenv("MANIM_RENDER_TIMEOUT_SECONDS", "120"))))
 QUOTA = int(os.getenv("MANIM_STORAGE_LIMIT_BYTES", str(10 * 1024 ** 3)))
 BODY_LIMIT = 96 * 1024
+DIAGNOSTICS = os.getenv("MANIM_CAPTURE_REJECTED_PLANS", "").lower() == "true"
+DIAGNOSTIC_TTL = 24 * 60 * 60
+DIAGNOSTIC_ROOT = ROOT / ".diagnostics"
+DIAGNOSTIC_LOCK = threading.Lock()
 HEX = re.compile(r"[a-f0-9]{64}")
 MEDIA = {"video.mp4": "video/mp4", "poster.jpg": "image/jpeg", "plan.json": "application/json"}
 LOCK = threading.RLock()
@@ -37,6 +41,68 @@ JOBS = {}
 ACTIVE = {}
 PENDING = []
 TERMINAL = {"completed", "failed", "cancelled"}
+
+
+def prune_diagnostics(owner=None):
+    now = time.time()
+    folders = [folder for folder in DIAGNOSTIC_ROOT.glob("*") if HEX.fullmatch(folder.name)]
+    entries = []
+    for folder in folders:
+        for file in folder.glob("*.json"):
+            if not HEX.fullmatch(file.stem):
+                continue
+            stamp = file.stat().st_mtime
+            if now - stamp >= DIAGNOSTIC_TTL:
+                file.unlink()
+            else:
+                entries.append((stamp, file))
+    entries.sort()
+    if owner:
+        owned = [file for _, file in entries if file.parent.name == owner]
+        for file in owned[:-7]:
+            file.unlink()
+        entries = [entry for entry in entries if entry[1].exists()]
+        for _, file in entries[:-63]:
+            file.unlink()
+    for folder in folders:
+        if not any(folder.iterdir()):
+            folder.rmdir()
+
+
+def diagnostic_cleanup():
+    while True:
+        with DIAGNOSTIC_LOCK:
+            try:
+                prune_diagnostics()
+            except OSError:
+                print("Manim diagnostic cleanup failed", file=sys.stderr)
+        time.sleep(600)
+
+
+def capture_diagnostic(owner, plan, kind, error=None):
+    if not DIAGNOSTICS:
+        return None
+    try:
+        payload = json.dumps({"plan": plan, "kind": kind,
+                              "status": "rejected" if error else "accepted",
+                              "issues": error.issues if error else [],
+                              "blocked": error.blocked if error else []},
+                             ensure_ascii=False, allow_nan=False).encode()
+        if len(payload) > 2 * BODY_LIMIT:
+            return None
+        with DIAGNOSTIC_LOCK:
+            prune_diagnostics(owner)
+            key = secrets.token_hex(32)
+            folder = DIAGNOSTIC_ROOT / owner
+            DIAGNOSTIC_ROOT.mkdir(mode=0o700, exist_ok=True)
+            folder.mkdir(mode=0o700, exist_ok=True)
+            with (folder / f"{key}.json").open("xb") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(payload)
+        return key
+    except (OSError, ValueError, RecursionError):
+        print("Manim diagnostic capture failed", file=sys.stderr)
+        return None
 
 
 @dataclass
@@ -130,7 +196,8 @@ def run(job, body):
         with LOCK:
             if job.cancelled:
                 return
-            used = sum(file.stat().st_size for file in ROOT.glob("*/*/*") if file.is_file())
+            used = sum(file.stat().st_size for file in ROOT.glob("*/*/*")
+                       if file.parent.parent != DIAGNOSTIC_ROOT and file.is_file())
             if used + needed > QUOTA:
                 raise ValueError("Visualization storage quota reached. Contact your administrator.")
             publish.mkdir(mode=0o700, parents=True)
@@ -157,9 +224,9 @@ def run(job, body):
                 ACTIVE.pop((job.owner, job.key), None)
 
 
-def submit(owner, plan, quality):
+def submit(owner, plan, quality, require_narration=False):
     validation_started = time.monotonic()
-    validate(plan, MAX_DURATION)
+    validate(plan, MAX_DURATION, require_narration=require_narration)
     body = json.dumps(plan, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     key = sha256(f"{VERSION}:{quality}:{QUALITIES[quality]}:{MAX_ARTIFACT}:".encode() + body).hexdigest()
     with LOCK:
@@ -209,6 +276,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/jobs":
             self.send_json(404, {"error": "Unknown renderer endpoint"})
             return
+        kind = "repair" if self.headers.get("X-Manim-Candidate") == "repair" else "draft"
         try:
             size = int(self.headers.get("Content-Length", 0))
             if not 0 < size <= BODY_LIMIT:
@@ -217,9 +285,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             if not isinstance(body, dict) or set(body) != {"plan", "quality"} or body["quality"] not in QUALITIES:
                 raise ValueError("Expected a visualization plan and supported quality")
-            result = submit(owner, body["plan"], body["quality"])
+            result = submit(owner, body["plan"], body["quality"], self.headers.get("X-Manim-Require-Narration") == "1")
         except PlanValidationError as error:
-            self.send_json(422, {"error": "Visualization plan validation failed", "issues": error.issues})
+            self.send_json(422, {"error": "Visualization plan validation failed", "issues": error.issues,
+                                 "blocked": error.blocked, "truncated": error.truncated,
+                                 "diagnosticId": capture_diagnostic(owner, body["plan"], kind, error)})
             return
         except (TypeError, ValueError, RecursionError):
             self.send_json(422, {"error": "Visualization plan is malformed or violates renderer constraints",
@@ -229,6 +299,8 @@ class Handler(BaseHTTPRequestHandler):
         if result is None:
             self.send_json(429, {"error": "Visualization queue is full. Try again shortly."})
         else:
+            if kind == "repair":
+                result["diagnosticId"] = capture_diagnostic(owner, body["plan"], kind)
             self.send_json(200 if result["status"] == "completed" else 202, result)
 
     def job(self, owner, cancel=False):
@@ -258,16 +330,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 2})
+            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 3})
             return
         owner = self.owner()
         if owner is None:
             return
         if self.path == "/ready":
-            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 2})
+            self.send_json(200, {"version": VERSION, "maxDuration": MAX_DURATION, "validationProtocol": 3})
             return
         if self.path.startswith("/jobs/"):
             self.job(owner)
+            return
+        if self.path.startswith("/diagnostics/"):
+            key = self.path.removeprefix("/diagnostics/")
+            with DIAGNOSTIC_LOCK:
+                file = DIAGNOSTIC_ROOT / owner / f"{key}.json" if DIAGNOSTICS and HEX.fullmatch(key) else None
+                try:
+                    payload = (json.loads(file.read_bytes()) if file and
+                               time.time() - file.stat().st_mtime < DIAGNOSTIC_TTL else None)
+                except FileNotFoundError:
+                    payload = None
+            self.send_json(200 if payload else 404, payload or {"error": "Diagnostic unavailable"})
             return
         match = re.fullmatch(r"/artifacts/([a-f0-9]{64})/(video\.mp4|poster\.jpg|plan\.json)", self.path)
         if match is None:
@@ -332,6 +415,8 @@ def main():
         probe.unlink()
     for abandoned in [*TMP.glob("[a-f0-9]" * 64), *ROOT.glob("*/." + "[a-f0-9]" * 64)]:
         shutil.rmtree(abandoned, ignore_errors=True)
+    # Existing captures age out even if capture is turned off.
+    threading.Thread(target=diagnostic_cleanup, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("MANIM_PORT", "8780"))), Handler)
 
     def shutdown(_signal, _frame):

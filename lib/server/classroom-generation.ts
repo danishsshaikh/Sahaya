@@ -678,6 +678,14 @@ export async function generateClassroom(
                   requirement: requirements.requirement,
                   language: languageDirective,
                   ownerId: input.ownerUserId,
+                  trace: {
+                    stageId,
+                    requestId: contentTiming.requestId,
+                    model:
+                      typeof contentCall.model === 'string'
+                        ? contentCall.model
+                        : contentCall.model.modelId,
+                  },
                   aiCall: contentCall.visualizationAiCall,
                 })
               : generateSceneContent(safeOutline, contentCall.aiCall, {

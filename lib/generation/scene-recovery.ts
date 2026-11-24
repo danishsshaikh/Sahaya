@@ -1,6 +1,7 @@
 import type { SceneOutline } from '@/lib/types/generation';
 import type { Scene } from '@/lib/types/stage';
 import type { VisualizationFailureCode } from '@/lib/visualization/failure';
+import type { SceneAttemptStatus } from './scene-attempt-status';
 
 export type FailedSceneOutline = SceneOutline & { visualizationFailure?: VisualizationFailureCode };
 
@@ -15,6 +16,7 @@ export function selectNextRecoverableOutline(
   outlines: readonly SceneOutline[],
   scenes: readonly Pick<Scene, 'order' | 'outlineId'>[],
   failedOutlines: readonly FailedSceneOutline[],
+  attempts: Readonly<Record<string, SceneAttemptStatus>> = {},
 ): RecoverableSceneOutline | null {
   const completedOutlineIds = new Set(
     scenes.flatMap((scene) => (scene.outlineId ? [scene.outlineId] : [])),
@@ -27,12 +29,41 @@ export function selectNextRecoverableOutline(
     )
     .sort((a, b) => a.order - b.order)[0];
   if (!outline) return null;
-  const failed = failedOutlines.find((candidate) => candidate.id === outline.id);
+  const attempt = attempts[outline.id];
+  const failed =
+    attempt && !attempt.outcome
+      ? undefined
+      : failedOutlines.find((candidate) => candidate.id === outline.id);
   return {
     outline,
     failed: !!failed,
     ...(failed?.visualizationFailure && { visualizationFailure: failed.visualizationFailure }),
   };
+}
+
+export function classroomSceneRows(
+  outlines: readonly SceneOutline[],
+  scenes: readonly Scene[],
+  generationComplete: boolean,
+) {
+  const remaining = new Set(scenes);
+  const rows: { id: string; order: number; scene?: Scene; outline?: SceneOutline }[] = [];
+  for (const outline of [...outlines].sort((a, b) => a.order - b.order)) {
+    const scene =
+      scenes.find((entry) => entry.outlineId === outline.id) ??
+      scenes.find((entry) => !entry.outlineId && entry.order === outline.order);
+    if (scene) remaining.delete(scene);
+    if (scene || !generationComplete) {
+      rows.push({
+        id: `outline:${outline.id}`,
+        order: generationComplete && scene ? scene.order : outline.order,
+        scene,
+        outline,
+      });
+    }
+  }
+  for (const scene of remaining) rows.push({ id: `scene:${scene.id}`, order: scene.order, scene });
+  return rows.sort((a, b) => a.order - b.order);
 }
 
 export function restorePersistedSceneRecovery(

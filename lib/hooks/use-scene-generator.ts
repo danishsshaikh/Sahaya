@@ -3,6 +3,12 @@
 import { isVisualizationFailure, VISUALIZATION_FAILURES } from '@/lib/visualization/failure';
 import { useCallback, useEffect, useRef } from 'react';
 import { flushStageSave, useStageStore } from '@/lib/store/stage';
+import { beginSceneAttempt } from '@/lib/generation/scene-attempt-status';
+import {
+  clearSceneDispatch,
+  readSceneDispatch,
+  writeSceneDispatch,
+} from '@/lib/generation/scene-job-recovery';
 import { isSceneEditLocked } from '@/lib/edit/regen-lock';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -271,7 +277,9 @@ async function pollSceneContentJob(
     return {
       success: false,
       error: initial.error || 'Scene content generation failed',
-      errorCode: initial.errorCode || 'GENERATION_FAILED',
+      errorCode:
+        initial.errorCode ||
+        (initial.status === 'cancelled' ? 'GENERATION_INTERRUPTED' : 'GENERATION_FAILED'),
       jobId: initial.jobId,
       status: initial.status,
       jobTerminal: true,
@@ -300,9 +308,23 @@ async function pollSceneContentJob(
     );
     const data = (await readJsonResponse(response)) as unknown as SceneContentResult;
     if (!response.ok) {
+      if (response.status === 404) {
+        return {
+          success: false,
+          error: 'The scene generation job expired. Retry to start again.',
+          errorCode: 'GENERATION_INTERRUPTED',
+          jobTerminal: true,
+          status: 'cancelled',
+        };
+      }
       throw createHttpError(response, data, 'Scene content job status request failed');
     }
-    if (data.stageId !== expected.stageId || data.outlineId !== expected.outlineId) {
+    if (
+      data.stageId !== expected.stageId ||
+      data.outlineId !== expected.outlineId ||
+      data.attemptId !== initial.attemptId ||
+      data.generationVersion !== initial.generationVersion
+    ) {
       return {
         success: false,
         error: 'Scene content job identity did not match the requested slide',
@@ -341,7 +363,9 @@ async function pollSceneContentJob(
       return {
         success: false,
         error: data.error || 'Scene content generation failed',
-        errorCode: data.errorCode || 'GENERATION_FAILED',
+        errorCode:
+          data.errorCode ||
+          (data.status === 'cancelled' ? 'GENERATION_INTERRUPTED' : 'GENERATION_FAILED'),
         jobId: initial.jobId,
         status: data.status,
         jobTerminal: true,
@@ -353,7 +377,7 @@ async function pollSceneContentJob(
   return {
     success: false,
     error: 'Scene content generation timed out. Please try again.',
-    errorCode: 'GENERATION_FAILED',
+    errorCode: 'GENERATION_INTERRUPTED',
     jobId: initial.jobId,
     status: initial.status,
     jobTerminal: true,
@@ -384,24 +408,38 @@ export async function fetchSceneContent(
   signal?: AbortSignal,
   retryOptions?: ClientRetryOptions<SceneContentResult>,
   onProgress?: (phase: string, queuePosition?: number) => void,
+  resume?: {
+    job?: { jobId: string; attemptId: string; generationVersion: string };
+    onJob?(job: { jobId: string; attemptId: string; generationVersion: string }): void;
+  },
 ): Promise<SceneContentResult> {
   const proposedAttemptId = params.attemptId ?? createSceneAttemptId();
   try {
     return await withGenerationRetry(
       async () => {
-        const response = await fetch('/api/generate/scene-content', {
-          method: 'POST',
-          headers: getApiHeaders(),
-          body: JSON.stringify(withThinkingConfig({ ...params, attemptId: proposedAttemptId })),
-          signal,
-        });
-
-        const data = await readJsonResponse(response);
-        if (!response.ok) {
-          throw createHttpError(response, data, 'Scene content request failed');
+        let result: SceneContentResult;
+        if (resume?.job) {
+          result = {
+            ...resume.job,
+            success: true,
+            async: true,
+            stageId: params.stageId,
+            outlineId: params.outline.id,
+            status: 'queued',
+          };
+        } else {
+          onProgress?.('generating');
+          const response = await fetch('/api/generate/scene-content', {
+            method: 'POST',
+            headers: getApiHeaders(),
+            body: JSON.stringify(withThinkingConfig({ ...params, attemptId: proposedAttemptId })),
+            signal,
+          });
+          const data = await readJsonResponse(response);
+          if (!response.ok) throw createHttpError(response, data, 'Scene content request failed');
+          result = data as unknown as SceneContentResult;
         }
 
-        const result = data as unknown as SceneContentResult;
         if (!result.attemptId || !result.generationVersion) {
           return {
             success: false,
@@ -421,6 +459,11 @@ export async function fetchSceneContent(
               jobTerminal: true,
             };
           }
+          resume?.onJob?.({
+            jobId: result.jobId,
+            attemptId: result.attemptId,
+            generationVersion: result.generationVersion,
+          });
           const cancel = () => {
             void fetch(
               `/api/generate/scene-content/status?jobId=${encodeURIComponent(result.jobId)}`,
@@ -463,6 +506,45 @@ export async function fetchSceneContent(
       ...errorMeta(error),
     };
   }
+}
+
+function trackClassroomScene(stageId: string, outline: SceneOutline, regeneration = false) {
+  const saved = readSceneDispatch(stageId, outline.id);
+  const dispatch = saved ?? { attemptId: createSceneAttemptId(), regeneration };
+  const status = beginSceneAttempt(
+    useStageStore,
+    stageId,
+    outline.id,
+    createSceneAttemptId(),
+    dispatch.regeneration,
+  );
+  if (!status) return;
+  writeSceneDispatch(stageId, outline.id, dispatch);
+  return {
+    ...status,
+    interrupt: () => status.finish('interrupted'),
+    fetch(params: Parameters<typeof fetchSceneContent>[0], signal: AbortSignal) {
+      return fetchSceneContent(
+        { ...params, attemptId: dispatch.attemptId },
+        signal,
+        undefined,
+        status.progress,
+        {
+          job: dispatch.job,
+          onJob(job) {
+            if (!status.current()) return;
+            dispatch.job = job;
+            writeSceneDispatch(stageId, outline.id, dispatch);
+          },
+        },
+      );
+    },
+    finish(outcome?: 'failed' | 'interrupted') {
+      if (!status.current()) return;
+      clearSceneDispatch(stageId, outline.id, dispatch.attemptId);
+      status.finish(outcome);
+    },
+  };
 }
 
 /**
@@ -1646,7 +1728,12 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       if (generatingRef.current) return;
       generatingRef.current = true;
       abortRef.current = false;
-      const removeGeneratingOutline = (outlineId: string) => {
+      const attempts = new Map<string, NonNullable<ReturnType<typeof trackClassroomScene>>>();
+      const removeGeneratingOutline = (outlineId: string, outcome?: 'failed' | 'interrupted') => {
+        const attempt = attempts.get(outlineId);
+        attempts.delete(outlineId);
+        if (!attempt?.current()) return;
+        attempt.finish(outcome);
         const current = store.getState().generatingOutlines;
         if (!current.some((o) => o.id === outlineId)) return;
         store.getState().setGeneratingOutlines(current.filter((o) => o.id !== outlineId));
@@ -1677,10 +1764,24 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       const completedOrders = new Set(scenes.map((s) => s.order));
       const failedIds = new Set(state.failedOutlines.map((outline) => outline.id));
       const pending = outlines
-        .filter((o) => !failedIds.has(o.id) && !completedOrders.has(o.order))
+        .filter(
+          (o) =>
+            !completedOrders.has(o.order) &&
+            (!state.sceneAttempts[o.id] || state.sceneAttempts[o.id].outcome) &&
+            (!failedIds.has(o.id) || !!readSceneDispatch(stage.id, o.id)),
+        )
         .sort((a, b) => a.order - b.order);
 
       if (pending.length === 0) {
+        if (Object.values(state.sceneAttempts).some((attempt) => !attempt.outcome)) {
+          generatingRef.current = false;
+          return;
+        }
+        if (state.failedOutlines.length > 0) {
+          store.getState().setGenerationStatus('paused');
+          generatingRef.current = false;
+          return;
+        }
         store.getState().setGenerationStatus('completed');
         store.getState().setGeneratingOutlines([]);
         store.getState().setGenerationComplete(true);
@@ -1761,6 +1862,13 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       // one-at-a-time dispatch order.
       try {
         const fetchContent = (outline: SceneOutline) => {
+          const attempt = trackClassroomScene(stage.id, outline);
+          if (!attempt)
+            return Promise.resolve<SceneContentResult>({
+              success: false,
+              errorCode: 'GENERATION_ATTEMPT_INVALID',
+            });
+          attempts.set(outline.id, attempt);
           addGeneratingOutline(outline);
           traceSceneGeneration('scene-attempt-dispatch', {
             stageId: stage.id,
@@ -1768,7 +1876,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             outlineId: outline.id,
             generationEpoch: startEpoch,
           });
-          return fetchSceneContent(
+          return attempt.fetch(
             {
               outline,
               allOutlines: outlines,
@@ -1818,7 +1926,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         let hadContentFailure = false;
         for (const outline of pending) {
           if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
-            store.getState().setGenerationStatus('paused');
+            if (store.getState().generationEpoch === startEpoch) {
+              store.getState().setGenerationStatus('paused');
+            }
             pausedByFailureOrAbort = true;
             break;
           }
@@ -1883,7 +1993,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               pausedByFailureOrAbort = true;
               break;
             }
-            if (contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) {
+            if (
+              !attempts.get(outline.id)?.current() ||
+              contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')
+            ) {
               removeGeneratingOutline(outline.id);
               pausedByFailureOrAbort = true;
               traceSceneGeneration('scene-attempt-stale-rejected', {
@@ -1903,7 +2016,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                   ? contentResult.errorCode
                   : undefined,
               );
-            removeGeneratingOutline(outline.id);
+            removeGeneratingOutline(
+              outline.id,
+              contentResult.errorCode === 'GENERATION_INTERRUPTED' ? 'interrupted' : 'failed',
+            );
             options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
             if (contentPromises) {
               // Parallel: surface the failure but keep going with the other scenes
@@ -1919,7 +2035,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           }
 
           if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
-            store.getState().setGenerationStatus('paused');
+            if (store.getState().generationEpoch === startEpoch) {
+              store.getState().setGenerationStatus('paused');
+            }
             pausedByFailureOrAbort = true;
             break;
           }
@@ -1933,6 +2051,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           });
 
           // Step 2: Generate actions + assemble scene
+          attempts.get(outline.id)?.progress('finalizing');
           options.onPhaseChange?.('actions', outline);
           const actionsStartedAt = Date.now();
           traceSceneGeneration('scene-actions-start', {
@@ -2004,7 +2123,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             // Content + actions are the visual completion boundary. Commit the
             // scene before narration so a queued or failed voice job cannot
             // hide a renderable slide or turn it into a failed outline.
-            if (store.getState().generationEpoch !== startEpoch) {
+            if (!attempts.get(outline.id)?.current() || signal.aborted) {
               pausedByFailureOrAbort = true;
               break;
             }
@@ -2015,6 +2134,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               outlineId: outline.id,
               sceneId: scene.id,
             });
+            if (!attempts.get(outline.id)?.current() || signal.aborted) {
+              pausedByFailureOrAbort = true;
+              break;
+            }
             if (!commitResult.success || !commitResult.accepted) {
               removeGeneratingOutline(outline.id);
               pausedByFailureOrAbort = true;
@@ -2028,7 +2151,6 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               });
               break;
             }
-            removeGeneratingOutline(outline.id);
             const existingScene = store
               .getState()
               .scenes.find(
@@ -2036,6 +2158,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                   candidate.outlineId === outline.id || candidate.order === outline.order,
               );
             if (!existingScene) useStageStore.getState().addScene(scene);
+            removeGeneratingOutline(outline.id);
             traceSceneGeneration('scene-complete', {
               stageId: stage.id,
               generationRunId,
@@ -2103,8 +2226,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               });
               break;
             }
+            if (!attempts.get(outline.id)?.current()) break;
             store.getState().addFailedOutline(outline);
-            removeGeneratingOutline(outline.id);
+            removeGeneratingOutline(outline.id, 'failed');
             options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
@@ -2140,7 +2264,9 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         // AbortError is expected when stop() is called — don't treat as failure
         if (isAbortError(err)) {
           log.info('Generation aborted');
-          store.getState().setGenerationStatus('paused');
+          if (store.getState().generationEpoch === startEpoch) {
+            store.getState().setGenerationStatus('paused');
+          }
           traceSceneGeneration('generation-aborted', {
             stageId: stage.id,
             generationRunId,
@@ -2150,6 +2276,21 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           throw err;
         }
       } finally {
+        if (attempts.size && store.getState().generationEpoch === startEpoch) {
+          // A batch stopped before it could consume these parallel results.
+          // Retain job identities so a retry can rejoin them.
+          for (const [outlineId, attempt] of attempts) {
+            if (!attempt.current()) continue;
+            const outline = outlines.find((item) => item.id === outlineId);
+            if (outline) store.getState().addFailedOutline(outline);
+            store
+              .getState()
+              .setGeneratingOutlines(
+                store.getState().generatingOutlines.filter((outline) => outline.id !== outlineId),
+              );
+            attempt.interrupt();
+          }
+        }
         generatingRef.current = false;
         fetchAbortRef.current = null;
       }
@@ -2179,20 +2320,15 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       if (!outline || !state.stage) return;
       // A reloaded course may have only failed outlines, so the automatic
       // batch never initialized generation parameters in this component.
-      const params: GenerationParams | undefined =
-        lastParamsRef.current ??
-        (outline.type === 'visualization'
-          ? {
-              stageInfo: {
-                name: state.stage.name,
-                description: state.stage.description,
-                style: state.stage.style,
-              },
-              requirement: state.stage.description || state.stage.name,
-              languageDirective: state.stage.languageDirective,
-            }
-          : undefined);
-      if (!params) return;
+      const params: GenerationParams = lastParamsRef.current ?? {
+        stageInfo: {
+          name: state.stage.name,
+          description: state.stage.description,
+          style: state.stage.style,
+        },
+        requirement: state.stage.description || state.stage.name,
+        languageDirective: state.stage.languageDirective,
+      };
       // A whole-outline retry runs content, actions and narration on the
       // operator's keys. The surfaces already withhold the affordance when
       // generation is not permitted; refusing here keeps the precondition and
@@ -2200,7 +2336,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       if (!mayGenerateForStage(state.stage.id)) return;
       const retryEpoch = state.generationEpoch;
       const retryKey = `${state.stage.id}:${retryEpoch}:${outline.id}`;
-      if (retryTasksRef.current.has(retryKey)) return;
+      if (
+        retryTasksRef.current.has(retryKey) ||
+        state.generatingOutlines.some((item) => item.id === outlineId)
+      )
+        return;
 
       // Regen-lock (#571): never silently replace a scene that is open in
       // edit mode. Failed outlines have no completed scene yet so this is
@@ -2218,7 +2358,10 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         return;
       }
 
+      const attempt = trackClassroomScene(state.stage.id, outline, true);
+      if (!attempt) return;
       const removeGeneratingOutline = () => {
+        if (!attempt.current()) return;
         const current = store.getState().generatingOutlines;
         if (!current.some((o) => o.id === outlineId)) return;
         store.getState().setGeneratingOutlines(current.filter((o) => o.id !== outlineId));
@@ -2236,10 +2379,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
       retryTasksRef.current.set(retryKey, abortController);
       const signal = abortController.signal;
       let committedSceneId: string | null = null;
+      let outcome: 'failed' | 'interrupted' | undefined;
 
       try {
         // Step 1: Content
-        const contentResult = await fetchSceneContent(
+        const contentResult = await attempt.fetch(
           {
             outline,
             allOutlines: state.outlines,
@@ -2255,9 +2399,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           },
           signal,
         );
+        if (!attempt.current() || signal.aborted) return;
 
         if (!contentResult.success || !contentResult.content) {
           if (contentResult.errorCode?.startsWith('GENERATION_ATTEMPT_')) return;
+          outcome = contentResult.errorCode === 'GENERATION_INTERRUPTED' ? 'interrupted' : 'failed';
           store
             .getState()
             .addFailedOutline(
@@ -2269,6 +2415,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         }
 
         // Step 2: Actions
+        attempt.progress('finalizing');
+        options.onPhaseChange?.('actions', outline);
         const sortedScenes = store
           .getState()
           .scenes.filter((scene) => scene.order < outline.order)
@@ -2299,6 +2447,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         const actionsIdentityMismatch =
           actionsResult.attemptId !== contentResult.attemptId ||
           actionsResult.generationVersion !== contentResult.generationVersion;
+        if (!attempt.current() || signal.aborted) return;
         if (!actionsResult.success || !actionsResult.scene || actionsIdentityMismatch) {
           if (
             actionsIdentityMismatch ||
@@ -2306,6 +2455,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           ) {
             return;
           }
+          outcome = 'failed';
           store.getState().addFailedOutline(outline);
           options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
           return;
@@ -2336,7 +2486,8 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           outlineId: outline.id,
           sceneId: scene.id,
         });
-        if (!commitResult.success || !commitResult.accepted) return;
+        if (!attempt.current() || signal.aborted || !commitResult.success || !commitResult.accepted)
+          return;
         removeGeneratingOutline();
         const existingScene = store
           .getState()
@@ -2388,20 +2539,22 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
           store.getState().setGenerationStatus('completed');
         }
       } catch (err) {
-        if (!isAbortError(err)) {
+        if (!isAbortError(err) && attempt.current()) {
           if (committedSceneId) {
             store.getState().updateScene(committedSceneId, narrationFailurePatch());
           } else {
+            outcome = 'failed';
             store.getState().addFailedOutline(outline);
           }
         }
       } finally {
-        if (!committedSceneId) {
+        if (!committedSceneId && attempt.current()) {
           removeGeneratingOutline();
           if (store.getState().generationEpoch === retryEpoch) {
             store.getState().setGenerationStatus('paused');
           }
         }
+        attempt.finish(outcome);
         if (retryTasksRef.current.get(retryKey) === abortController) {
           retryTasksRef.current.delete(retryKey);
         }

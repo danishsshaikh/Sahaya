@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from demos import demos
+from plan import validate
 
 
 @unittest.skipUnless(os.getenv("MANIM_REAL_TESTS") == "1", "enable actual Cairo tests with MANIM_REAL_TESTS=1")
@@ -42,6 +43,7 @@ class RendererServiceTests(unittest.TestCase):
     def start(self, data):
         env = {**os.environ, "MANIM_RENDERER_TOKEN": self.secret, "MANIM_PORT": "18780",
                "MANIM_QUEUE_CONCURRENCY": "1", "MANIM_QUEUE_CAPACITY": "2",
+               "MANIM_CAPTURE_REJECTED_PLANS": "true",
                "MANIM_ARTIFACT_DIR": str(data / "artifacts"), "MANIM_WORK_DIR": str(data / "jobs")}
         log = (data / "service.log").open("ab")
         process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("server.py"))],
@@ -80,11 +82,31 @@ class RendererServiceTests(unittest.TestCase):
                 self.assertEqual(issues[("engine",)]["code"], "required")
                 self.assertEqual(issues[("objects", 1, "size")]["value"], 18)
                 self.assertEqual(issues[("objects", 1, "size")]["limit"], 10)
+                key = refused["diagnosticId"]
+                self.assertEqual(self.request(f"/diagnostics/{key}", authenticated=False)[0], 401)
+                self.assertEqual(self.request(f"/diagnostics/{key}", owner=self.outsider)[0], 404)
+                status, captured = self.request(f"/diagnostics/{key}")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(captured)["plan"], bad_request["plan"])
 
-                request = {"plan": demos()["derivative"], "quality": "preview"}
-                status, payload = self.request("/jobs", method="POST", body=request)
+                fixtures = os.getenv("MANIM_COMPILED_FIXTURES_PATH")
+                plan = demos()["derivative"]
+                if fixtures:
+                    plans = json.loads(Path(fixtures).read_text())
+                    self.assertGreaterEqual(len(plans), 7)
+                    for candidate in plans:
+                        with self.subTest(candidate=candidate["title"]):
+                            validate(candidate, require_narration=True)
+                    plan = plans[0]
+                request = {"plan": plan, "quality": "preview"}
+                status, payload = self.request("/jobs", method="POST", body=request,
+                                               headers={"X-Manim-Candidate": "repair",
+                                                        "X-Manim-Require-Narration": "1"})
                 self.assertEqual(status, 202, payload)
                 job = json.loads(payload)
+                status, captured = self.request(f"/diagnostics/{job['diagnosticId']}")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(captured)["status"], "accepted")
                 path = f"/jobs/{job['id']}"
                 self.assertEqual(self.request(path, authenticated=False)[0], 401)
                 self.assertEqual(self.request(path, owner=self.outsider)[0], 404)
@@ -120,6 +142,7 @@ class RendererServiceTests(unittest.TestCase):
                 self.assertEqual((partial_status, len(partial)), (206, 32))
                 self.assertEqual(self.request(movie_path, headers={"Range": "bytes=9999999-"})[0], 416)
                 self.assertEqual(self.request(f"/artifacts/{key}/poster.jpg")[0], 200)
+                self.assertEqual(json.loads(self.request(f"/artifacts/{key}/plan.json")[1]), plan)
                 self.assertEqual(self.request(f"/artifacts/{key}/../metadata.json")[0], 404)
                 _, video = self.request(movie_path)
                 self.assertEqual(hashlib.sha256(video).hexdigest(), artifact["sha256"])

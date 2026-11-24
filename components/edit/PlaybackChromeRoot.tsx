@@ -88,7 +88,7 @@ import {
   type ActiveNarrationHighlight,
   type NarrationCue,
 } from '@/lib/playback/narration-cues';
-import { selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
+import { classroomSceneRows, selectNextRecoverableOutline } from '@/lib/generation/scene-recovery';
 
 type DraftElementReference = {
   reference: ElementReference;
@@ -165,6 +165,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       currentSceneId,
       setCurrentSceneId,
       generatingOutlines,
+      sceneAttempts,
       outlines,
     } = useStageStore();
     const failedOutlines = useStageStore.use.failedOutlines();
@@ -175,7 +176,15 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const piChatEnabled = isPiChatEnabled();
     const coursewareReferenceEnabled = isCoursewareReferenceEnabled();
     const currentSceneEnabled = currentScene ? isSceneEnabled(currentScene) : false;
-    const enabledScenes = useMemo(() => filterEnabledScenes(scenes), [scenes]);
+    const enabledScenes = useMemo(
+      () =>
+        filterEnabledScenes(
+          classroomSceneRows(outlines, scenes, generationComplete).flatMap((row) =>
+            row.scene ? [row.scene] : [],
+          ),
+        ),
+      [outlines, scenes, generationComplete],
+    );
     const [elementPickActive, setElementPickActiveState] = useState(false);
     const elementPickActiveRef = useRef(false);
     const setElementPickActive = useCallback((next: boolean | ((active: boolean) => boolean)) => {
@@ -1373,8 +1382,10 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
     const pendingScene = useMemo(
       () =>
-        generationComplete ? null : selectNextRecoverableOutline(outlines, scenes, failedOutlines),
-      [failedOutlines, generationComplete, outlines, scenes],
+        generationComplete
+          ? null
+          : selectNextRecoverableOutline(outlines, scenes, failedOutlines, sceneAttempts),
+      [failedOutlines, generationComplete, outlines, scenes, sceneAttempts],
     );
     const hasNextPending = pendingScene !== null;
     // True when every outline has materialized into a scene and nothing is

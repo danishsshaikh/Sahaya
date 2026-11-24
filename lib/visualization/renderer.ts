@@ -13,6 +13,9 @@ export interface RenderJob {
   error?: string;
   errorCode?: string;
   issues?: PlanIssue[];
+  blocked?: string[];
+  truncated?: boolean;
+  diagnosticId?: string;
 }
 
 export class RendererError extends Error {
@@ -20,6 +23,7 @@ export class RendererError extends Error {
     message: string,
     readonly status: number,
     readonly issues: PlanIssue[] = [],
+    readonly validation?: Pick<RenderJob, 'blocked' | 'truncated' | 'diagnosticId'>,
   ) {
     super(message);
   }
@@ -79,7 +83,7 @@ export function getVisualizationCapability() {
       });
       const health = response.ok ? await response.json() : null;
       if (typeof health?.version === 'string' && Number.isFinite(health.maxDuration)) {
-        if (health.validationProtocol !== 2) {
+        if (health.validationProtocol !== 3) {
           return {
             available: false,
             reason: 'Rebuild the Manim renderer image to enable visualization planning.',
@@ -144,7 +148,14 @@ export async function readRenderJob(response: Response): Promise<RenderJob> {
     throw new RendererError(
       payload?.error || 'The renderer rejected the visualization.',
       response.status,
-      Array.isArray(payload?.issues) ? payload.issues.slice(0, 12) : [],
+      Array.isArray(payload?.issues) ? payload.issues.slice(0, 24) : [],
+      payload
+        ? {
+            blocked: payload.blocked,
+            truncated: payload.truncated,
+            diagnosticId: payload.diagnosticId,
+          }
+        : undefined,
     );
   }
   if (

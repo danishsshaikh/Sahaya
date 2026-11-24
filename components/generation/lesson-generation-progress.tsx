@@ -9,6 +9,8 @@ import {
 } from '@/lib/generation/progress';
 import type { LessonGenerationPhase, TeachingVoiceQueueProgress } from '@/lib/generation/progress';
 import type { SceneOutline } from '@/lib/types/generation';
+import { useStageStore } from '@/lib/store/stage';
+import { sceneAttemptLabel } from '@/lib/generation/scene-attempt-status';
 import { cn } from '@/lib/utils';
 
 interface LessonGenerationProgressProps {
@@ -16,9 +18,59 @@ interface LessonGenerationProgressProps {
   readonly totalScenes: number;
   readonly phase: LessonGenerationPhase;
   readonly sceneType?: SceneOutline['type'];
+  readonly sceneStatus?: string;
   readonly etaLabel?: string;
   readonly teachingVoiceQueue?: TeachingVoiceQueueProgress | null;
   readonly defaultExpanded?: boolean;
+}
+
+export function ClassroomLessonGenerationProgress({
+  progress,
+}: {
+  progress: LessonGenerationProgressProps | null;
+}) {
+  const attempts = useStageStore((state) => state.sceneAttempts);
+  const outline = useStageStore(
+    (state) =>
+      state.outlines.find(
+        (item) => state.sceneAttempts[item.id] && !state.sceneAttempts[item.id].outcome,
+      ) ??
+      state.scenes.find((scene) => {
+        const attempt = state.sceneAttempts[scene.outlineId ?? scene.id];
+        return attempt && !attempt.outcome;
+      }),
+  );
+  const totalScenes = useStageStore((state) =>
+    Math.max(state.scenes.length, state.outlines.length),
+  );
+  const hasNarrationInFlight = useStageStore((state) =>
+    state.scenes.some(
+      (scene) => scene.narrationStatus === 'running' || scene.narrationStatus === 'pending',
+    ),
+  );
+  if (outline) {
+    const key = 'outlineId' in outline ? (outline.outlineId ?? outline.id) : outline.id;
+    const attempt = attempts[key];
+    const phase =
+      attempt.phase === 'narration'
+        ? 'narration'
+        : attempt.phase === 'finalizing'
+          ? 'finalizing'
+          : 'content';
+    return (
+      <LessonGenerationProgress
+        sceneIndex={outline.order}
+        totalScenes={totalScenes}
+        phase={phase}
+        sceneType={outline.type}
+        sceneStatus={sceneAttemptLabel(outline.type, attempt)}
+        etaLabel={progress?.sceneIndex === outline.order ? progress.etaLabel : undefined}
+      />
+    );
+  }
+  return hasNarrationInFlight && progress?.phase === 'narration' ? (
+    <LessonGenerationProgress {...progress} />
+  ) : null;
 }
 
 export function LessonGenerationProgress({
@@ -26,6 +78,7 @@ export function LessonGenerationProgress({
   totalScenes,
   phase,
   sceneType,
+  sceneStatus,
   etaLabel,
   teachingVoiceQueue,
   defaultExpanded = false,
@@ -43,7 +96,7 @@ export function LessonGenerationProgress({
       : null;
   const measuredSlideEta = etaLabel && !etaLabel.startsWith('Estimating') ? etaLabel : null;
   const shortStatus =
-    teachingVoiceQueue?.status === 'queued'
+    (sceneStatus ?? teachingVoiceQueue?.status === 'queued')
       ? 'Voice queued'
       : phase === 'finalizing'
         ? 'Finalizing'
@@ -77,7 +130,7 @@ export function LessonGenerationProgress({
         onClick={() => setExpanded((current) => !current)}
         className="flex h-9 max-w-[11.5rem] items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2.5 text-xs text-foreground shadow-sm backdrop-blur-md transition-colors hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 sm:max-w-none"
       >
-        <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+        <LoaderCircle className="h-3.5 w-3.5 shrink-0 motion-safe:animate-spin text-primary" />
         <span className="hidden font-medium sm:inline">{shortStatus}</span>
         <span className="whitespace-nowrap text-muted-foreground">
           Slide {sceneIndex}/{total}
@@ -101,7 +154,7 @@ export function LessonGenerationProgress({
                 Work continues when this panel closes.
               </p>
             </div>
-            <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-primary" />
+            <LoaderCircle className="h-4 w-4 shrink-0 motion-safe:animate-spin text-primary" />
           </div>
 
           <div className="space-y-2">
@@ -111,9 +164,10 @@ export function LessonGenerationProgress({
               label="Slides"
               value={`Slide ${sceneIndex} of ${total}`}
               detail={
-                phase === 'narration' || phase === 'finalizing'
+                sceneStatus ??
+                (phase === 'narration' || phase === 'finalizing'
                   ? 'Current slide content ready'
-                  : lessonGenerationPhaseLabel(phase, sceneType)
+                  : lessonGenerationPhaseLabel(phase, sceneType))
               }
               meta={measuredSlideEta}
             />

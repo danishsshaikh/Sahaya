@@ -305,6 +305,8 @@ export function applyClassroomStageAndScenes(
     isOwner: access.isOwner,
     readOnly: !access.isOwner,
     generationEpoch: state.generationEpoch + 1,
+    sceneAttempts: {},
+    generatingOutlines: [],
     mode: 'playback',
   }));
   if (options.persist !== false) {

@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { VisualizationOptionsFields } from '@/components/visualization/options';
 import { VisualizationRenderer } from '@/components/scene-renderers/visualization-renderer';
 import { flushStageSave, useStageStore } from '@/lib/store/stage';
+import { beginSceneAttempt, sceneAttemptLabel } from '@/lib/generation/scene-attempt-status';
 import { changeOutlineType } from '@/lib/generation/outline-type';
 import { getGenerationSceneTypeOptions } from '@/lib/generation/scene-type-options';
 import {
@@ -26,15 +27,6 @@ import type { VisualizationRevision } from '@/lib/visualization/generate';
 import { useVisualizationCapability } from '@/lib/visualization/client';
 
 type VisualizationScene = Extract<Scene, { type: 'visualization' }>;
-const PHASES: Record<string, string> = {
-  planning: 'Planning animation',
-  validating: 'Validating the plan',
-  repairing: 'Correcting the plan',
-  rendering: 'Rendering frames',
-  processing: 'Checking video and poster',
-  completed: 'Preparing narration cues',
-  queued: 'Waiting for a renderer',
-};
 const REPLACEMENT_LABELS = {
   slide: 'Slide',
   quiz: 'Quiz',
@@ -72,11 +64,21 @@ function Editor({ scene }: { scene: VisualizationScene }) {
     if (!stage || stage.id !== scene.stageId) return;
     const source = state.getSceneById(scene.id);
     if (!source || source.type !== 'visualization') return;
+    const attemptId = nanoid();
+    const tracked = beginSceneAttempt(
+      useStageStore,
+      stage.id,
+      source.outlineId ?? source.id,
+      attemptId,
+      true,
+    );
+    if (!tracked) return;
     const controller = new AbortController();
     active.current = controller;
     const { signal } = controller;
     const freshAudioIds: string[] = [];
     let applied = false;
+    let outcome: 'failed' | 'interrupted' | undefined;
 
     setPhase('Preparing generation');
     setError('');
@@ -105,7 +107,7 @@ function Editor({ scene }: { scene: VisualizationScene }) {
       );
       const updatedParameters = Object.keys(numeric).length > 0;
       const revision: VisualizationRevision = {
-        requestKey: nanoid(),
+        requestKey: attemptId,
         preview: previewOnly,
         ...(!previewOnly && preview
           ? { sourceArtifactId: preview.content.artifact.artifactId }
@@ -124,17 +126,25 @@ function Editor({ scene }: { scene: VisualizationScene }) {
         },
         signal,
         undefined,
-        (status, position) =>
+        (status, position) => {
+          if (!tracked.current()) return;
+          tracked.progress(status);
           setPhase(
             position
               ? `Waiting for a renderer · position ${position}`
-              : (PHASES[status] ?? 'Generating scene'),
-          ),
+              : sceneAttemptLabel(outline.type, {
+                  id: attemptId,
+                  phase: status,
+                  regeneration: true,
+                }),
+          );
+        },
       );
       if (!result.success || !result.content || !result.attemptId || !result.generationVersion) {
         throw new Error(result.error || 'Scene generation failed.');
       }
       const identity = { attemptId: result.attemptId, generationVersion: result.generationVersion };
+      tracked.progress('finalizing');
       const built = await fetchSceneActions(
         {
           outline: result.effectiveOutline ?? outline,
@@ -166,6 +176,7 @@ function Editor({ scene }: { scene: VisualizationScene }) {
           : action;
       });
       setPhase('Preparing Teaching Voice narration');
+      tracked.progress('narration');
       const reusedIds = new Set(
         (replacement.actions ?? []).flatMap((action) =>
           action.type === 'speech' && action.audioId ? [action.audioId] : [],
@@ -195,13 +206,14 @@ function Editor({ scene }: { scene: VisualizationScene }) {
         );
       }
       signal.throwIfAborted();
+      tracked.progress('finalizing');
       const committed = await commitSceneAttempt({
         ...identity,
         stageId: stage.id,
         outlineId: outline.id,
         sceneId: built.scene.id,
       });
-      if (!committed.success)
+      if (!committed.success || !committed.accepted)
         throw new Error(committed.error || 'This generation attempt expired. Try again.');
       signal.throwIfAborted();
       const latest = useStageStore.getState();
@@ -231,9 +243,11 @@ function Editor({ scene }: { scene: VisualizationScene }) {
       setPreview(undefined);
       await flushStageSave();
     } catch (caught) {
-      if (!signal.aborted)
+      outcome = signal.aborted ? 'interrupted' : 'failed';
+      if (!signal.aborted && tracked.current())
         setError(caught instanceof Error ? caught.message : 'Scene generation failed.');
     } finally {
+      tracked.finish(outcome);
       if (!applied) await removeFreshTtsAllocations(freshAudioIds);
       if (active.current === controller) {
         active.current = null;

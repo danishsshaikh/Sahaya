@@ -98,25 +98,48 @@ class ScientificData:
     domains: dict = field(default_factory=dict)
 
 
+class ModelError(ValueError):
+    def __init__(self, field, message):
+        super().__init__(message)
+        self.field = field
+
+
 def compute(model):
     data = ScientificData()
     if not model:
         return data
     kind = model["kind"]
     if kind in ("derivative", "gradient_descent"):
-        fn = expression(model["expression"])
+        try:
+            fn = expression(model["expression"])
+        except ValueError as error:
+            raise ModelError("expression", f"{kind}: {error}") from error
         data.functions["function"] = fn
         if kind == "derivative":
             x = model["x"]
-            slope, y = derivative(fn, x), fn(x)
+            try:
+                slope, y = derivative(fn, x), fn(x)
+            except ValueError as error:
+                raise ModelError("x", f"Derivative evaluation at x failed. {error}") from error
             data.functions["tangent"] = lambda v: y + slope * (v - x)
             data.samples["tangent"] = [(x, y)]
         else:
             x = model["initial"]
-            points = [(x, fn(x))]
-            for _ in range(model["iterations"]):
-                x = bounded(x - model["rate"] * derivative(fn, x))
-                points.append((x, fn(x)))
+            try:
+                points = [(x, fn(x))]
+            except ValueError as error:
+                raise ModelError("initial", f"Loss evaluation at the initial point failed. {error}") from error
+            for step in range(model["iterations"]):
+                try:
+                    gradient = derivative(fn, x)
+                except ValueError as error:
+                    field = "initial" if step == 0 else "rate"
+                    raise ModelError(field, f"Gradient evaluation failed before step {step + 1}. Check the loss domain and step size. {error}") from error
+                try:
+                    x = bounded(x - model["rate"] * gradient)
+                    points.append((x, fn(x)))
+                except ValueError as error:
+                    raise ModelError("rate", f"Step {step + 1} left the bounded domain of the loss. {error}") from error
             data.samples["iterations"] = points
             data.functions["lossSurface"] = lambda x, y: bounded(fn(x) + y * y)
     elif kind == "projectile":

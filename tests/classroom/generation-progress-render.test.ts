@@ -18,21 +18,28 @@ describe('classroom generation progress render contract', () => {
       const text = source(path);
 
       expect(text).toContain('<Stage');
-      expect(text).toContain('LessonGenerationProgress');
+      expect(text).toContain('ClassroomLessonGenerationProgress');
       expect(text).toContain("event: 'classroom-render-enabled'");
       expect(text).toContain("event: 'progress-overlay-hidden'");
       expect(text).toContain("event: 'classroom-still-mounted-after-completion'");
       expect(text).toContain('onNarrationQueueChange: updateTeachingVoiceQueue');
-      expect(text).toContain('teachingVoiceQueue={generationProgress.teachingVoiceQueue}');
+      expect(text).toContain('progress={generationProgress}');
       expect(text).toContain('generationStatus={');
       expect(text).not.toContain('pointer-events-none absolute right-4 top-4');
 
       const stageIndex = text.indexOf('<Stage');
-      const progressIndex = text.indexOf('<LessonGenerationProgress');
+      const progressIndex = text.indexOf('<ClassroomLessonGenerationProgress');
       expect(stageIndex).toBeGreaterThan(0);
       expect(progressIndex).toBeGreaterThan(stageIndex);
     },
   );
+
+  it('uses shared attempt statuses and forwards the narration queue progress', () => {
+    const text = source('components/generation/lesson-generation-progress.tsx');
+    expect(text).toContain('sceneAttemptLabel(outline.type, attempt)');
+    expect(text).toContain('<LessonGenerationProgress {...progress} />');
+    expect(text).toContain('teachingVoiceQueuePositionLabel(teachingVoiceQueue)');
+  });
 
   it.each(classroomSources)(
     '%s does not make all-scene completion a classroom render gate',

@@ -469,6 +469,12 @@ export async function POST(req: NextRequest) {
             requirement: requirements?.requirement,
             language: languageDirective ?? outline.languageNote,
             ownerId: user.id,
+            trace: {
+              stageId,
+              attemptId: attemptIdentity.attemptId,
+              requestId: timingCollector.requestId,
+              model: modelString,
+            },
             aiCall: async (system, prompt, abortSignal) =>
               (
                 await invokeSceneContentLLM({

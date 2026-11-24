@@ -14,7 +14,7 @@ from plan import validate
 QUALITIES = {"preview": (854, 480, 15), "standard": (1280, 720, 30), "high": (1920, 1080, 30)}
 MAX_DURATION = min(120, int(os.getenv("MANIM_MAX_DURATION", "90")))
 MAX_ARTIFACT = int(os.getenv("MANIM_MAX_ARTIFACT_BYTES", str(48 * 1024 * 1024)))
-COMPILER_REVISION = "2"
+COMPILER_REVISION = "3"
 
 
 def digest(file):
@@ -45,8 +45,8 @@ def render(folder, plan, quality):
         return np.array([*pair, 0], dtype=float)
 
     def axis_range(values, divisions=5):
-        lo, hi = values
-        return [lo, hi, (hi - lo) / divisions]
+        lo, hi = values[:2]
+        return values if len(values) == 3 else [lo, hi, (hi - lo) / divisions]
 
     class Visualization(base):
         def construct(self):

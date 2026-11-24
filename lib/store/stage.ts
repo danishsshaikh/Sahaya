@@ -20,6 +20,7 @@ import { applyGeneratedAgentsToRegistry } from '@/lib/orchestration/registry/sto
 import { migrateScene } from '@/lib/edit/slide-schema';
 import { preparePBLScenesForDocumentPersistence } from '@/lib/pbl/v2/runtime/document-persistence';
 import { hydratePBLScenesFromRuntime } from '@/lib/pbl/v2/runtime/hydration';
+import type { SceneAttemptStatus } from '@/lib/generation/scene-attempt-status';
 import type { ChatStorageSnapshot } from '@/lib/utils/chat-storage';
 import type { DocumentProducer } from '@/lib/document-store/persistence-types';
 import type { PendingChange, StaleDroppedSave } from '@/lib/utils/stage-storage';
@@ -227,6 +228,7 @@ function clearedStageState(state: Pick<StageState, 'generationEpoch'>) {
     currentGeneratingOrder: -1,
     failedOutlines: [],
     generatingOutlines: [],
+    sceneAttempts: {},
   };
 }
 
@@ -304,6 +306,7 @@ interface StageState {
   // Transient outlines whose visual requests have actually been dispatched.
   // Queued outlines are derived from outlines minus committed/failed scenes.
   generatingOutlines: SceneOutline[];
+  sceneAttempts: Record<string, SceneAttemptStatus>;
 
   // Persisted outlines for resume-on-refresh
   outlines: SceneOutline[];
@@ -501,6 +504,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   mode: 'playback',
   toolbarState: 'ai',
   generatingOutlines: [],
+  sceneAttempts: {},
   outlines: [],
   generationComplete: false,
   outlineProducer: null,
@@ -580,6 +584,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       chatSnapshot: { sessions: [], restoreMarker: null },
       generationComplete: false,
       generationEpoch: s.generationEpoch + 1,
+      generatingOutlines: [],
+      sceneAttempts: {},
     }));
     markPendingChanges(stage.id, { kind: 'structure' }, { kind: 'stage' });
   },
@@ -631,6 +637,9 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     const scenes = [...previousScenes, migrateScene(scene)];
     // Remove the matching outline from generatingOutlines (match by order)
     const generatingOutlines = get().generatingOutlines.filter((o) => o.order !== scene.order);
+    const failedOutlines = get().failedOutlines.filter((outline) =>
+      scene.outlineId ? outline.id !== scene.outlineId : outline.order !== scene.order,
+    );
     // Show the first materialized scene immediately. After that first automatic
     // selection, a real user-selected scene always wins as later scenes arrive.
     const previousCurrentSceneId = get().currentSceneId;
@@ -640,11 +649,13 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     set({
       scenes,
       generatingOutlines,
+      failedOutlines,
       ...(shouldSwitch ? { currentSceneId: scene.id } : {}),
     });
     markPendingChanges(
       currentStage.id,
       { kind: 'structure' },
+      { kind: 'outline' },
       ...(shouldSwitch ? ([{ kind: 'currentScene' }] as PendingChange[]) : []),
     );
   },
@@ -836,7 +847,12 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
 
   setCurrentGeneratingOrder: (currentGeneratingOrder) => set({ currentGeneratingOrder }),
 
-  bumpGenerationEpoch: () => set((s) => ({ generationEpoch: s.generationEpoch + 1 })),
+  bumpGenerationEpoch: () =>
+    set((s) => ({
+      generationEpoch: s.generationEpoch + 1,
+      sceneAttempts: {},
+      generatingOutlines: [],
+    })),
 
   addFailedOutline: (outline, failure) => {
     const previous = get().failedOutlines;
@@ -1136,6 +1152,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
           // Active dispatch ownership lives on the server and is deliberately
           // not reconstructed from every unresolved outline during hydration.
           generatingOutlines: [],
+          sceneAttempts: {},
           // `mode` is transient UI state, not persisted with the stage.
           // Reset to 'playback' on every load so SPA navigation between
           // classrooms doesn't carry Pro-mode state across — e.g. user

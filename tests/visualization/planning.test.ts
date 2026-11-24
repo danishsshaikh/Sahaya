@@ -3,6 +3,8 @@ import draft from '@/services/manim-renderer/fixtures/llm-diffraction.json';
 import { generateVisualization, type VisualizationAiCall } from '@/lib/visualization/generate';
 import {
   applyPlanRepair,
+  compilePlan,
+  operatorIssueLocation,
   normalizePlan,
   parsePlanObject,
   PLAN_GUIDANCE,
@@ -52,7 +54,7 @@ function mockRenderer(port: number, admit: (plan: typeof draft) => Response) {
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/ready'))
-        return Response.json({ version: '0.22.1/2', maxDuration: 90, validationProtocol: 2 });
+        return Response.json({ version: '0.22.1/3', maxDuration: 90, validationProtocol: 3 });
       if (!url.endsWith('/jobs')) throw new Error('Unexpected request');
       const plan = JSON.parse(String(init?.body)).plan;
       submissions.push(plan);
@@ -72,6 +74,130 @@ afterEach(() => {
 });
 
 describe('Live Manim planning regressions', () => {
+  it('compiles supported native encodings without altering physics or dropping unknown fields', () => {
+    const draft = {
+      objects: [
+        {
+          id: 'axis',
+          kind: 'Axes',
+          x_range: [-3, 3, 1],
+          y_range: [0, 1.2, 0.2],
+          position: [0, -1, 0],
+        },
+        { id: 'equation', kind: 'MathTex', text: '$a\\sin(θ)=mλ$', unsupportedSize: 31 },
+        { id: 'graph', kind: 'graph', axes: 'axis', expression: 'sinc(pi*x)^2' },
+        { kind: 'Line', points: [{ x: 0, y: 1 }, [1, 0, 0]] },
+      ],
+      timeline: [{ animations: [{ op: 'move', object: 'equation', position: { x: 0, y: 2 } }] }],
+    };
+    const { plan, actions } = compilePlan(draft);
+    expect(plan.objects).toEqual([
+      { id: 'axis', kind: 'axes', xRange: [-3, 3, 1], yRange: [0, 1.2, 0.2], at: [0, -1] },
+      { id: 'equation', kind: 'equation', text: 'a\\sin(\\theta )=m\\lambda', unsupportedSize: 31 },
+      draft.objects[2],
+      {
+        id: 'object-4',
+        kind: 'line',
+        points: [
+          [0, 1],
+          [1, 0],
+        ],
+      },
+    ]);
+    expect(plan.timeline).toEqual([
+      { animations: [{ op: 'move', object: 'equation', to: [0, 2] }] },
+    ]);
+    expect(actions).toContain('normalizeEquation');
+    expect(compilePlan(plan)).toEqual({ plan, actions: [] });
+    expect(operatorIssueLocation(['objects', 1, 'unsupportedSize'])).toBe(
+      'objects.1.unsupportedSize',
+    );
+    expect(operatorIssueLocation(['objects', 1, 'private text\n'])).toContain(
+      '[invalid field name]',
+    );
+  });
+
+  it('atomically replaces an invalid object kind and rejects incompatible fields and unsafe keys', () => {
+    const plan = {
+      objects: [
+        {
+          id: 'marker',
+          kind: 'unsupportedMarker',
+          at: [0, 0],
+          points: [
+            [0, 0],
+            [1, 1],
+          ],
+        },
+      ],
+    };
+    const issue = { path: ['objects', 0, 'kind'], code: 'enum', message: 'Unsupported kind' };
+    const fix = (value: unknown) => ({ edits: [{ op: 'replace', path: ['objects', 0], value }] });
+    expect(
+      applyPlanRepair(plan, { edits: [{ op: 'replace', path: issue.path, value: 'dot' }] }, [
+        issue,
+      ]),
+    ).toBeUndefined();
+    expect(
+      applyPlanRepair(plan, fix({ ...plan.objects[0], kind: 'dot' }), [issue]),
+    ).toBeUndefined();
+    expect(applyPlanRepair(plan, fix({ id: 'marker', kind: 'dot', at: [0, 0] }), [issue])).toEqual({
+      objects: [{ id: 'marker', kind: 'dot', at: [0, 0] }],
+    });
+    expect(
+      applyPlanRepair(
+        plan,
+        fix(JSON.parse('{"id":"marker","kind":"dot","__proto__":{"polluted":true}}')),
+        [issue],
+      ),
+    ).toBeUndefined();
+  });
+
+  it('detects a repeated equation rejection and skips an identical compiled repair', async () => {
+    const issue = {
+      path: ['objects', 1, 'text'],
+      code: 'equation',
+      message: 'Unsupported display command',
+    };
+    const submissions = mockRenderer(18807, () =>
+      Response.json({ issues: [issue] }, { status: 422 }),
+    );
+    const plan = structuredClone(draft);
+    plan.objects[1].kind = 'equation';
+    plan.objects[1].text = String.raw`(x\text{original})`;
+    const proposal = (value: string) =>
+      JSON.stringify({ edits: [{ op: 'replace', path: issue.path, value }] });
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockResolvedValueOnce(JSON.stringify(plan))
+      .mockResolvedValueOnce(proposal(String.raw`\left(x\text{original}\right)`))
+      .mockResolvedValueOnce(proposal(String.raw`$(x\text{original})$`));
+    await expect(generate(ai)).rejects.toMatchObject({ code: 'VISUALIZATION_REPAIR' });
+    expect(ai).toHaveBeenCalledTimes(3);
+    expect(ai.mock.calls[2][1]).toContain('left the same validation issues');
+    expect(submissions).toHaveLength(2);
+  });
+
+  it('rolls back a repair that introduces an unrelated error', async () => {
+    const newIssue = { path: ['objects', 2, 'axes'], code: 'reference', message: 'Invalid axes' };
+    const submissions = mockRenderer(18811, (candidate) =>
+      candidate.objects[1].size === 1.8
+        ? Response.json(completed)
+        : Response.json(
+            { issues: [candidate.objects[1].size === 18 ? maxIssue : newIssue] },
+            { status: 422 },
+          ),
+    );
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockResolvedValueOnce(JSON.stringify(draft))
+      .mockResolvedValueOnce(patch(4.5))
+      .mockResolvedValueOnce(patch(1.8));
+    await generate(ai);
+    expect(ai.mock.calls[2][1]).toContain('introduced errors on other fields');
+    expect(submissions).toHaveLength(3);
+  });
+
   it('stamps missing fixed metadata and targets the actual size limit without rewriting the plan', async () => {
     const submissions = mockRenderer(18801, (plan) =>
       plan.objects[1].size === 18

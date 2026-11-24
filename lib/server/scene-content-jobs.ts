@@ -104,6 +104,7 @@ export function cleanupSceneContentJobs(now = nowMs()): void {
         updatedAt: now,
         completedAt: now,
         error: 'Scene content job expired before completion. Retry generation.',
+        errorCode: 'GENERATION_INTERRUPTED',
       });
       runningJobs.delete(jobId);
       controllers.get(jobId)?.abort();
