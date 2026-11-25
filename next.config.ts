@@ -12,6 +12,7 @@ const nextConfig: NextConfig = {
       'skills/openmaic/**',
       'skills/agent-runtime/**',
       'skills/sahaya-manim/**',
+      'services/manim-renderer/manim_api.json',
 
       // Loaded through a runtime-only `import('undici')` (see the LLM
       // dispatcher in lib/ai/providers.ts and the Google proxy transport), so

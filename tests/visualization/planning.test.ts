@@ -227,6 +227,113 @@ describe('native Manim agent', () => {
     expect(phases).toContain('code-repair');
   });
 
+  it('normalizes and repairs a candidate across preflight and isolated preview within the correction budget', async () => {
+    const wrong = source
+      .replace('GeneratedScene', 'PointOnNumberLine')
+      .replace(
+        'self.play(Create(Circle()))',
+        'axis = NumberLine(include_numbers=True)\n            self.play(FadeIn(Dot(axis.nudge(1))))',
+      );
+    const normalized = wrong.replace('PointOnNumberLine', 'GeneratedScene');
+    const unsafeAtRuntime = normalized
+      .replace('axis.nudge(1)', 'axis.n2p(1)')
+      .replace('FadeIn', 'FadeOut');
+    const corrected = unsafeAtRuntime.replace('FadeOut', 'FadeIn');
+    const timeline: [string, string][] = [];
+    configure(18906, (url, init) => {
+      if (url.endsWith('/ready')) return Response.json({ ...verified, apiPreflight: '0.22.1' });
+      const candidate = JSON.parse(String(init?.body));
+      if (url.endsWith('/preflight')) {
+        timeline.push(['preflight', candidate.source]);
+        return Response.json({
+          version: '0.22.1',
+          source: candidate.source === wrong ? normalized : candidate.source,
+          findings:
+            candidate.source === wrong
+              ? [
+                  {
+                    kind: 'unknownMethod',
+                    line: 8,
+                    symbol: 'NumberLine.nudge',
+                    severity: 'error',
+                    alternatives: ['NumberLine.n2p', 'NumberLine.number_to_point'],
+                  },
+                ]
+              : [],
+          ...(candidate.source === wrong && {
+            issue: { code: 'api', line: 8 },
+            normalization: { line: 4 },
+          }),
+        });
+      }
+      timeline.push([candidate.quality, candidate.source]);
+      if (candidate.source === unsafeAtRuntime)
+        return Response.json({ status: 'failed', issue: { code: 'runtime', line: 8 } });
+      return Response.json(output);
+    });
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockResolvedValueOnce(
+        JSON.stringify({ tool: 'look_up_manim', kind: 'constructor', query: 'NumberLine' }),
+      )
+      .mockResolvedValueOnce(submission(wrong))
+      .mockResolvedValueOnce(submission(unsafeAtRuntime))
+      .mockResolvedValueOnce(submission(corrected));
+    const requirements = 'Make this visualization clear. '.repeat(400);
+    await expect(generate(ai, { requirement: requirements })).resolves.toMatchObject({
+      artifact: output.artifact,
+    });
+    expect(ai).toHaveBeenCalledTimes(4);
+    expect(timeline).toEqual([
+      ['preflight', wrong],
+      ['preflight', unsafeAtRuntime],
+      ['preview', unsafeAtRuntime],
+      ['preflight', corrected],
+      ['preview', corrected],
+      ['standard', corrected],
+    ]);
+    const apiRepair = JSON.parse(ai.mock.calls[2][1]);
+    expect(apiRepair.priorSourceAndCues.source).toBe(normalized);
+    expect(apiRepair.apiFindings[0].symbol).toBe('NumberLine.nudge');
+    expect(apiRepair.knowledge.entries[0].signature).toContain('NumberLine.n2p(');
+    expect(apiRepair.sourceExcerpt.lines.join('\n')).toContain('axis.nudge(1)');
+    expect(JSON.parse(ai.mock.calls[3][1])).toMatchObject({
+      priorSourceAndCues: { source: unsafeAtRuntime },
+      executionFeedback: { code: 'runtime', line: 8 },
+    });
+    for (const [system, prompt] of ai.mock.calls)
+      expect(Buffer.byteLength(system) + Buffer.byteLength(prompt)).toBeLessThanOrEqual(9216);
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim source preflight',
+      expect.objectContaining({
+        normalization: { operation: 'rename_entry_point', line: 4 },
+        issueCode: 'api',
+      }),
+    );
+    expect(JSON.stringify(logs.info.mock.calls)).not.toContain('axis.nudge(1)');
+  });
+
+  it('reports API preflight rejection as Python validation and stops an unchanged repair', async () => {
+    const fetch = configure(18907, (url) => {
+      if (url.endsWith('/ready')) return Response.json({ ...verified, apiPreflight: '0.22.1' });
+      if (!url.endsWith('/preflight'))
+        throw new Error('Preflight rejection cannot reserve a render job');
+      return Response.json({
+        version: '0.22.1',
+        source,
+        findings: [],
+        issue: { code: 'api', line: 7 },
+      });
+    });
+    const ai = vi.fn<VisualizationAiCall>().mockResolvedValue(submission(source));
+    await expect(generate(ai)).rejects.toMatchObject({
+      code: 'VISUALIZATION_PYTHON_VALIDATION',
+      detail: 'api',
+    });
+    expect(ai).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('reserves repair turns after malformed envelopes and keeps the publisher syntax feedback', async () => {
     const jobs: { source: string; segments: typeof segments; quality: string }[] = [];
     const broken = source.replace('Create(Circle())', 'Create(Circle()');

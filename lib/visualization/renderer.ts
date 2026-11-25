@@ -56,6 +56,7 @@ type Capability = {
   rendererReady?: boolean;
   secureExecution?: boolean;
   isolation?: string;
+  apiPreflight?: string;
 };
 
 let check: { key: string; until: number; result: Promise<Capability> } | undefined;
@@ -103,6 +104,7 @@ export function getVisualizationCapability(): Promise<Capability> {
         secureExecution,
         maxDuration: ready.maxDuration,
         isolation: typeof ready.isolation === 'string' ? ready.isolation : 'unavailable',
+        apiPreflight: typeof ready.apiPreflight === 'string' ? ready.apiPreflight : undefined,
         ...(!secureExecution && {
           reason:
             'Visualization generation requires a verified university-approved sandbox executor.',

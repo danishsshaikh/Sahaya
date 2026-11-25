@@ -1,0 +1,92 @@
+[
+  {
+    "id": "shapes",
+    "title": "Shapes, transforms and cue integration",
+    "concepts": ["shapes", "transform", "narration", "cues"],
+    "symbols": ["Square", "Circle", "Create", "Transform", "Mobject.shift"]
+  },
+  {
+    "id": "text-equations",
+    "title": "Text and mathematical equations",
+    "concepts": ["equation", "formula", "mathtex"],
+    "symbols": ["Text", "MathTex", "VGroup", "Write"]
+  },
+  {
+    "id": "number-line",
+    "title": "Number line and coordinate conversion",
+    "concepts": ["numberline", "ticks", "n2p"],
+    "symbols": [
+      "NumberLine",
+      "NumberLine.n2p",
+      "NumberLine.number_to_point",
+      "Dot",
+      "Mobject.move_to"
+    ]
+  },
+  {
+    "id": "function-plot",
+    "title": "Axes, plotting and coordinate conversion",
+    "concepts": ["function", "graph", "plot"],
+    "symbols": ["Axes", "Axes.plot", "Axes.c2p", "Create", "Dot"]
+  },
+  {
+    "id": "tracker",
+    "title": "ValueTracker and updater identity",
+    "concepts": ["tracker", "updater"],
+    "symbols": [
+      "ValueTracker",
+      "ValueTracker.get_value",
+      "ValueTracker.set_value",
+      "Mobject.add_updater",
+      "Mobject.remove_updater"
+    ]
+  },
+  {
+    "id": "wave",
+    "title": "Wave phase and an updated function",
+    "concepts": ["waves", "oscillation", "interference", "diffraction"],
+    "symbols": ["Axes", "Axes.plot", "ValueTracker", "always_redraw", "sin"]
+  },
+  {
+    "id": "vectors",
+    "title": "Vector addition and geometry",
+    "concepts": ["vectors", "geometry"],
+    "symbols": ["Arrow", "Vector", "VGroup", "Axes.c2p"]
+  },
+  {
+    "id": "kinematics",
+    "title": "Motion with constant acceleration",
+    "concepts": ["kinematics", "velocity", "simulation"],
+    "symbols": ["Dot", "ValueTracker", "Axes.c2p", "Mobject.add_updater", "linear"]
+  },
+  {
+    "id": "probability",
+    "title": "Probability and a bar chart",
+    "concepts": ["statistics", "histogram", "distribution"],
+    "symbols": ["BarChart", "FadeIn"]
+  },
+  {
+    "id": "linear-algebra",
+    "title": "Matrices and column vectors",
+    "concepts": ["matrix", "basis", "algebra"],
+    "symbols": ["Matrix", "Matrix.get_columns", "SurroundingRectangle", "Write", "Create"]
+  },
+  {
+    "id": "moving-camera",
+    "title": "Moving the 2D camera",
+    "concepts": ["zoom", "pan"],
+    "symbols": ["MovingCameraScene", "MovingCamera", "Camera", "Mobject.scale"]
+  },
+  {
+    "id": "camera-3d",
+    "title": "3D axes and camera orientation",
+    "concepts": ["surface", "spatial", "rotation"],
+    "symbols": [
+      "ThreeDScene",
+      "ThreeDScene.set_camera_orientation",
+      "ThreeDScene.move_camera",
+      "ThreeDAxes",
+      "Sphere"
+    ]
+  }
+]

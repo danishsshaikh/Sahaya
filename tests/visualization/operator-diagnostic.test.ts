@@ -53,9 +53,9 @@ exec "$SAHAYA_FIXTURE_NODE" -e '
 const fs = require("fs");
 const args = process.argv.slice(1);
 if (JSON.stringify(args.slice(0, 9)) !== JSON.stringify(["exec","-i","--user","1000:1000","sahaya-manim-hpc","python","-I","-B","-c"])) process.exit(2);
-if (!args[9].includes("check_request(json.load(sys.stdin))") || args[10] !== "/opt/sahaya-manim") process.exit(3);
+if (!args[9].includes("preflight(json.load(sys.stdin))") || args[10] !== "/opt/sahaya-manim") process.exit(3);
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
-console.log(JSON.stringify({version: "3.14.10", ...(input.source.endsWith("self.add(Dot()\\n") && {issue:{code:"syntax",line:7}})}));
+console.log(JSON.stringify({version: "0.22.1", pythonVersion: "3.14.10", findings: [], source: input.source, ...(input.source.endsWith("self.add(Dot()\\n") && {issue:{code:"syntax",line:7}})}));
 ' -- "$@"
 `,
         { mode: 0o700 },
@@ -73,6 +73,7 @@ globalThis.fetch = async (url, init) => {
   url = String(url);
   if (url.endsWith('/chat/completions')) {
     const body = JSON.parse(init.body);
+    assert.match(body.messages.at(-1).content, /equal-amplitude sine waves/);
     if (turn === 1) {
       assert.match(body.messages.at(-1).content, /"line":7/);
       assert.equal(JSON.parse(body.messages.at(-1).content).priorSourceAndCues.source, bad);
@@ -115,6 +116,8 @@ globalThis.fetch = async (url, init) => {
           '--import',
           pathToFileURL(preload).href,
           'scripts/diagnose-manim-model.ts',
+          '--task',
+          'wave-interference',
           '--publisher-container',
           'sahaya-manim-hpc',
           '--preview',
@@ -157,6 +160,7 @@ globalThis.fetch = async (url, init) => {
         }),
       );
       expect(records.at(-1)).toMatchObject({
+        task: 'wave-interference',
         validPython: true,
         pythonVersion: '3.14.10',
         playableArtifact: true,

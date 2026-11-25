@@ -55,3 +55,9 @@
 
 - Reproduced the deployed extractor rejecting valid raw and fenced Python, and forwarding literal escaped line separators from a double-escaped JSON source to Python's syntax check. Valid JSON envelopes round-tripped code with indentation, quotes and LaTeX intact. The original production replies were unavailable, so the exact cause of that source's syntax error remains unconfirmed.
 - Text authoring now puts cue metadata in a Python comment and preserves source bytes. Format and Python validation feedback remain separate during bounded corrections. The standalone synthetic diagnostic supports publisher-interpreter static checks, private capture and an optional verified preview.
+
+## Offline API grounding and repair
+
+- Added a reproducible Manim 0.22.1 API index from the hash-pinned wheel and matching upstream docs, with deterministic retrieval before authoring and 12 synthetic cue-scene examples.
+- Publisher preflight normalizes a uniquely identifiable cue scene, reuses the native contract, and distinguishes definite API errors from runtime-dependent hints. Repairs preserve the last candidate, use pinned alternatives and have their own bounded call allowance.
+- The example library passes static checks. The isolated example verifier and three synthetic model diagnostics are ready for HPC MP4 verification.

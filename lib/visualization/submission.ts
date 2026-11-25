@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { requestedReferenceTopics, sourceSubmission } from './agent-tools';
+import { manimLookup, requestedReferenceTopics, sourceSubmission } from './agent-tools';
+import type { Lookup } from './knowledge';
 import type { ReferenceTopic } from './skill';
 
 export type Candidate = z.infer<typeof sourceSubmission>;
@@ -36,6 +37,7 @@ export function formatFeedback(code: Rejection) {
 type Extraction = { format: Format } & (
   | { outcome: 'submitted'; candidate: Candidate }
   | { outcome: 'reference'; topics: ReferenceTopic[] }
+  | { outcome: 'lookup'; lookup: Lookup }
   | { outcome: Rejection; source?: string }
 );
 type Reply = { text: string; toolCalls?: { toolName: string; input: unknown }[] };
@@ -72,6 +74,12 @@ function candidate(format: Format, input: unknown): Extraction {
 }
 
 function envelope(format: Format, name: unknown, input: unknown): Extraction {
+  if (name === 'look_up_manim') {
+    const parsed = manimLookup.safeParse(input);
+    return parsed.success
+      ? { format, outcome: 'lookup', lookup: parsed.data }
+      : { format, outcome: 'invalid_reference' };
+  }
   if (name === 'read_reference') {
     const topics = requestedReferenceTopics(input);
     return topics

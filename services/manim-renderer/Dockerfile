@@ -6,10 +6,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o 1000 -g 1000 /artifacts /opt/sahaya-manim
 WORKDIR /opt/sahaya-manim
-COPY server.py native_contract.py native_artifact.py sandbox_client.py healthcheck.py ./
+COPY server.py native_contract.py native_artifact.py sandbox_client.py healthcheck.py manim_preflight.py manim_api.json MANIM-UPSTREAM-LICENSE ./
 RUN chmod 0644 /opt/sahaya-manim/*.py
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
 RUN test -r /opt/sahaya-manim/healthcheck.py
+RUN python -B -c 'import importlib.metadata; from manim_preflight import knowledge; assert knowledge()["version"] == importlib.metadata.version("manim")'
 EXPOSE 8780
 CMD ["python", "server.py"]

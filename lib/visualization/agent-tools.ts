@@ -43,11 +43,23 @@ export function requestedReferenceTopics(input: unknown) {
   return 'topics' in result.data ? result.data.topics : [result.data.topic];
 }
 
+export const manimLookup = z
+  .object({
+    query: z.string().trim().min(1).max(120),
+    kind: z.enum(['search', 'class', 'constructor', 'method', 'examples', 'alternatives']),
+  })
+  .strict();
+
 export const manimTools = {
   ...submitSceneTools,
   read_reference: tool({
     description: 'Request up to three missing Manim references together for the next turn.',
     inputSchema: topicBatch,
+  }),
+  look_up_manim: tool({
+    description:
+      'Search the pinned local Manim API and checked examples by concept or exact symbol.',
+    inputSchema: manimLookup,
   }),
 };
 

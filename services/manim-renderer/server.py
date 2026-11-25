@@ -18,6 +18,7 @@ import time
 
 from native_contract import MANIM_VERSION, MAX_DURATION, MAX_REQUEST, MAX_VIDEO, PUBLISHER_PROTOCOL, Rejected, check_request
 from native_artifact import sanitize_issue, verify
+from manim_preflight import knowledge, preflight
 import sandbox_client
 
 VERSION = f"{MANIM_VERSION}/native-1"
@@ -283,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
         owner = self.owner()
         if owner is None:
             return
-        if self.path != "/jobs":
+        if self.path not in ("/jobs", "/preflight"):
             self.send_json(404, {"error": "Unknown renderer endpoint"})
             return
         body = None
@@ -293,6 +294,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(413, {"error": "Visualization request exceeds the size limit"})
                 return
             body = json.loads(self.rfile.read(size))
+            if self.path == "/preflight":
+                self.send_json(200, preflight(body))
+                return
             result = submit(owner, body)
         except Rejected as error:
             diagnostic = capture_diagnostic(owner, body, "static-check", error.issue) if isinstance(body, dict) else None
@@ -346,6 +350,7 @@ class Handler(BaseHTTPRequestHandler):
             ready = sandbox_client.readiness()
             self.send_json(200, {"version": VERSION, "protocol": PUBLISHER_PROTOCOL, "maxDuration": MAX_DURATION,
                                  "manimVersion": MANIM_VERSION, "rendererReady": True,
+                                 "apiPreflight": knowledge()["version"],
                                  "secureExecution": ready.get("isolation") == "verified", **ready})
             return
         if self.path.startswith("/jobs/"):

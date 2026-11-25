@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,22 +9,34 @@ import { resolveModel } from '@/lib/server/resolve-model';
 import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
 import { diagnoseManimAuthoring, type DiagnosticExchange } from '@/lib/visualization/generate';
 import { renderRepairFeedback, VisualizationFailure } from '@/lib/visualization/failure';
+import { readPreflight, type PreflightResult } from '@/lib/visualization/preflight';
 import { createManimAiCall, dedicatedManimModel } from '@/lib/visualization/model';
-import {
-  rendererFetch,
-  RendererError,
-  type RenderIssue,
-  type RenderJob,
-} from '@/lib/visualization/renderer';
 import type { Candidate } from '@/lib/visualization/submission';
+import { verifyPublishedPreview } from '@/lib/visualization/preview-verification';
 
-const outline: SceneOutline = {
-  id: 'operator-model-diagnostic',
-  order: 1,
-  type: 'visualization',
-  title: 'A point moves along a number line',
-  description: 'Show a number line, then animate a dot from zero to two.',
-  keyPoints: ['Use two short named cues.', 'Keep the numbers visible as the dot moves.'],
+const tasks = {
+  'number-line': {
+    title: 'A point moves along a number line',
+    description: 'Show a number line, then animate a dot from zero to two.',
+    keyPoints: ['Use two short named cues.', 'Keep the numbers visible as the dot moves.'],
+  },
+  'function-plot': {
+    title: 'A point follows a plotted quadratic',
+    description: 'Plot y = x² on labelled axes and animate a point along the curve.',
+    keyPoints: [
+      'Use named cues for the axes and motion.',
+      'The point should stay on the function.',
+    ],
+  },
+  'wave-interference': {
+    title: 'Two waves interfere',
+    description:
+      'Show equal-amplitude sine waves and their sum while changing the relative phase from zero to π radians.',
+    keyPoints: [
+      'Explain constructive and destructive interference.',
+      'Keep a consistent illustrative amplitude scale.',
+    ],
+  },
 };
 
 const controller = new AbortController();
@@ -35,16 +47,14 @@ const ownerId = `operator-manim-model-${randomUUID()}`;
 let submittedPython = false;
 let validPython = false;
 let pythonVersion: string | undefined;
+let taskId: keyof typeof tasks | undefined;
 
 const validationProgram = `
 import json, sys
 sys.path.insert(0, sys.argv[1])
-from native_contract import Rejected, check_request
-result = {"version": ".".join(map(str, sys.version_info[:3]))}
-try:
-    check_request(json.load(sys.stdin))
-except Rejected as exc:
-    result["issue"] = exc.issue
+from manim_preflight import preflight
+result = preflight(json.load(sys.stdin))
+result["pythonVersion"] = ".".join(map(str, sys.version_info[:3]))
 print(json.dumps(result))
 `;
 
@@ -71,20 +81,20 @@ function validate(candidate: Candidate, signal: AbortSignal, python: string, con
       }),
       encoding: 'utf8',
       timeout: 4000,
-      maxBuffer: 8192,
+      maxBuffer: 128 * 1024,
     },
   );
   signal.throwIfAborted();
   if (result.status !== 0)
     throw new VisualizationFailure('VISUALIZATION_PREPARATION', 'diagnostic_validator_unavailable');
-  let check: { version?: string; issue?: RenderIssue };
+  let check: PreflightResult & { pythonVersion?: string };
   try {
     check = JSON.parse(result.stdout);
-    if (!check || !/^\d+\.\d+\.\d+$/.test(check.version ?? '')) throw new Error();
+    if (!check || !/^\d+\.\d+\.\d+$/.test(check.pythonVersion ?? '')) throw new Error();
   } catch {
     throw new VisualizationFailure('VISUALIZATION_PREPARATION', 'diagnostic_validator_response');
   }
-  pythonVersion = check.version;
+  pythonVersion = check.pythonVersion;
   validPython = !check.issue;
   const issue = check.issue && renderRepairFeedback(check.issue);
   console.log(
@@ -97,7 +107,7 @@ function validate(candidate: Candidate, signal: AbortSignal, python: string, con
       issueLine: issue?.line,
     }),
   );
-  if (issue) throw new RendererError(422, issue);
+  return readPreflight(check);
 }
 
 function captureExchange(folder: string, exchange: DiagnosticExchange) {
@@ -123,56 +133,6 @@ function captureExchange(folder: string, exchange: DiagnosticExchange) {
     });
 }
 
-async function verifyPreview(artifact: NonNullable<RenderJob['artifact']>) {
-  const expectedSize = artifact.bytes;
-  const invalid = () =>
-    new VisualizationFailure('VISUALIZATION_ARTIFACT_VALIDATION', 'diagnostic_preview_invalid');
-  if (
-    artifact.verification?.media !== 'decoded' ||
-    artifact.quality !== 'preview' ||
-    !/^[a-f0-9]{64}$/.test(artifact.artifactId) ||
-    !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
-    !Number.isSafeInteger(expectedSize) ||
-    expectedSize < 16 ||
-    expectedSize > 50 * 1024 * 1024
-  )
-    throw invalid();
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]);
-  const response = await rendererFetch(
-    ownerId,
-    `/artifacts/${artifact.artifactId}/video.mp4`,
-    { signal },
-    true,
-  );
-  const reader = response.body?.getReader();
-  if (!response.ok || !reader || Number(response.headers.get('Content-Length')) !== expectedSize) {
-    await reader?.cancel();
-    throw invalid();
-  }
-  const hash = createHash('sha256');
-  const header = Buffer.alloc(8);
-  let size = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (size + value.byteLength > expectedSize) throw invalid();
-      if (size < header.length) header.set(value.subarray(0, header.length - size), size);
-      size += value.byteLength;
-      hash.update(value);
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-  if (
-    size !== expectedSize ||
-    header.toString('ascii', 4) !== 'ftyp' ||
-    hash.digest('hex') !== artifact.sha256
-  )
-    throw invalid();
-}
-
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -180,8 +140,19 @@ async function main() {
       'publisher-container': { type: 'string' },
       preview: { type: 'boolean' },
       capture: { type: 'boolean' },
+      task: { type: 'string' },
     },
   });
+  const task = values.task ?? 'number-line';
+  if (!Object.hasOwn(tasks, task))
+    throw new VisualizationFailure('VISUALIZATION_PREPARATION', 'unknown_diagnostic_task');
+  taskId = task as keyof typeof tasks;
+  const outline: SceneOutline = {
+    id: 'operator-model-diagnostic',
+    order: 1,
+    type: 'visualization',
+    ...tasks[taskId],
+  };
   const container = values['publisher-container'];
   if (
     container !== undefined &&
@@ -233,10 +204,13 @@ async function main() {
       capture: folder ? (exchange) => captureExchange(folder, exchange) : undefined,
     },
   );
-  if (artifact) await verifyPreview(artifact);
+  submittedPython = true;
+  validPython = true;
+  if (artifact) await verifyPublishedPreview(ownerId, artifact, controller.signal);
   console.log(
     JSON.stringify({
       event: 'manim-model-diagnostic',
+      task: taskId,
       elapsedMs: Date.now() - started,
       submittedPython,
       validPython,
@@ -253,6 +227,7 @@ void main().catch((error: unknown) => {
   console.error(
     JSON.stringify({
       event: 'manim-model-diagnostic',
+      task: taskId,
       elapsedMs: Date.now() - started,
       submittedPython,
       validPython,

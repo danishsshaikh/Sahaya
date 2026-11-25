@@ -106,7 +106,7 @@ New native results are labeled illustrative. Skill guidance calls for formula, u
 
 ## Configuration and rollout
 
-The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three normal model turns, two Context7 lookups, three previews, and two final attempts. A malformed Python submission can unlock one extra format-repair turn when the configured call limit is at least three. The absolute cap is five turns. In text mode the model writes a complete Python module headed by `# sahaya-cues:` and the ordered cue array on that comment line. The extractor also accepts a single Python fence or a legacy JSON source-and-cue envelope. It preserves the Python source, including physical line breaks, indentation and LaTeX escapes. It requests retransmission when a source appears to have been encoded twice. It requires authored cue metadata before submission. Native tool submissions remain supported on the existing allowlist. Later turns continue from the last successful routing tier. The HPC publisher uses `MANIM_SANDBOX_SOCKET` and `MANIM_SANDBOX_TOKEN`. Its queue defaults to one worker and eight active jobs. The executor defaults to a 45-second preview and 105-second final attempt, configurable with `MANIM_SANDBOX_PREVIEW_SECONDS` and `MANIM_SANDBOX_FINAL_SECONDS`. The optional gVisor backend uses `MANIM_SANDBOX_URL`. [Environment examples](../.env.example)
+The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three normal model turns, two correction turns after a candidate fails validation or rendering, two Context7 lookups, three previews, and two final attempts. A malformed submission can unlock one extra format-repair turn when the configured authoring limit is at least three, within the five-turn authoring ceiling. `MANIM_AGENT_CORRECTION_CALLS` accepts up to four repair turns. The entire agent invocation is capped at eight model turns. In text mode the model writes a complete Python module headed by `# sahaya-cues:` and the ordered cue array on that comment line. The extractor also accepts a single Python fence or a legacy JSON source-and-cue envelope. It preserves the Python source, including physical line breaks, indentation and LaTeX escapes. It requests retransmission when a source appears to have been encoded twice. It requires authored cue metadata before submission. Native tool submissions remain supported on the existing allowlist. Later turns continue from the last successful routing tier. The HPC publisher uses `MANIM_SANDBOX_SOCKET` and `MANIM_SANDBOX_TOKEN`. Its queue defaults to one worker and eight active jobs. The executor defaults to a 45-second preview and 105-second final attempt, configurable with `MANIM_SANDBOX_PREVIEW_SECONDS` and `MANIM_SANDBOX_FINAL_SECONDS`. The optional gVisor backend uses `MANIM_SANDBOX_URL`. [Environment examples](../.env.example)
 
 ### Dedicated model and deadlines
 
@@ -136,11 +136,36 @@ A dedicated tier can also set `MANIM_MODEL_PRIMARY_API_KEY` and `MANIM_MODEL_PRI
 
 The overall deadline includes every phase. Manim holds the next preview and final windows before calling a model and gives an alternate route part of the remaining inference window. Shorter job deadlines proportionally reduce the render reserves. The self-hosted Next.js process uses the full configured deadline. Vercel deployments cap Manim at 275 seconds within the scene-content route's 300-second platform limit. [Next.js route duration](https://nextjs.org/docs/app/api-reference/file-conventions/route-segment-config#maxduration)
 
-HPC reported an 8,192-token Gemma context. The default request allows 3,072 completion tokens, including any reasoning, and fits the prompt to a conservative byte estimate. The prompt drops remote snippets before omitting prior source that cannot fit. Set `MANIM_AGENT_CONTEXT_TOKENS`, `MANIM_AGENT_COMPLETION_TOKENS`, or `MANIM_AGENT_PROMPT_BYTES` to tune it. Use the diagnostic's actual prompt tokens, completion tokens, and `completionTokensPerSecond` to tune inference time. At 3,072 tokens, a 300-second window requires roughly 10 tokens/s before prompt and queue overhead. The failed 168-second attempt produced no complete response, so it does not establish throughput.
+HPC reported an 8,192-token Gemma context. The default request allows 3,072 completion tokens, including any reasoning, and fits the prompt to a conservative byte estimate. The prompt drops remote snippets and low-priority knowledge before omitting prior source that cannot fit. Repairs keep an excerpt around a reported line within the prompt budget when space allows. Set `MANIM_AGENT_CONTEXT_TOKENS`, `MANIM_AGENT_COMPLETION_TOKENS`, or `MANIM_AGENT_PROMPT_BYTES` to tune it. Use the diagnostic's actual prompt tokens, completion tokens, and `completionTokensPerSecond` to tune inference time. At 3,072 tokens, a 300-second window requires roughly 10 tokens/s before prompt and queue overhead. The failed 168-second attempt produced no complete response, so it does not establish throughput.
 
 The HPC Gemma endpoint accepted `chat_template_kwargs.enable_thinking=false` in a direct request and returned Python in 201 completion tokens. Mark a dedicated tier with `MANIM_MODEL_<ROLE>_LLAMA_CPP=true` only after verifying support on that server and template. Manim sends the flag in both streaming and buffered requests. `MANIM_MODEL_ENABLE_THINKING` defaults to `false` on those tiers. Set it to `true` to re-enable thinking. On marked tiers this setting takes precedence over `MANIM_MODEL_<ROLE>_DISABLE_REASONING`. Unmarked tiers retain their existing provider-specific controls. [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
 
 `MANIM_AGENT_STREAM=true` reports first-token latency. A streamed request stays on its chosen provider once response parts arrive. Buffered mode reports completion metrics. Manim reports reasoning bytes when present and exact token counts only when available. Missing counts and a zero count that conflicts with observed reasoning are reported as unavailable. If a model reaches the completion limit without usable Python, Manim can make one smaller request that keeps the teaching objective, cue contract, and completion cap. The authoring and rendering deadlines still apply.
+
+### Offline API knowledge and preflight
+
+The app selects Manim 0.22.1 signatures, documentation and up to two example excerpts for each teaching objective. The first turn can request one additional class, constructor, method, concept, example or alternatives lookup when the budget allows. Retrieval uses the shipped index and examples. Context7 remains optional. Corrections prioritize indexed alternatives and preserve the checked candidate and cue metadata within the context limit.
+
+The authenticated publisher preflight inspects Python's AST and runs the existing native contract. It can rename one unambiguous, unreferenced cue scene and preserves source line numbers. It flags proven missing APIs or unsupported keywords for repair and treats uncertain findings as hints for isolated rendering. Python with runtime-dependent attributes, imports, or control flow can still need preview feedback. After preflight, preview and final requests follow the existing isolated worker and media verification. Publisher instances without the new preflight capability still enforce the native job contract and isolated execution. The app rejects a publisher that advertises a mismatched preflight version.
+
+Build the index from the official Manim Community 0.22.1 wheel and the matching tagged docs. The tool verifies both SHA-256 hashes, never imports Manim, and stores source paths and line numbers in the index. Use `--verify-installed` in a trusted Python environment with Manim 0.22.1 to compare the installed Python sources to the pinned wheel during regeneration. The publisher build checks the installed Manim version against the index.
+
+```bash
+(
+  set -euo pipefail
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' EXIT
+  curl -fsSL 'https://files.pythonhosted.org/packages/0d/4c/7462f0576f5de1a77849d0ae117b7fd697a399fa17b44c5a7d87bb79dbb7/manim-0.22.1-py3-none-any.whl' \
+    -o "$work/manim-0.22.1-py3-none-any.whl"
+  curl -fsSL 'https://codeload.github.com/ManimCommunity/manim/tar.gz/refs/tags/v0.22.1' \
+    -o "$work/manim-v0.22.1.tar.gz"
+  python3 scripts/build-manim-knowledge.py --wheel "$work/manim-0.22.1-py3-none-any.whl" \
+    --docs "$work/manim-v0.22.1.tar.gz" --output "$work/manim_api.json"
+  cmp "$work/manim_api.json" services/manim-renderer/manim_api.json
+)
+```
+
+The corpus covers classes, inheritance, callable signatures, documented parameters and return values, constants, and Cairo guidance from the upstream docs. The example library covers shapes and cue integration, text and equations, number lines, plots, trackers, waves, vectors, kinematics, probability, linear algebra, and 2D and 3D cameras. The canonical `shapes.py` includes a complete `GeneratedScene` with cue metadata. All 12 examples pass the static checks. `verify-manim-examples.ts --render` checks which examples produce decoded MP4s on the deployed isolated renderer. [Manim 0.22.1 release](https://pypi.org/project/manim/0.22.1/) · [Tagged upstream docs](https://github.com/ManimCommunity/manim/tree/v0.22.1/docs/source) · [Example library](../skills/sahaya-manim/examples/manifest.json)
 
 ### Independent operator checks
 
@@ -150,17 +175,20 @@ Run from the checkout that contains these scripts, using the intended applicatio
 cd /home/danish/projects/OpenMAIC-llm-test
 PATH="/opt/sahaya-manim/tools/bin:$PATH" \
   node --conditions=import --env-file=.env.local --import tsx scripts/smoke-manim-renderer.ts
-LOG_LEVEL=info MANIM_AGENT_STREAM=true \
-  MANIM_MODEL_PRIMARY_LLAMA_CPP=true MANIM_MODEL_ENABLE_THINKING=false \
-  node --conditions=import --env-file=.env.local --import tsx scripts/diagnose-manim-model.ts \
-  --publisher-container sahaya-manim-hpc --capture --preview
+node --conditions=import --env-file=.env.local --import tsx scripts/verify-manim-examples.ts --render
+for task in number-line function-plot wave-interference; do
+  LOG_LEVEL=info MANIM_AGENT_STREAM=true \
+    MANIM_MODEL_PRIMARY_LLAMA_CPP=true MANIM_MODEL_ENABLE_THINKING=false \
+    node --conditions=import --env-file=.env.local --import tsx scripts/diagnose-manim-model.ts \
+    --task "$task" --publisher-container sahaya-manim-hpc --preview || break
+done
 ```
 
 The smoke test uses the existing publisher token and requires `ffprobe` on `PATH` (the private provisioning path is `/opt/sahaya-manim/tools/bin`). It checks Bubblewrap readiness, submits one trusted square animation under a unique operator owner, and checks the preview's SHA-256, stream, frame count and cue metadata. The publisher expires the preview with its normal TTL.
 
-The model diagnostic uses a fixed synthetic topic and the production extraction and correction loop. `--publisher-container` uses the existing operator Docker access to run only the publisher's static validator as UID/GID 1000. Candidate source is input to the validator and is never executed by that command. The diagnostic prints the interpreter version and each sanitized issue code and line. For local static checks, select an approved interpreter with `--python /absolute/path/to/python` or rely on the default `python3`. Use the container option when the host Python version differs from the publisher.
+The model diagnostic accepts three synthetic teaching tasks and uses the production extraction, preflight and correction loop. `--publisher-container` uses the existing operator Docker access to run only the publisher's static validator as UID/GID 1000. Candidate source is input to the validator and is never executed by that command. The diagnostic prints the interpreter version and each sanitized issue code and line. For local static checks, select an approved interpreter with `--python /absolute/path/to/python` or rely on the default `python3`. Use the container option when the host Python version differs from the publisher.
 
-With `--preview`, the same agent submits a temporary preview under a unique diagnostic owner through the authenticated publisher. It reports `playableArtifact: true` after the publisher decodes the artifact and the diagnostic verifies the downloaded MP4's size and SHA-256. Omit `--preview` for static validation alone. Add `--capture` only when investigating the synthetic diagnostic. It writes reconstructed assistant replies, extracted Python, and cue files into a private temporary directory printed by the command. Directory permissions are 0700 and files are 0600. Remove the directory after review. Regular classroom requests record lengths, format and extraction outcome, and sanitized issue codes and line numbers.
+With `--preview`, the same agent submits a temporary preview under a unique diagnostic owner through the authenticated publisher. It reports `playableArtifact: true` after the publisher decodes the artifact and the diagnostic verifies the downloaded MP4's size and SHA-256. Omit `--preview` for static validation alone. Add `--capture` only when investigating the synthetic diagnostic. It writes reconstructed assistant replies, extracted Python, and cue files into a private temporary directory printed by the command. Directory permissions are 0700 and files are 0600. Remove the directory after review. Regular classroom requests record selected public API symbols, example IDs, context size, response format, and sanitized issue codes and line numbers. Monitor `Manim knowledge selected`, `Manim source preflight`, `Manim render evaluated`, and `Manim agent completed` in the application logs. The publisher logs `manim-artifact-checked` and `manim-render-failed` with job identifiers.
 
 Docker Compose retains the `manim` profile and persistent volume. Podman and Quadlet use the same publisher image and artifact mount. The existing HTTPS deployment works with approved gVisor. A Compose local deployment adds a publisher-only read-only bind of the socket directory plus the mapped socket group, and sets `MANIM_SANDBOX_SOCKET` to the in-container path. Verify group and UID mapping before using a local socket with rootless container engines.
 
