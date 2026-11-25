@@ -23,20 +23,61 @@ const repairMessages = {
   visual: 'Ensure the scene visibly changes and has sufficient contrast.',
 } as const;
 
-export function renderRepairFeedback(issue?: RenderIssue): RenderIssue {
+const syntaxMessages = {
+  mixedIndentation: 'Use consistent spaces for Python indentation.',
+  expectedIndentation: 'Indent the suite following the preceding block header.',
+  unexpectedIndentation: 'Check the indentation relative to the enclosing block.',
+  invalidDedent: 'Align this line with a valid enclosing indentation level.',
+  delimiter: 'Check that opening and closing brackets, braces and parentheses match.',
+  unterminatedString: 'Close the Python string, preserving its intended escapes.',
+  expectedColon: 'Add the colon at the end of the Python block header.',
+  invalidSyntax: repairMessages.syntax,
+};
+const exceptionTypes: Record<string, string> = {
+  arguments: 'TypeError',
+  api: 'NameError or AttributeError',
+  math: 'ArithmeticError',
+};
+const validLocation = (value: number | undefined): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 10000;
+
+export function renderRepairFeedback(issue?: RenderIssue, runtime = false): RenderIssue {
   const code =
     issue?.code && Object.hasOwn(repairMessages, issue.code)
       ? (issue.code as keyof typeof repairMessages)
       : 'output';
   const line = issue?.line;
   const symbol = issue?.symbol;
+  const category =
+    code === 'syntax' &&
+    typeof issue?.category === 'string' &&
+    Object.hasOwn(syntaxMessages, issue.category)
+      ? (issue.category as keyof typeof syntaxMessages)
+      : undefined;
+  const apiSymbols = Array.isArray(issue?.apiSymbols)
+    ? issue.apiSymbols
+        .filter(
+          (name) =>
+            typeof name === 'string' && /^[A-Za-z_]\w{0,47}(?:\.[A-Za-z_]\w{0,47})?$/.test(name),
+        )
+        .slice(0, 6)
+    : undefined;
+  const scaffoldEntry = code === 'entryPoint' && issue?.category === 'scaffoldEntry';
   return {
     code,
-    message: repairMessages[code],
-    ...(typeof line === 'number' &&
-      Number.isSafeInteger(line) &&
-      line >= 1 &&
-      line <= 10000 && { line }),
+    message: scaffoldEntry
+      ? 'Define one undecorated top-level def animate(self) for the Sahaya scene wrapper.'
+      : category
+        ? syntaxMessages[category]
+        : repairMessages[code],
+    ...(validLocation(line) && { line }),
+    ...(category && { category }),
+    ...(scaffoldEntry && { category: 'scaffoldEntry' }),
+    ...(validLocation(issue?.column) && { column: issue.column }),
+    ...(validLocation(issue?.endLine) && { endLine: issue.endLine }),
+    ...(validLocation(issue?.endColumn) && { endColumn: issue.endColumn }),
+    ...(runtime && Object.hasOwn(exceptionTypes, code) && { exception: exceptionTypes[code] }),
+    ...(apiSymbols?.length && { apiSymbols }),
     ...(typeof symbol === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(symbol) && { symbol }),
   };
 }

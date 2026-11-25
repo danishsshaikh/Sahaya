@@ -18,7 +18,7 @@ import time
 
 from native_contract import MANIM_VERSION, MAX_DURATION, MAX_REQUEST, MAX_VIDEO, PUBLISHER_PROTOCOL, Rejected, check_request
 from native_artifact import sanitize_issue, verify
-from manim_preflight import knowledge, preflight
+from manim_preflight import knowledge, preflight, runtime_symbols
 import sandbox_client
 
 VERSION = f"{MANIM_VERSION}/native-1"
@@ -210,10 +210,16 @@ def run(job, request):
     except Exception as error:
         safe = sanitize_issue(error.issue if isinstance(error, Rejected) else {"code": "runtime"})
         print(json.dumps({"event": "manim-render-failed", "job": job.id, "issue": safe.issue}), flush=True)
+        issue = dict(safe.issue)
+        if issue["code"] in {"api", "arguments", "runtime", "math", "latex"} and "line" in issue:
+            try:
+                issue["apiSymbols"] = runtime_symbols(request["source"], issue["line"])
+            except (ValueError, SyntaxError, RecursionError, MemoryError, OSError):
+                pass
         with LOCK:
             if not job.cancelled:
                 job.status = "failed"
-                job.issue = safe.issue
+                job.issue = issue
                 job.error = str(safe)
                 if safe.issue["code"] == "timeout":
                     job.error_code = "VISUALIZATION_RENDER_TIMEOUT"

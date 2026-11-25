@@ -3,7 +3,18 @@ import type { VisualizationContent } from '@openmaic/dsl';
 import { readFeatureFlagBoolean } from '@/lib/config/feature-flags';
 
 export type RenderQuality = VisualizationContent['artifact']['quality'];
-export type RenderIssue = { code: string; message?: string; line?: number; symbol?: string };
+export type RenderIssue = {
+  code: string;
+  message?: string;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  category?: string;
+  symbol?: string;
+  exception?: string;
+  apiSymbols?: string[];
+};
 export interface RenderJob {
   id?: string;
   status: 'queued' | 'rendering' | 'processing' | 'completed' | 'failed' | 'cancelled';

@@ -7,37 +7,17 @@ import { parseArgs } from 'node:util';
 import type { SceneOutline } from '@openmaic/generation';
 import { resolveModel } from '@/lib/server/resolve-model';
 import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
-import { diagnoseManimAuthoring, type DiagnosticExchange } from '@/lib/visualization/generate';
+import {
+  diagnoseManimAuthoring,
+  type DiagnosticExchange,
+  type DiagnosticMetrics,
+} from '@/lib/visualization/generate';
 import { renderRepairFeedback, VisualizationFailure } from '@/lib/visualization/failure';
 import { readPreflight, type PreflightResult } from '@/lib/visualization/preflight';
 import { createManimAiCall, dedicatedManimModel } from '@/lib/visualization/model';
 import type { Candidate } from '@/lib/visualization/submission';
 import { verifyPublishedPreview } from '@/lib/visualization/preview-verification';
-
-const tasks = {
-  'number-line': {
-    title: 'A point moves along a number line',
-    description: 'Show a number line, then animate a dot from zero to two.',
-    keyPoints: ['Use two short named cues.', 'Keep the numbers visible as the dot moves.'],
-  },
-  'function-plot': {
-    title: 'A point follows a plotted quadratic',
-    description: 'Plot y = x² on labelled axes and animate a point along the curve.',
-    keyPoints: [
-      'Use named cues for the axes and motion.',
-      'The point should stay on the function.',
-    ],
-  },
-  'wave-interference': {
-    title: 'Two waves interfere',
-    description:
-      'Show equal-amplitude sine waves and their sum while changing the relative phase from zero to π radians.',
-    keyPoints: [
-      'Explain constructive and destructive interference.',
-      'Keep a consistent illustrative amplitude scale.',
-    ],
-  },
-};
+import { manimDiagnosticTasks as tasks } from './manim-diagnostic-tasks';
 
 const controller = new AbortController();
 process.once('SIGINT', () => controller.abort());
@@ -48,6 +28,12 @@ let submittedPython = false;
 let validPython = false;
 let pythonVersion: string | undefined;
 let taskId: keyof typeof tasks | undefined;
+let metrics: DiagnosticMetrics = {
+  modelCalls: 0,
+  correctionCalls: 0,
+  patchesApplied: 0,
+  pythonSubmissions: 0,
+};
 
 const validationProgram = `
 import json, sys
@@ -105,6 +91,8 @@ function validate(candidate: Candidate, signal: AbortSignal, python: string, con
       validPython,
       issueCode: issue?.code,
       issueLine: issue?.line,
+      issueColumn: issue?.column,
+      issueCategory: issue?.category,
     }),
   );
   return readPreflight(check);
@@ -120,8 +108,12 @@ function captureExchange(folder: string, exchange: DiagnosticExchange) {
   );
   if (Buffer.byteLength(response) <= 192 * 1024)
     writeFileSync(join(folder, `${tag}.response.json`), response, { mode: 0o600, flag: 'wx' });
-  const candidate =
-    exchange.extraction.outcome === 'submitted' ? exchange.extraction.candidate : undefined;
+  writeFileSync(
+    join(folder, `${tag}.prompt.json`),
+    JSON.stringify({ system: exchange.system, prompt: JSON.parse(exchange.prompt) }, null, 2),
+    { mode: 0o600, flag: 'wx' },
+  );
+  const candidate = exchange.candidate;
   const source =
     candidate?.source ?? ('source' in exchange.extraction ? exchange.extraction.source : undefined);
   if (source && Buffer.byteLength(source) <= 48 * 1024)
@@ -140,6 +132,7 @@ async function main() {
       'publisher-container': { type: 'string' },
       preview: { type: 'boolean' },
       capture: { type: 'boolean' },
+      'fixed-knowledge': { type: 'boolean' },
       task: { type: 'string' },
     },
   });
@@ -199,8 +192,12 @@ async function main() {
     },
     {
       preview: values.preview === true,
+      fixedKnowledge: values['fixed-knowledge'] === true,
       validate: (candidate, signal) =>
         validate(candidate, signal, values.python ?? 'python3', container),
+      metrics: (result) => {
+        metrics = result;
+      },
       capture: folder ? (exchange) => captureExchange(folder, exchange) : undefined,
     },
   );
@@ -211,6 +208,7 @@ async function main() {
     JSON.stringify({
       event: 'manim-model-diagnostic',
       task: taskId,
+      ...metrics,
       elapsedMs: Date.now() - started,
       submittedPython,
       validPython,
@@ -228,6 +226,7 @@ void main().catch((error: unknown) => {
     JSON.stringify({
       event: 'manim-model-diagnostic',
       task: taskId,
+      ...metrics,
       elapsedMs: Date.now() - started,
       submittedPython,
       validPython,

@@ -61,3 +61,9 @@
 - Added a reproducible Manim 0.22.1 API index from the hash-pinned wheel and matching upstream docs, with deterministic retrieval before authoring and 12 synthetic cue-scene examples.
 - Publisher preflight normalizes a uniquely identifiable cue scene, reuses the native contract, and distinguishes definite API errors from runtime-dependent hints. Repairs preserve the last candidate, use pinned alternatives and have their own bounded call allowance.
 - The example library passes static checks. The isolated example verifier and three synthetic model diagnostics are ready for HPC MP4 verification.
+
+## Scaffold, localized repair and model benchmark
+
+- The previous example rank mixed explicit topic matches with generic API overlap. The prompt packer could then drop all examples and replace an oversized candidate with an instruction to rewrite the scene. A realistic synthetic diffraction regression covers both paths. The production reply and exact prompt for the reported classroom request were unavailable.
+- Sahaya now supplies the scene wrapper and validates complete candidates after anchored line edits. The publisher supplies categorized syntax locations and resolves public APIs at sanitized runtime error locations.
+- The operator benchmark compares approved endpoints on three fixed objectives. Private prompt and candidate capture remains opt-in for synthetic diagnostics. Live comparison and instructional review are pending.

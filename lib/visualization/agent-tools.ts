@@ -34,6 +34,31 @@ export const submitSceneTools = {
   }),
 };
 
+export const sourceEdits = z
+  .object({
+    edits: z
+      .array(
+        z
+          .object({
+            start: z.number().int().min(1).max(10000),
+            end: z.number().int().min(0).max(10000),
+            replacement: z.string().max(4096),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(3),
+  })
+  .strict();
+
+export const repairSceneTools = {
+  edit_scene: tool({
+    description:
+      'Replace inclusive numbered lines with native Python, preserving indentation. For insertion before start, set end to start minus one. An empty replacement removes a range.',
+    inputSchema: sourceEdits,
+  }),
+};
+
 const topicBatch = z.object({ topics: z.array(topics).min(1).max(3) }).strict();
 const referenceRequest = z.union([topicBatch, z.object({ topic: topics }).strict()]);
 

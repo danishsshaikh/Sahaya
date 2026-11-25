@@ -10,6 +10,7 @@ import {
 } from '@/lib/visualization/skill';
 import { findManimDocumentation } from '@/lib/visualization/documentation';
 import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
+import { manimDiagnosticTasks } from '../../scripts/manim-diagnostic-tasks';
 import type { SceneOutline } from '@/lib/types/generation';
 
 const logs = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
@@ -34,6 +35,9 @@ class GeneratedScene(CueScene):
 const segments = [{ id: 'intro', narration: 'Here is the central maximum.' }];
 const submission = (code: string) =>
   JSON.stringify({ tool: 'submit_scene', source: code, segments });
+const edit = (line: number, replacement: string) =>
+  `# sahaya-edit: ${line}-${line}\n${replacement}`;
+const editFrom = (line: number, code: string) => edit(line, code.split('\n')[line - 1]);
 const annotated = (code: string) => `# sahaya-cues: ${JSON.stringify(segments)}\n${code}`;
 const verified = {
   version: '0.22.1/native-1',
@@ -169,10 +173,105 @@ afterEach(() => {
 });
 
 describe('native Manim agent', () => {
+  it('keeps the diffraction example and earlier repairs when a classroom candidate exceeds the prompt budget', async () => {
+    const diffraction: SceneOutline = {
+      ...outline,
+      ...manimDiagnosticTasks['single-slit-diffraction'],
+      keyPoints: [
+        ...manimDiagnosticTasks['single-slit-diffraction'].keyPoints,
+        'Label the axes in degrees, label the central maximum, and plot both curves on a common scale.',
+        'Compare the optical diagram with the graph and highlight the first dark fringes.',
+        'Show the curves one at a time and introduce the comparison only after the audience has seen the baseline.',
+      ],
+    };
+    const lessons = `Keep the classroom explanation accessible to undergraduates. Use direct, low-clutter labels and connect each plot to the previous optics lesson. ${'Keep both slit widths and the fixed wavelength legible. '.repeat(25)}`;
+    const filler = Array.from(
+      { length: 90 },
+      (_, i) => `        # supporting construction ${i} ${'checked visual detail '.repeat(6)}`,
+    ).join('\n');
+    const body = annotated(
+      `# sahaya-scene: standard\nfrom manim import *\ndef animate(self):\n    with self.cue("intro"):\n        axes = Axes(\n${filler}\n        self.play(Create(axes), wrong_keyword=1)\n`,
+    );
+    const badSyntax = 6;
+    const badArg = 97;
+    const submitted: string[] = [];
+    configure(18908, (url, init) => {
+      if (url.endsWith('/ready')) return Response.json({ ...verified, apiPreflight: '0.22.1' });
+      const candidate = JSON.parse(String(init?.body));
+      expect(candidate.segments).toEqual(segments);
+      if (url.endsWith('/preflight')) {
+        submitted.push(candidate.source);
+        return Response.json({
+          version: '0.22.1',
+          findings: [],
+          source: candidate.source,
+          ...(submitted.length === 1 && {
+            issue: {
+              code: 'syntax',
+              category: 'delimiter',
+              line: badSyntax,
+              column: 20,
+              message: 'private-parser-message',
+            },
+          }),
+        });
+      }
+      if (submitted.length === 2)
+        return Response.json({
+          status: 'failed',
+          issue: {
+            code: 'arguments',
+            line: badArg,
+            apiSymbols: ['Scene.play', 'Create', 'private-credential-path'],
+            message: 'private-runtime-message',
+          },
+        });
+      return Response.json(output);
+    });
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockResolvedValueOnce(body)
+      .mockResolvedValueOnce(edit(badSyntax, '        axes = Axes()'))
+      .mockResolvedValueOnce(edit(badArg, '        self.play(Create(axes))'));
+    await expect(
+      generate(ai, { outline: diffraction, allOutlines: [diffraction], requirement: lessons }),
+    ).resolves.toHaveProperty('artifact');
+    expect(submitted).toHaveLength(3);
+    expect(submitted[0]).toContain('class GeneratedScene(SahayaOwnedScene):');
+    expect(submitted[2]).toBe(
+      submitted[0].replace('axes = Axes(\n', 'axes = Axes()\n').replace(', wrong_keyword=1', ''),
+    );
+    for (const [system, encoded] of ai.mock.calls) {
+      const prompt = JSON.parse(encoded);
+      expect(prompt.knowledge.examples[0]?.id).toBe('wave');
+      expect(Buffer.byteLength(system + encoded)).toBeLessThanOrEqual(9216);
+    }
+    const syntaxPrompt = JSON.parse(ai.mock.calls[1][1]);
+    expect(syntaxPrompt.priorSourceAndCues).toBeUndefined();
+    expect(syntaxPrompt.executionFeedback).toMatchObject({
+      category: 'delimiter',
+      line: badSyntax,
+      column: 20,
+    });
+    const runtimePrompt = JSON.parse(ai.mock.calls[2][1]);
+    expect(runtimePrompt.priorSourceAndCues).toBeUndefined();
+    expect(runtimePrompt.executionFeedback).toMatchObject({
+      exception: 'TypeError',
+      apiSymbols: ['Scene.play', 'Create'],
+    });
+    expect(runtimePrompt.knowledge.entries[0].signature).toMatch(/^Scene\.play\(/);
+    expect(runtimePrompt.editableLines.lines).toContainEqual({
+      line: badArg,
+      text: '        self.play(Create(axes), wrong_keyword=1)',
+    });
+    expect(ai.mock.calls[2][1]).not.toContain('private-runtime-message');
+    expect(ai.mock.calls[1][1]).not.toContain('private-parser-message');
+  });
+
   it('discovers the builtin skill and reads only relevant references', async () => {
     const skill = await discoverManimSkill();
     expect(skill).toMatchObject({ name: 'sahaya-manim', version: '1.0.0' });
-    expect(skill.activate()).toContain('CueScene');
+    expect(skill.activate()).toContain('def animate(self):');
     expect(relevantReferences('plot on spatial axes')).toEqual([
       'layout',
       'timing',
@@ -202,7 +301,15 @@ describe('native Manim agent', () => {
         ],
       })
       .mockResolvedValueOnce(submission(source.replace('Circle()', 'missing()')))
-      .mockResolvedValueOnce(submission(source));
+      .mockResolvedValueOnce({
+        text: '',
+        toolCalls: [
+          {
+            toolName: 'edit_scene',
+            input: { edits: [{ start: 7, end: 7, replacement: source.split('\n')[6] }] },
+          },
+        ],
+      });
     await expect(
       generate(ai, { nativeTools: true, onProgress: (phase: string) => phases.push(phase) }),
     ).resolves.toMatchObject({ type: 'visualization', artifact: output.artifact });
@@ -221,7 +328,7 @@ describe('native Manim agent', () => {
     ]);
     expect(ai.mock.calls[0][3]).toHaveProperty('read_reference');
     expect(ai.mock.calls[1][3]).not.toHaveProperty('read_reference');
-    expect(ai.mock.calls[2][3]).not.toHaveProperty('read_reference');
+    expect(ai.mock.calls[2][3]).toHaveProperty('edit_scene');
     expect(ai.mock.calls[2][1]).toContain('Check the named Manim method');
     expect(ai).toHaveBeenCalledTimes(3);
     expect(phases).toContain('code-repair');
@@ -277,8 +384,8 @@ describe('native Manim agent', () => {
         JSON.stringify({ tool: 'look_up_manim', kind: 'constructor', query: 'NumberLine' }),
       )
       .mockResolvedValueOnce(submission(wrong))
-      .mockResolvedValueOnce(submission(unsafeAtRuntime))
-      .mockResolvedValueOnce(submission(corrected));
+      .mockResolvedValueOnce(editFrom(8, unsafeAtRuntime))
+      .mockResolvedValueOnce(editFrom(8, corrected));
     const requirements = 'Make this visualization clear. '.repeat(400);
     await expect(generate(ai, { requirement: requirements })).resolves.toMatchObject({
       artifact: output.artifact,
@@ -293,13 +400,16 @@ describe('native Manim agent', () => {
       ['standard', corrected],
     ]);
     const apiRepair = JSON.parse(ai.mock.calls[2][1]);
-    expect(apiRepair.priorSourceAndCues.source).toBe(normalized);
     expect(apiRepair.apiFindings[0].symbol).toBe('NumberLine.nudge');
     expect(apiRepair.knowledge.entries[0].signature).toContain('NumberLine.n2p(');
-    expect(apiRepair.sourceExcerpt.lines.join('\n')).toContain('axis.nudge(1)');
+    expect(
+      apiRepair.editableLines.lines.map(({ text }: { text: string }) => text).join('\n'),
+    ).toContain('axis.nudge(1)');
     expect(JSON.parse(ai.mock.calls[3][1])).toMatchObject({
-      priorSourceAndCues: { source: unsafeAtRuntime },
       executionFeedback: { code: 'runtime', line: 8 },
+      editableLines: {
+        lines: expect.arrayContaining([{ line: 8, text: unsafeAtRuntime.split('\n')[7] }]),
+      },
     });
     for (const [system, prompt] of ai.mock.calls)
       expect(Buffer.byteLength(system) + Buffer.byteLength(prompt)).toBeLessThanOrEqual(9216);
@@ -353,7 +463,7 @@ describe('native Manim agent', () => {
       .mockResolvedValueOnce('{"tool":"submit_scene",')
       .mockResolvedValueOnce(submission(broken))
       .mockResolvedValueOnce('\x60\x60\x60python\n' + source)
-      .mockResolvedValueOnce(annotated(source));
+      .mockResolvedValueOnce(editFrom(7, source));
     await expect(generate(ai)).resolves.toHaveProperty('artifact');
     expect(ai).toHaveBeenCalledTimes(4);
     expect(JSON.parse(ai.mock.calls[1][1]).formatFeedback.code).toBe('malformed_json');
@@ -364,13 +474,13 @@ describe('native Manim agent', () => {
       line: 7,
       message: expect.stringContaining('indentation'),
     });
-    expect(repair.formatFeedback.code).toBe('invalid_envelope');
-    expect(ai.mock.calls[3][0]).toContain('# sahaya-cues:');
+    expect(repair.formatFeedback.code).toBe('invalid_edit');
+    expect(ai.mock.calls[3][0]).toContain('# sahaya-edit:');
     expect(ai.mock.calls[3][1]).not.toContain('private-raw-error');
     expect(jobs.map((job) => [job.source, job.segments, job.quality])).toEqual([
       [broken, segments, 'preview'],
-      [annotated(source), segments, 'preview'],
-      [annotated(source), segments, 'standard'],
+      [source, segments, 'preview'],
+      [source, segments, 'standard'],
     ]);
     expect(logs.info).toHaveBeenCalledWith(
       'Manim render evaluated',
@@ -384,8 +494,8 @@ describe('native Manim agent', () => {
       'Manim tool request',
       expect.objectContaining({
         responseFormat: 'python',
-        extractionOutcome: 'submitted',
-        sourceBytes: Buffer.byteLength(annotated(source)),
+        extractionOutcome: 'edit',
+        sourceBytes: Buffer.byteLength(source),
       }),
     );
     expect(JSON.stringify(logs.info.mock.calls)).not.toContain(broken);
@@ -502,7 +612,7 @@ describe('native Manim agent', () => {
     const ai = vi
       .fn<VisualizationAiCall>()
       .mockResolvedValueOnce(submission(source))
-      .mockResolvedValue(submission(source + '# second candidate'));
+      .mockResolvedValue(edit(7, '            self.play(Create(Square()))'));
     await expect(generate(ai)).rejects.toMatchObject({
       code: 'VISUALIZATION_RENDER',
       detail: 'api',
@@ -625,7 +735,11 @@ describe('native Manim agent', () => {
       expect(new Headers(init?.headers).has('authorization')).toBe(false);
       gemmaCalls++;
       const response = () =>
-        completion(submission(gemmaCalls === 1 ? source.replace('Circle()', 'missing()') : source));
+        completion(
+          gemmaCalls === 1
+            ? submission(source.replace('Circle()', 'missing()'))
+            : editFrom(7, source),
+        );
       // The real deployment cancelled Gemma at this point. Exercise a usable
       // completion after the same elapsed time, without a real provider.
       return gemmaCalls === 1
@@ -860,7 +974,7 @@ describe('native Manim agent', () => {
       else await expect(result).rejects.toMatchObject({ code: 'VISUALIZATION_MODEL_OUTPUT_LIMIT' });
       expect(ai).toHaveBeenCalledTimes(2);
       const [initial, retry] = ai.mock.calls;
-      expect(retry[0]).toContain('The previous completion ended before it produced a usable scene');
+      expect(retry[0]).toContain('The previous completion ended before a usable response');
       expect(Buffer.byteLength(retry[0] + retry[1])).toBeLessThan(
         Buffer.byteLength(initial[0] + initial[1]),
       );
@@ -909,7 +1023,7 @@ describe('native Manim agent', () => {
       .mockImplementationOnce(async (_system, _prompt, _signal, _tools, routing) => {
         expect(routing?.manimBudget?.deadlineMs).toBe(started + 650_000);
         vi.setSystemTime(started + 648_000);
-        return submission(source + '# corrected');
+        return edit(7, '            self.play(Create(Square()))');
       });
     await expect(generate(ai)).resolves.toHaveProperty('artifact');
     expect(manimRenderWindows(manimAgentBudget(), false)).toEqual({

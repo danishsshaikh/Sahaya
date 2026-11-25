@@ -80,7 +80,7 @@ globalThis.fetch = async (url, init) => {
     }
     return Response.json({
       id: 'fixture', object:'chat.completion', created: 1, model: 'operator-fixture',
-      choices: [{index:0, finish_reason: 'stop', message: {role:'assistant', content: turn++ === 0 ? bad : good}}]
+      choices: [{index:0, finish_reason: 'stop', message: {role:'assistant', content: turn++ === 0 ? bad : '# sahaya-edit: 7-7\\n            self.add(Dot())'}}]
     });
   }
   if (url.endsWith('/ready')) return Response.json({
@@ -170,6 +170,120 @@ globalThis.fetch = async (url, init) => {
       expect(statSync(join(capture, 'turn-1.response.json')).mode & 0o777).toBe(0o600);
       expect(readFileSync(join(capture, 'turn-1.py'), 'utf8')).toBe(bad);
       expect(readFileSync(join(capture, 'turn-2.py'), 'utf8')).toBe(good);
+      expect(statSync(join(capture, 'turn-2.prompt.json')).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  'compares the same synthetic prompts and verified-preview criteria on two isolated model profiles',
+  { timeout: 20_000 },
+  () => {
+    const folder = mkdtempSync(join(tmpdir(), 'test-manim-benchmark-'));
+    try {
+      const preload = join(folder, 'transport.mjs');
+      const transportLog = join(folder, 'requests.jsonl');
+      writeFileSync(
+        join(folder, 'python3'),
+        `#!/bin/sh
+exec "$SAHAYA_FIXTURE_NODE" -e '
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const issue = input.source.includes("self.play(FadeIn(Dot())\\n") ? {code:"syntax", line:6} : undefined;
+console.log(JSON.stringify({version:"0.22.1", pythonVersion:"3.14.10", findings:[], source:input.source, issue}));
+'
+`,
+        { mode: 0o700 },
+      );
+      const source =
+        '# sahaya-cues: [{"id":"intro","narration":"Watch the illustration."}]\n# sahaya-scene: standard\nfrom manim import Dot, FadeIn\ndef animate(self):\n    with self.cue("intro"):\n        self.play(FadeIn(Dot()))\n';
+      const media = '0000ftyp-model-benchmark';
+      writeFileSync(
+        preload,
+        `
+import { appendFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+const source = ${JSON.stringify(source)};
+const media = ${JSON.stringify(media)};
+let turns = 0;
+globalThis.fetch = async (url, init) => {
+  url = String(url);
+  if (url.endsWith('/chat/completions')) {
+    const { model, messages } = JSON.parse(init.body);
+    if (turns === 0) appendFileSync(process.env.SAHAYA_BENCH_FIXTURE_LOG, JSON.stringify({ model, prompt: createHash('sha256').update(JSON.stringify(messages)).digest('hex') }) + '\\n');
+    const content = model === 'alt-fixture'
+      ? turns ? '# sahaya-edit: 6-6\\n        self.play(FadeIn(Dot()))' : source.replace('FadeIn(Dot()))', 'FadeIn(Dot())')
+      : source;
+    turns++;
+    return Response.json({ id:'fixture', object:'chat.completion', created:1, model,
+      choices:[{index:0, finish_reason:'stop', message:{ role:'assistant', content }}] });
+  }
+  if (url.endsWith('/ready')) return Response.json({ protocol:4, maxDuration:90, manimVersion:'0.22.1',
+    apiPreflight:'0.22.1', isolation:'verified', secureExecution:true, rendererReady:true,
+    backend:'bubblewrap', sandboxImage:'sha256:'+'a'.repeat(64) });
+  if (url.endsWith('/jobs')) return Response.json({ status:'completed', artifact:{
+    artifactId:'b'.repeat(64), quality:'preview', verification:{media:'decoded'}, bytes:media.length,
+    sha256:createHash('sha256').update(media).digest('hex') } });
+  if (url.endsWith('/video.mp4')) return new Response(media, {headers:{'Content-Length':String(media.length)}});
+  throw new Error('Unexpected fixture request');
+};
+`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--conditions=import',
+          '--import',
+          'tsx',
+          'scripts/benchmark-manim-models.ts',
+          '--profile',
+          'GEMMA',
+          '--profile',
+          'ALT',
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 18_000,
+          env: {
+            ...process.env,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            SAHAYA_BENCH_FIXTURE_LOG: transportLog,
+            TMPDIR: folder,
+            PATH: folder + delimiter + process.env.PATH,
+            SAHAYA_FIXTURE_NODE: process.execPath,
+            MANIM_AGENT_STREAM: 'false',
+            OPENMAIC_ENABLE_MANIM: 'true',
+            MANIM_RENDERER_URL: 'http://publisher.example',
+            MANIM_RENDERER_TOKEN: 'fake-publisher-token-at-least-24',
+            MANIM_BENCH_GEMMA_MODEL: 'openai:gemma-fixture',
+            MANIM_BENCH_GEMMA_BASE_URL: 'http://gemma.example/v1',
+            MANIM_BENCH_ALT_MODEL: 'openai:alt-fixture',
+            MANIM_BENCH_ALT_BASE_URL: 'http://alt.example/v1',
+          },
+        },
+      );
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      const records = result.stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(records[0].tasks).toEqual(['number-line', 'function-plot', 'single-slit-diffraction']);
+      expect(records.filter((entry) => entry.event === 'manim-benchmark-trial')).toHaveLength(6);
+      expect(records.slice(-2)).toMatchObject([
+        { profile: 'GEMMA', firstPass: 3, repairAttempts: 0, repaired: 0, playable: 3 },
+        { profile: 'ALT', firstPass: 0, repairAttempts: 3, repaired: 3, playable: 3 },
+      ]);
+      const requests = readFileSync(transportLog, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(requests).toHaveLength(6);
+      for (let i = 0; i < requests.length; i += 2)
+        expect(requests[i].prompt).toBe(requests[i + 1].prompt);
+      expect(result.stdout).not.toContain('manim-model-capture');
+      expect(result.stdout).not.toContain('fake-publisher-token');
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }

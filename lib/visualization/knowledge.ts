@@ -138,6 +138,26 @@ function getEntry(index: Index, symbol: string, detailed = false): ApiEntry | un
 }
 
 const tokens = (text: string) => text.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? [];
+
+function exampleExcerpt(source: string) {
+  // The bundled examples also run as standalone files. Show their authored
+  // Python in the same format the model is asked to use.
+  const wrapper =
+    /^from sahaya_timing import (CueScene|CueMovingCameraScene|CueThreeDScene)\n\nclass GeneratedScene\(\1\):\n    def construct\(self\):\n/m.exec(
+      source,
+    );
+  if (wrapper) {
+    const mode =
+      wrapper[1] === 'CueScene'
+        ? 'standard'
+        : wrapper[1] === 'CueMovingCameraScene'
+          ? 'moving-camera'
+          : 'three-d';
+    const firstLine = source.indexOf('\n');
+    source = `${source.slice(0, firstLine + 1)}# sahaya-scene: ${mode}\n${source.slice(firstLine + 1, wrapper.index)}def animate(self):\n${source.slice(wrapper.index + wrapper[0].length).replace(/^ {4}/gm, '')}`;
+  }
+  return source.length <= 720 ? source : source.slice(0, 720).replace(/\n[^\n]*$/, '\n');
+}
 export type Lookup = {
   query: string;
   kind: 'search' | 'class' | 'constructor' | 'method' | 'examples' | 'alternatives';
@@ -147,10 +167,12 @@ export async function retrieveManimKnowledge(
   task: string,
   lookup?: Lookup,
   repairs: string[] = [],
+  focus = task,
 ): Promise<Knowledge> {
   const { index, examples } = await loadManimKnowledge();
   const text = (lookup?.query ?? task).slice(0, 6000);
   const words = new Set(tokens(text));
+  const focusWords = new Set(tokens((lookup?.query ?? focus).slice(0, 6000)));
   const direct = [...new Set(text.match(/\b[A-Za-z]\w*(?:\.[A-Za-z]\w*)?/g) ?? [])]
     .filter((item) => getEntry(index, item))
     .slice(0, 8);
@@ -193,25 +215,34 @@ export async function retrieveManimKnowledge(
             const item = getEntry(index, id, !!lookup && direct.includes(id));
             if (!item) return [];
             // Keep the complete requested signature when looking up an exact API.
-            return [{ ...item, signature: item.signature.slice(0, lookup ? 1600 : 800) }];
+            return [
+              {
+                ...item,
+                signature: item.signature.slice(0, lookup || repairs.includes(id) ? 1600 : 800),
+              },
+            ];
           })
           .slice(0, lookup ? 10 : 11);
   const best = examples
     .map((entry) => ({
       entry,
+      focusMatches: (entry.concepts ?? []).filter((word) => focusWords.has(word)).length,
+      conceptMatches: (entry.concepts ?? []).filter((word) => words.has(word)).length,
       score:
         entry.symbols.reduce((score, name) => score + (entrySet.has(name) ? 2 : 0), 0) +
-        tokens(entry.title).filter((word) => words.has(word)).length * 3 +
-        (entry.concepts ?? []).filter((word) => words.has(word)).length * 5,
+        tokens(entry.title).filter((word) => words.has(word)).length * 3,
     }))
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id));
+    .filter(({ focusMatches, conceptMatches, score }) => focusMatches || conceptMatches || score)
+    .sort(
+      (a, b) =>
+        b.focusMatches - a.focusMatches ||
+        b.conceptMatches - a.conceptMatches ||
+        b.score - a.score ||
+        a.entry.id.localeCompare(b.entry.id),
+    );
   const selected = best.slice(0, 2).map(({ entry }) => ({
     id: entry.id,
-    excerpt:
-      entry.source.length <= 720
-        ? entry.source
-        : entry.source.slice(0, 720).replace(/\n[^\n]*$/, '\n'),
+    excerpt: exampleExcerpt(entry.source),
   }));
   const notes = /cairo|opengl|renderer|3d|camera/.test(text.toLowerCase())
     ? index.documents

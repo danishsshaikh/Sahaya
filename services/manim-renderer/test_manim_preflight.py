@@ -25,6 +25,38 @@ class ManimPreflightTests(unittest.TestCase):
     def check(self, source):
         return manim_preflight.preflight({**REQUEST, "source": source})
 
+    def test_scaffold_checks_entry_function_and_literal_cues_for_all_modes(self):
+        for base in ("CueScene", "CueMovingCameraScene", "CueThreeDScene"):
+            fragment = ('from manim import *\ndef animate(self):\n'
+                        '    with self.cue("intro"):\n        self.play(Create(Circle()))\n')
+            wrapper = (f'\nfrom sahaya_timing import {base} as SahayaOwnedScene\n\n'
+                       'class GeneratedScene(SahayaOwnedScene):\n'
+                       '    def construct(self):\n        return animate(self)\n')
+            with self.subTest(base=base):
+                self.assertNotIn("issue", self.check(fragment + wrapper))
+                self.assertEqual(self.check(fragment.replace('"intro"', '"wrong"') + wrapper)["issue"]["code"], "cues")
+                wrong_entry = self.check(fragment.replace('animate(self)', 'animate(self, extra)') + wrapper)["issue"]
+                self.assertEqual((wrong_entry["code"], wrong_entry["category"], wrong_entry["line"]),
+                                 ("entryPoint", "scaffoldEntry", 2))
+
+    def test_syntax_categories_include_parser_locations_without_echoing_source(self):
+        for source, category in [('def animate(self)\n    pass\n', 'expectedColon'),
+                                 ('def animate(self):\npass\n', 'expectedIndentation'),
+                                 ('a = (\n', 'delimiter'),
+                                 ('a = "private teaching text\n', 'unterminatedString')]:
+            with self.subTest(category=category):
+                issue = self.check(source)["issue"]
+                self.assertEqual((issue["code"], issue["category"]), ("syntax", category))
+                self.assertGreaterEqual(issue["line"], 1)
+                self.assertGreaterEqual(issue["column"], 1)
+                self.assertNotIn("private teaching text", str(issue))
+
+    def test_runtime_api_context_resolves_known_receiver_and_nested_constructor(self):
+        source = SOURCE.replace('self.play(Create(axis), FadeIn(Dot(axis.n2p(0))))',
+                                'self.play(FadeIn(Dot(axis.n2p(0), invalid=True)))')
+        self.assertEqual(manim_preflight.runtime_symbols(source, 7),
+                         ['Scene.play', 'FadeIn', 'Dot', 'NumberLine.n2p'])
+
     def test_recovers_wrong_entry_point_without_changing_other_lines(self):
         result = self.check(SOURCE.replace("GeneratedScene", "PointOnNumberLine"))
         self.assertNotIn("issue", result)

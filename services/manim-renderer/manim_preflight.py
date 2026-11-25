@@ -150,7 +150,7 @@ def straight_line(statements):
             yield from straight_line(statement.body)
 
 
-def api_findings(tree, bindings, api):
+def api_findings(tree, bindings, api, *, runtime_line=None, calls=None):
     classes, exports = api["classes"], api["exports"]
     findings = []
     changed_attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
@@ -162,6 +162,10 @@ def api_findings(tree, bindings, api):
     def class_key(call):
         module, name = imported_symbol(call.func, bindings)
         return exports.get(name) if module == "manim" else None
+
+    def runtime_symbol(node, symbol):
+        if calls is not None and node.lineno <= runtime_line <= node.end_lineno and symbol not in calls:
+            calls.append(symbol)
 
     def note(kind, node, symbol, certain=False, alternatives=()):
         if len(findings) < 8:
@@ -201,6 +205,9 @@ def api_findings(tree, bindings, api):
             if not isinstance(node, ast.Call):
                 continue
             key = class_key(node)
+            if calls is not None and (key in classes or key in api["functions"]):
+                _, name = imported_symbol(node.func, bindings)
+                runtime_symbol(node, name)
             if key in classes:
                 valid, complete = constructor(classes, key)
                 for keyword in node.keywords:
@@ -211,6 +218,8 @@ def api_findings(tree, bindings, api):
             if not isinstance(node.func, ast.Attribute) or not isinstance(node.func.value, ast.Name):
                 continue
             method, receiver = node.func.attr, node.func.value.id
+            if calls is not None and receiver == "self" and method in {"play", "add", "wait", "remove"}:
+                runtime_symbol(node, f"Scene.{method}")
             if method == "play" and receiver == "self":
                 for argument in node.args:
                     if isinstance(argument, ast.Call):
@@ -231,16 +240,20 @@ def api_findings(tree, bindings, api):
                 if method == "remove_updater" and (isinstance(argument, ast.Lambda) or
                         isinstance(argument, ast.Name) and receiver in adds and argument.id not in adds[receiver]):
                     note("updaterIdentity", node, "Mobject.remove_updater", alternatives=("Mobject.add_updater", "Mobject.remove_updater"))
-            if receiver not in types or method in changed_attributes or method.startswith(("get_", "set_", "_")):
+            if receiver not in types or method in changed_attributes:
                 continue
             key, assigned = types[receiver]
             if node.lineno <= assigned:
                 continue
             layers, complete = hierarchy(classes, key)
             methods = {name for layer in layers for name in layer["methods"]}
+            name = classes[key]["name"]
+            if method in methods and exports.get(name) == key:
+                runtime_symbol(node, f"{name}.{method}")
+            if method.startswith(("get_", "set_", "_")):
+                continue
             attributes = {name for layer in layers for name in layer["attributes"]}
             if method not in methods and method not in attributes and method not in {"animate", "always"}:
-                name = classes[key]["name"]
                 alternatives = [f"{name}.{item}" for item in get_close_matches(method, sorted(methods), n=2, cutoff=0.64)]
                 alternatives.extend(f"{name}.{item}" for item in RELATED.get(name, ()) if item in methods)
                 # A nonstandard attribute provider or an unindexed base makes
@@ -250,11 +263,53 @@ def api_findings(tree, bindings, api):
     return findings
 
 
+def runtime_symbols(source, line):
+    """Resolve public APIs at a sandbox-reported line without running the candidate."""
+    tree = ast.parse(source, filename="<sahaya-scene>")
+    calls = []
+    api_findings(tree, imports(tree), knowledge(), runtime_line=line, calls=calls)
+    return calls[:6]
+
+
+def syntax_details(error):
+    message = error.msg.lower()
+    if isinstance(error, TabError):
+        category = "mixedIndentation"
+    elif isinstance(error, IndentationError):
+        category = ("expectedIndentation" if "expected an indented block" in message else
+                    "unexpectedIndentation" if "unexpected indent" in message else "invalidDedent")
+    elif "was never closed" in message or "does not match opening parenthesis" in message or "unmatched" in message:
+        category = "delimiter"
+    elif "unterminated" in message or "eof while scanning" in message:
+        category = "unterminatedString"
+    elif message == "expected ':'":
+        category = "expectedColon"
+    else:
+        category = "invalidSyntax"
+    issue = Rejected("syntax", "Correct the Python syntax at the reported location.", error.lineno).issue
+    issue["category"] = category
+    for wire, value in (("column", error.offset), ("endLine", error.end_lineno), ("endColumn", error.end_offset)):
+        if type(value) is int and 1 <= value <= 10000:
+            issue[wire] = value
+    return issue
+
+
 def check_scene(tree, segments, bindings):
     scene = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "GeneratedScene")
     if not scene.bases or all(imported_symbol(base, bindings)[0] == "manim" for base in scene.bases):
         raise Rejected("entryPoint", "Use a Sahaya cue scene base for GeneratedScene.", scene.lineno)
     construct = next(node for node in scene.body if isinstance(node, ast.FunctionDef) and node.name == "construct")
+    if any(isinstance(base, ast.Name) and base.id == "SahayaOwnedScene" for base in scene.bases):
+        animations = [item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "animate"]
+        args = animations[0].args if len(animations) == 1 else None
+        if (not args or [arg.arg for arg in args.args] != ["self"] or args.posonlyargs or args.kwonlyargs
+                or args.vararg or args.kwarg or args.defaults or animations[0].decorator_list):
+            other_function = next((item for item in tree.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
+            line = animations[0].lineno if animations else other_function.lineno if other_function else 3
+            error = Rejected("entryPoint", "Provide one top-level def animate(self) for the Sahaya scaffold.", line)
+            error.issue["category"] = "scaffoldEntry"
+            raise error
+        construct = animations[0]
     calls = [item for item in ast.walk(construct) if cue_call(item)]
     direct = [item.context_expr for node in construct.body if isinstance(node, ast.With) for item in node.items
               if item.context_expr in calls]
@@ -274,7 +329,10 @@ def preflight(request):
             check_request(request)
         try:
             tree = ast.parse(source, filename="<sahaya-scene>")
-        except (SyntaxError, ValueError, RecursionError, MemoryError):
+        except SyntaxError as error:
+            result["issue"] = syntax_details(error)
+            return result
+        except (ValueError, RecursionError, MemoryError):
             check_request(request)
             raise
         source, operation = normalize(source, tree, imports(tree))
