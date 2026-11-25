@@ -45,4 +45,8 @@
 ## Phase deadlines and operator diagnostics
 
 - The last live turn reached Gemma but exhausted the 260-second agent deadline during inference. The scene API also had a separate 280-second timer. A dedicated Manim route can now select local Gemma first, and the self-hosted agent owns one deadline with separate authoring, correction, documentation, preview and final windows.
-- Added bounded prompts and completion sizes for the reported 8,192-token context, reasoning and first-token metrics, and separate operator diagnostics for authoring and the authenticated publisher. Live HPC measurements and the actual Bubblewrap smoke render remain to be run by the operator.
+- Added bounded prompts and completion sizes for the reported 8,192-token context, reasoning and first-token metrics, and separate operator diagnostics for authoring and the authenticated publisher. The operator verified an MP4 through the deployed publisher and Bubblewrap executor.
+
+## Gemma reasoning exhaustion
+
+- The live Manim diagnostic spent three 3,072-token completions without submitting Python. The operator verified that the llama.cpp chat-template switch returned Python in a direct request. Manim now forwards that switch on marked tiers, retries exhaustion once with a smaller prompt, and reports missing reasoning counts separately from known zero. The Node diagnostic command includes the workspace import condition.

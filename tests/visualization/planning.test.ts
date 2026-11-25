@@ -57,7 +57,8 @@ function completion(
   content: string | null,
   finishReason = 'stop',
   reasoning?: string,
-  reasoningTokens = 0,
+  reasoningTokens: number | null = 0,
+  outputTokens = reasoningTokens || 120,
 ) {
   return Response.json({
     id: 'chat-gemma',
@@ -73,10 +74,54 @@ function completion(
     ],
     usage: {
       prompt_tokens: 440,
-      completion_tokens: reasoningTokens || 120,
-      completion_tokens_details: { reasoning_tokens: reasoningTokens },
+      completion_tokens: outputTokens,
+      ...(reasoningTokens !== null && {
+        completion_tokens_details: { reasoning_tokens: reasoningTokens },
+      }),
     },
   });
+}
+
+function streamCompletion(content: string, reasoning?: string, reasoningTokens?: number) {
+  const base = {
+    id: 'gemma-stream',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'gemma-local',
+  };
+  const events = [
+    ...(reasoning
+      ? [
+          {
+            ...base,
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content: reasoning },
+                finish_reason: null,
+              },
+            ],
+          },
+        ]
+      : []),
+    { ...base, choices: [{ index: 0, delta: { content }, finish_reason: null }] },
+    { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    {
+      ...base,
+      choices: [],
+      usage: {
+        prompt_tokens: 440,
+        completion_tokens: 130,
+        ...(reasoningTokens !== undefined && {
+          completion_tokens_details: { reasoning_tokens: reasoningTokens },
+        }),
+      },
+    },
+  ];
+  return new Response(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n',
+    { headers: { 'content-type': 'text/event-stream' } },
+  );
 }
 
 function localManim() {
@@ -467,14 +512,17 @@ describe('native Manim agent', () => {
       const body = JSON.parse(String(init?.body));
       if (url.startsWith('http://gemma.example/')) {
         expect(body).toMatchObject({ model: 'gemma-local', reasoning_effort: 'none' });
+        expect(body).not.toHaveProperty('chat_template_kwargs');
         expect(body.max_completion_tokens ?? body.max_tokens).toBe(3072);
         return completion(submission(source));
       }
       expect(body).toMatchObject({ model: 'normal-primary' });
       expect(body).not.toHaveProperty('reasoning_effort');
+      expect(body).not.toHaveProperty('chat_template_kwargs');
       return completion('ordinary');
     });
     localManim();
+    vi.stubEnv('MANIM_MODEL_ENABLE_THINKING', 'false');
     vi.stubEnv('MANIM_MODEL_PRIMARY_DISABLE_REASONING', 'true');
     vi.stubEnv('LLM_ROUTER_ENABLED', 'true');
     vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:normal-primary');
@@ -489,94 +537,156 @@ describe('native Manim agent', () => {
     );
   });
 
-  it('classifies reasoning-only completion exhaustion and logs counts without logging reasoning', async () => {
-    const requests = configure(18892, (input) =>
-      String(input).endsWith('/ready')
-        ? Response.json(verified)
-        : completion(null, 'length', 'private reasoning fragment', 64),
-    );
-    localManim();
-    vi.stubEnv('MANIM_AGENT_COMPLETION_TOKENS', '64');
-    vi.stubEnv('MANIM_AGENT_MODEL_CALLS', '1');
-    await expect(generate(createManimAiCall({ model: 'unrelated' }))).rejects.toMatchObject({
-      code: 'VISUALIZATION_MODEL_OUTPUT_LIMIT',
-    });
-    expect(requests.mock.calls.filter(([input]) => String(input).endsWith('/jobs'))).toHaveLength(
-      0,
-    );
-    expect(logs.info).toHaveBeenCalledWith(
-      'Manim model turn',
-      expect.objectContaining({
-        requestedCompletionTokens: 64,
-        inputTokens: 440,
-        outputTokens: 64,
-        reasoningTokens: 64,
-        finishReason: 'length',
-      }),
-    );
-    expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private reasoning fragment');
-  });
-
-  it('uses bounded streaming to report first-token and completion metrics', async () => {
-    configure(18893, (input) => {
-      const url = String(input);
-      if (url.endsWith('/ready')) return Response.json(verified);
-      if (url.endsWith('/jobs')) return Response.json(output);
-      const base = {
-        id: 'gemma-stream',
-        object: 'chat.completion.chunk',
-        created: 1,
-        model: 'gemma-local',
-      };
-      const events = [
-        {
-          ...base,
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content: 'private streaming reasoning' },
-              finish_reason: null,
-            },
-          ],
-        },
-        {
-          ...base,
-          choices: [{ index: 0, delta: { content: submission(source) }, finish_reason: null }],
-        },
-        {
-          ...base,
-          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          usage: {
-            prompt_tokens: 440,
-            completion_tokens: 130,
-            completion_tokens_details: { reasoning_tokens: 12 },
-          },
-        },
-      ];
-      return new Response(
-        events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n',
-        { headers: { 'content-type': 'text/event-stream' } },
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    'passes the verified llama.cpp flag with streaming=%s and thinking=%s',
+    async (stream, enableThinking) => {
+      const requests = configure(18896, (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/ready')) return Response.json(verified);
+        if (url.endsWith('/jobs')) return Response.json(output);
+        const body = JSON.parse(String(init?.body));
+        expect(body.model).toBe('gemma-local');
+        expect(Boolean(body.stream)).toBe(stream);
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: enableThinking });
+        expect(body).not.toHaveProperty('reasoning_effort');
+        return stream
+          ? streamCompletion(submission(source), undefined, 0)
+          : completion(submission(source));
+      });
+      localManim();
+      vi.stubEnv('MANIM_MODEL_PRIMARY_LLAMA_CPP', 'true');
+      vi.stubEnv('MANIM_MODEL_ENABLE_THINKING', String(enableThinking));
+      vi.stubEnv('MANIM_MODEL_PRIMARY_DISABLE_REASONING', 'true');
+      vi.stubEnv('MANIM_AGENT_STREAM', String(stream));
+      await expect(generate(createManimAiCall({ model: 'unrelated' }))).resolves.toHaveProperty(
+        'artifact',
       );
-    });
-    localManim();
-    vi.stubEnv('MANIM_AGENT_STREAM', 'true');
-    await expect(generate(createManimAiCall({ model: 'unrelated' }))).resolves.toHaveProperty(
-      'artifact',
-    );
-    expect(logs.info).toHaveBeenCalledWith(
-      'Manim first token',
-      expect.objectContaining({ ms: expect.any(Number) }),
-    );
-    expect(logs.info).toHaveBeenCalledWith(
-      'Manim model turn',
-      expect.objectContaining({
-        firstTokenMs: expect.any(Number),
-        reasoningTokens: 12,
-        finishReason: 'stop',
-      }),
-    );
-    expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private streaming reasoning');
-  });
+      expect(
+        requests.mock.calls.filter(([url]) => String(url).endsWith('/chat/completions')),
+      ).toHaveLength(1);
+      expect(logs.info).toHaveBeenCalledWith(
+        'Manim model turn',
+        expect.objectContaining({
+          reasoningTokens: 0,
+          reasoningTokensAvailable: true,
+          finishReason: 'stop',
+        }),
+      );
+    },
+  );
+
+  it.each([64, null])(
+    'classifies buffered reasoning exhaustion and reports only supplied token counts (%s)',
+    async (reported) => {
+      const requests = configure(18892, (input) =>
+        String(input).endsWith('/ready')
+          ? Response.json(verified)
+          : completion(null, 'length', 'private reasoning fragment', reported, 64),
+      );
+      localManim();
+      vi.stubEnv('MANIM_AGENT_COMPLETION_TOKENS', '64');
+      vi.stubEnv('MANIM_AGENT_MODEL_CALLS', '1');
+      await expect(generate(createManimAiCall({ model: 'unrelated' }))).rejects.toMatchObject({
+        code: 'VISUALIZATION_MODEL_OUTPUT_LIMIT',
+      });
+      expect(requests.mock.calls.filter(([input]) => String(input).endsWith('/jobs'))).toHaveLength(
+        0,
+      );
+      expect(logs.info).toHaveBeenCalledWith(
+        'Manim model turn',
+        expect.objectContaining({
+          requestedCompletionTokens: 64,
+          inputTokens: 440,
+          outputTokens: 64,
+          reasoningTokens: reported ?? undefined,
+          reasoningTokensAvailable: reported !== null,
+          finishReason: 'length',
+        }),
+      );
+      expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private reasoning fragment');
+    },
+  );
+
+  it.each([12, undefined, 0])(
+    'reports first-token latency and honest streaming reasoning counts (%s)',
+    async (reported) => {
+      configure(18893, (input) => {
+        const url = String(input);
+        if (url.endsWith('/ready')) return Response.json(verified);
+        if (url.endsWith('/jobs')) return Response.json(output);
+        return streamCompletion(submission(source), 'private streaming reasoning', reported);
+      });
+      localManim();
+      vi.stubEnv('MANIM_AGENT_STREAM', 'true');
+      await expect(generate(createManimAiCall({ model: 'unrelated' }))).resolves.toHaveProperty(
+        'artifact',
+      );
+      expect(logs.info).toHaveBeenCalledWith(
+        'Manim first token',
+        expect.objectContaining({ ms: expect.any(Number) }),
+      );
+      expect(logs.info).toHaveBeenCalledWith(
+        'Manim model turn',
+        expect.objectContaining({
+          firstTokenMs: expect.any(Number),
+          reasoningTokens: reported || undefined,
+          reasoningTokensAvailable: Boolean(reported),
+          reasoningBytes: Buffer.byteLength('private streaming reasoning'),
+          finishReason: 'stop',
+        }),
+      );
+      expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private streaming reasoning');
+    },
+  );
+
+  it.each([true, false])(
+    'tries one smaller completion recovery without reducing the output limit (recovers: %s)',
+    async (recover) => {
+      const requests = configure(18897, (input) =>
+        String(input).endsWith('/ready') ? Response.json(verified) : Response.json(output),
+      );
+      const exhausted = {
+        text: '',
+        finishReason: 'length',
+        reasoningText: 'private buffered reasoning',
+        usage: { outputTokens: 3072, outputTokenDetails: { reasoningTokens: 0 } },
+      };
+      const ai = vi
+        .fn<VisualizationAiCall>()
+        .mockResolvedValueOnce(exhausted)
+        .mockResolvedValueOnce(recover ? submission(source) : exhausted);
+      const result = generate(ai, { requirement: 'Keep the central maximum and its units.' });
+      if (recover) await expect(result).resolves.toHaveProperty('artifact');
+      else await expect(result).rejects.toMatchObject({ code: 'VISUALIZATION_MODEL_OUTPUT_LIMIT' });
+      expect(ai).toHaveBeenCalledTimes(2);
+      const [initial, retry] = ai.mock.calls;
+      expect(retry[0]).toContain('The previous completion ended before it produced a usable scene');
+      expect(Buffer.byteLength(retry[0] + retry[1])).toBeLessThan(
+        Buffer.byteLength(initial[0] + initial[1]),
+      );
+      expect(JSON.parse(retry[1]).task.requirements).toBe(
+        'Keep the central maximum and its units.',
+      );
+      expect(retry[4]?.completionTokens).toBe(initial[4]?.completionTokens);
+      expect(logs.info).toHaveBeenCalledWith(
+        'Manim model turn',
+        expect.objectContaining({
+          call: 1,
+          reasoningTokens: undefined,
+          reasoningTokensAvailable: false,
+          reasoningBytes: expect.any(Number),
+        }),
+      );
+      expect(requests.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(
+        recover ? 2 : 0,
+      );
+    },
+  );
 
   it('allocates separate authoring and correction time and keeps preview and final time reserved', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });

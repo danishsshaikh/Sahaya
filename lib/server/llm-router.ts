@@ -64,6 +64,7 @@ interface Endpoint {
   apiKey: string;
   local: boolean;
   disableReasoning?: boolean;
+  enableThinking?: boolean;
 }
 
 interface Config {
@@ -179,15 +180,19 @@ function endpoint(prefix: string, inherited?: Endpoint): Endpoint {
   if (!/^[a-zA-Z0-9._-]+$/.test(providerId) || !/^[a-zA-Z0-9._/:+-]+$/.test(modelId)) {
     throw new Error(`${prefix}_MODEL must be a provider:model identifier.`);
   }
+  const dedicatedManim = prefix.startsWith('MANIM_MODEL_');
+  const llamaCpp = dedicatedManim && process.env[`${prefix}_LLAMA_CPP`] === 'true';
   return {
     providerId,
     modelId,
     baseUrl,
     apiKey: process.env[`${prefix}_API_KEY`] ?? inherited?.apiKey ?? '',
     local: process.env[`${prefix}_LOCAL`] === 'true',
-    ...(prefix.startsWith('MANIM_MODEL_') && process.env[`${prefix}_DISABLE_REASONING`] === 'true'
-      ? { disableReasoning: true }
-      : {}),
+    ...(llamaCpp
+      ? { enableThinking: process.env.MANIM_MODEL_ENABLE_THINKING === 'true' }
+      : dedicatedManim && process.env[`${prefix}_DISABLE_REASONING`] === 'true'
+        ? { disableReasoning: true }
+        : {}),
   };
 }
 
@@ -360,13 +365,18 @@ function adaptCompatibleRequestBody(
   init?: RequestInit,
 ): RequestInit | undefined {
   const nemotron = isNemotronEndpoint(endpoint);
-  if (!init?.body || typeof init.body !== 'string' || (!nemotron && !endpoint.disableReasoning))
+  if (
+    !init?.body ||
+    typeof init.body !== 'string' ||
+    (!nemotron && !endpoint.disableReasoning && endpoint.enableThinking === undefined)
+  )
     return init;
   try {
     const body = JSON.parse(init.body) as Record<string, unknown>;
     if (hasToolRequest(body)) return init;
     if (endpoint.disableReasoning) body.reasoning_effort = 'none';
-    if (!nemotron) return { ...init, body: JSON.stringify(body) };
+    if (!nemotron && endpoint.enableThinking === undefined)
+      return { ...init, body: JSON.stringify(body) };
     const current =
       body.chat_template_kwargs &&
       typeof body.chat_template_kwargs === 'object' &&
@@ -379,18 +389,34 @@ function adaptCompatibleRequestBody(
       body: JSON.stringify({
         ...body,
         // Preserve existing Nemotron/Ultra behavior; Super may retain an explicit toggle.
-        chat_template_kwargs: isSuper
-          ? {
-              ...current,
-              enable_thinking:
-                typeof current.enable_thinking === 'boolean' ? current.enable_thinking : false,
-            }
-          : { ...current, enable_thinking: false },
+        chat_template_kwargs: {
+          ...current,
+          enable_thinking:
+            endpoint.enableThinking ??
+            (isSuper && typeof current.enable_thinking === 'boolean'
+              ? current.enable_thinking
+              : false),
+        },
       }),
     };
   } catch {
     return init;
   }
+}
+
+export function reportedReasoningTokens(usage: unknown, sawReasoning: boolean) {
+  // The OpenAI Chat adapter fills in zero when this wire field is missing.
+  // Keep an explicit zero only when it agrees with the response content.
+  if (!usage || typeof usage !== 'object') return undefined;
+  const raw = usage as Record<string, unknown>;
+  const detail = raw.completion_tokens_details ?? raw.output_tokens_details;
+  if (!detail || typeof detail !== 'object' || !('reasoning_tokens' in detail)) return undefined;
+  const count = detail.reasoning_tokens;
+  return typeof count === 'number' &&
+    Number.isSafeInteger(count) &&
+    (count > 0 || (count === 0 && !sawReasoning))
+    ? count
+    : undefined;
 }
 
 function buildModel(e: Endpoint, manim: boolean): Model {
@@ -594,6 +620,7 @@ export function createLLMRouter(
     options: CallOptions,
     completion?: Completion,
     firstTokenMs?: number,
+    sawReasoning = false,
   ) =>
     manim
       ? {
@@ -601,7 +628,7 @@ export function createLLMRouter(
           requestedCompletionTokens: options.maxOutputTokens,
           inputTokens: completion?.usage.inputTokens.total,
           outputTokens: completion?.usage.outputTokens.total,
-          reasoningTokens: completion?.usage.outputTokens.reasoning,
+          reasoningTokens: reportedReasoningTokens(completion?.usage.raw, sawReasoning),
           finishReason: completion?.finishReason.unified,
           timeToFirstTokenMs: firstTokenMs,
           remainingInferenceMs: Math.max(0, manim.deadlineMs - Date.now()),
@@ -712,7 +739,18 @@ export function createLLMRouter(
           );
           committed = true;
           healthy();
-          report('success', start, timeoutMs, undefined, inferenceMetrics(options, result));
+          report(
+            'success',
+            start,
+            timeoutMs,
+            undefined,
+            inferenceMetrics(
+              options,
+              result,
+              undefined,
+              !!manim && result.content.some((part) => part.type === 'reasoning' && !!part.text),
+            ),
+          );
           return result;
         } catch (error) {
           if (!handleFailure(error, options, start, timeoutMs)) throw error;
@@ -766,7 +804,9 @@ export function createLLMRouter(
           const initial = header ? [header, first] : [first];
           let completion: Completion | undefined = first.type === 'finish' ? first : undefined;
           let firstTokenMs: number | undefined;
+          let sawReasoning = false;
           const observe = (part: Part) => {
+            if (part.type === 'reasoning-delta' && part.delta) sawReasoning = true;
             if (
               firstTokenMs === undefined &&
               (part.type === 'text-delta' || part.type === 'reasoning-delta') &&
@@ -795,7 +835,7 @@ export function createLLMRouter(
                         start,
                         manim ? attemptMs : timeoutMs,
                         undefined,
-                        inferenceMetrics(options, completion, firstTokenMs),
+                        inferenceMetrics(options, completion, firstTokenMs, sawReasoning),
                       );
                       cancel();
                       controller.close();

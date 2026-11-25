@@ -116,6 +116,8 @@ Set these in the application environment to run Manim on the verified HPC Gemma 
 MANIM_MODEL_PRIMARY_MODEL=openai:<exact-gemma-model-id>
 MANIM_MODEL_PRIMARY_BASE_URL=http://127.0.0.1:24181/v1
 MANIM_MODEL_PRIMARY_LOCAL=true
+MANIM_MODEL_PRIMARY_LLAMA_CPP=true
+MANIM_MODEL_ENABLE_THINKING=false
 MANIM_AGENT_DEADLINE_SECONDS=900
 ```
 
@@ -136,21 +138,21 @@ The overall deadline includes every phase. Manim holds the next preview and fina
 
 HPC reported an 8,192-token Gemma context. The default request allows 3,072 completion tokens, including any reasoning, and fits the prompt to a conservative byte estimate. The prompt drops remote snippets before omitting prior source that cannot fit. Set `MANIM_AGENT_CONTEXT_TOKENS`, `MANIM_AGENT_COMPLETION_TOKENS`, or `MANIM_AGENT_PROMPT_BYTES` to tune it. Use the diagnostic's actual prompt tokens, completion tokens, and `completionTokensPerSecond` to tune inference time. At 3,072 tokens, a 300-second window requires roughly 10 tokens/s before prompt and queue overhead. The failed 168-second attempt produced no complete response, so it does not establish throughput.
 
-`MANIM_MODEL_PRIMARY_DISABLE_REASONING=true` is opt-in and sends the documented `reasoning_effort: none`. Enable it for a tier only after checking the installed server and template, for example with its `GET /props` response. `MANIM_AGENT_STREAM=true` reports the first content or reasoning token as it arrives. A streamed request stays on its chosen provider once response parts arrive. Buffered mode is the default and reports completion metrics without first-token latency. If the provider omits reasoning token counts, the logs omit those counts and report reasoning bytes when available. [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+The HPC Gemma endpoint accepted `chat_template_kwargs.enable_thinking=false` in a direct request and returned Python in 201 completion tokens. Mark a dedicated tier with `MANIM_MODEL_<ROLE>_LLAMA_CPP=true` only after verifying support on that server and template. Manim sends the flag in both streaming and buffered requests. `MANIM_MODEL_ENABLE_THINKING` defaults to `false` on those tiers. Set it to `true` to re-enable thinking. On marked tiers this setting takes precedence over `MANIM_MODEL_<ROLE>_DISABLE_REASONING`. Unmarked tiers retain their existing provider-specific controls. [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+
+`MANIM_AGENT_STREAM=true` reports first-token latency. A streamed request stays on its chosen provider once response parts arrive. Buffered mode reports completion metrics. Manim reports reasoning bytes when present and exact token counts only when available. Missing counts and a zero count that conflicts with observed reasoning are reported as unavailable. If a model reaches the completion limit without usable Python, Manim can make one smaller request that keeps the teaching objective, cue contract, and completion cap. The authoring and rendering deadlines still apply.
 
 ### Independent operator checks
 
-Run from the checkout that contains these scripts, using the intended application environment. The example loads the configuration files for the existing HPC development server in increasing precedence. Exported variables take precedence.
+Run from the checkout that contains these scripts, using the intended application environment. The commands load the HPC configuration from `.env.local`. Node's `--conditions=import` selects the workspace packages' import exports for the TypeScript entry points and works with the tested Node.js 22.23.1 invocation. Shell-scoped overrides let you verify the Gemma request without a service restart. [Node.js conditional exports](https://nodejs.org/docs/latest-v22.x/api/packages.html#resolving-user-conditions)
 
 ```bash
 cd /home/danish/projects/OpenMAIC-llm-test
-node --env-file-if-exists=.env --env-file-if-exists=.env.development \
-  --env-file-if-exists=.env.local --env-file-if-exists=.env.development.local \
-  --import tsx scripts/smoke-manim-renderer.ts
+PATH="/opt/sahaya-manim/tools/bin:$PATH" \
+  node --conditions=import --env-file=.env.local --import tsx scripts/smoke-manim-renderer.ts
 LOG_LEVEL=info MANIM_AGENT_STREAM=true \
-  node --env-file-if-exists=.env --env-file-if-exists=.env.development \
-  --env-file-if-exists=.env.local --env-file-if-exists=.env.development.local \
-  --import tsx scripts/diagnose-manim-model.ts
+  MANIM_MODEL_PRIMARY_LLAMA_CPP=true MANIM_MODEL_ENABLE_THINKING=false \
+  node --conditions=import --env-file=.env.local --import tsx scripts/diagnose-manim-model.ts
 ```
 
 The smoke test uses the existing publisher token and requires `ffprobe` on `PATH` (the private provisioning path is `/opt/sahaya-manim/tools/bin`). It checks Bubblewrap readiness, submits one trusted square animation under a unique operator owner, and checks the preview's SHA-256, stream, frame count and cue metadata. The publisher expires the preview with its normal TTL. The model diagnostic uses the production authoring prompt with a synthetic topic. It checks returned source with the publisher's static Python validator and prints only timings, metrics and validation status. It requires `python3`, does not send a renderer job, and does not execute the generated source.
