@@ -7,7 +7,9 @@ RUN apt-get update \
     && install -d -o 1000 -g 1000 /artifacts /opt/sahaya-manim
 WORKDIR /opt/sahaya-manim
 COPY server.py native_contract.py native_artifact.py sandbox_client.py healthcheck.py manim_preflight.py manim_api.json MANIM-UPSTREAM-LICENSE ./
-RUN chmod 0644 /opt/sahaya-manim/*.py
+RUN chmod 0644 /opt/sahaya-manim/*.py \
+    /opt/sahaya-manim/manim_api.json \
+    /opt/sahaya-manim/MANIM-UPSTREAM-LICENSE
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
 RUN test -r /opt/sahaya-manim/healthcheck.py
