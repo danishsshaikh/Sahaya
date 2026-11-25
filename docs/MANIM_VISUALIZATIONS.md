@@ -106,7 +106,54 @@ New native results are labeled illustrative. Skill guidance calls for formula, u
 
 ## Configuration and rollout
 
-The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three model turns, two Context7 lookups, three previews, two final attempts, and 260 seconds per agent execution. The controller bundles relevant local references up front. The first turn can request one batch of missing topics when at least two Python submission turns will remain. Later turns accept only Python and cue metadata. Routed deployments use plain Chat Completions text and validate the JSON transport locally, including on Gemma. Later turns continue from the last successful routing tier. See [environment examples](../.env.example). The HPC publisher uses `MANIM_SANDBOX_SOCKET` and `MANIM_SANDBOX_TOKEN`. Its queue defaults to one worker and eight active jobs. The executor defaults to a 45-second preview and 105-second final attempt, configurable with `MANIM_SANDBOX_PREVIEW_SECONDS` and `MANIM_SANDBOX_FINAL_SECONDS`. The optional gVisor backend uses `MANIM_SANDBOX_URL`.
+The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three model turns, two Context7 lookups, three previews, and two final attempts. The controller batches references and accepts only Python and cue metadata after the optional first reference turn. Routed deployments use plain Chat Completions text and validate the JSON transport locally. Later turns continue from the last successful routing tier. The HPC publisher uses `MANIM_SANDBOX_SOCKET` and `MANIM_SANDBOX_TOKEN`. Its queue defaults to one worker and eight active jobs. The executor defaults to a 45-second preview and 105-second final attempt, configurable with `MANIM_SANDBOX_PREVIEW_SECONDS` and `MANIM_SANDBOX_FINAL_SECONDS`. The optional gVisor backend uses `MANIM_SANDBOX_URL`. [Environment examples](../.env.example)
+
+### Dedicated model and deadlines
+
+Set these in the application environment to run Manim on the verified HPC Gemma endpoint. Use the exact Gemma ID reported by `/v1/models` after the `openai:` prefix.
+
+```dotenv
+MANIM_MODEL_PRIMARY_MODEL=openai:<exact-gemma-model-id>
+MANIM_MODEL_PRIMARY_BASE_URL=http://127.0.0.1:24181/v1
+MANIM_MODEL_PRIMARY_LOCAL=true
+MANIM_AGENT_DEADLINE_SECONDS=900
+```
+
+A dedicated tier can also set `MANIM_MODEL_PRIMARY_API_KEY` and `MANIM_MODEL_PRIMARY_TIMEOUT_SECONDS`. Optional `MANIM_MODEL_SECONDARY_*` and `MANIM_MODEL_FALLBACK_*` use the same fields, with their own model and base URL. Leaving the Manim primary unset uses the existing model resolution and global route, with the Manim phase limits still applied. Ordinary generation continues using its own settings.
+
+| Scope | Default | Environment variable |
+| --- | ---: | --- |
+| Overall self-hosted job | 900 s | `MANIM_AGENT_DEADLINE_SECONDS` |
+| Documentation lookup time | 8 s | `MANIM_AGENT_DOCUMENTATION_SECONDS` |
+| One local inference attempt | 300 s | `MANIM_AGENT_INFERENCE_SECONDS` |
+| One remote inference attempt | 45 s | `MANIM_AGENT_REMOTE_INFERENCE_SECONDS` |
+| Initial authoring inference across turns | 480 s | `MANIM_AGENT_AUTHORING_SECONDS` |
+| Correction inference across turns | 220 s | `MANIM_AGENT_CORRECTION_SECONDS` |
+| Publisher preview, including queuing and verification | 90 s | `MANIM_AGENT_PREVIEW_SECONDS` |
+| Publisher final, including queuing and verification | 160 s | `MANIM_AGENT_FINAL_SECONDS` |
+
+The overall deadline includes every phase. Manim holds the next preview and final windows before calling a model and gives an alternate route part of the remaining inference window. Shorter job deadlines proportionally reduce the render reserves. The self-hosted Next.js process uses the full configured deadline. Vercel deployments cap Manim at 275 seconds within the scene-content route's 300-second platform limit. [Next.js route duration](https://nextjs.org/docs/app/api-reference/file-conventions/route-segment-config#maxduration)
+
+HPC reported an 8,192-token Gemma context. The default request allows 3,072 completion tokens, including any reasoning, and fits the prompt to a conservative byte estimate. The prompt drops remote snippets before omitting prior source that cannot fit. Set `MANIM_AGENT_CONTEXT_TOKENS`, `MANIM_AGENT_COMPLETION_TOKENS`, or `MANIM_AGENT_PROMPT_BYTES` to tune it. Use the diagnostic's actual prompt tokens, completion tokens, and `completionTokensPerSecond` to tune inference time. At 3,072 tokens, a 300-second window requires roughly 10 tokens/s before prompt and queue overhead. The failed 168-second attempt produced no complete response, so it does not establish throughput.
+
+`MANIM_MODEL_PRIMARY_DISABLE_REASONING=true` is opt-in and sends the documented `reasoning_effort: none`. Enable it for a tier only after checking the installed server and template, for example with its `GET /props` response. `MANIM_AGENT_STREAM=true` reports the first content or reasoning token as it arrives. A streamed request stays on its chosen provider once response parts arrive. Buffered mode is the default and reports completion metrics without first-token latency. If the provider omits reasoning token counts, the logs omit those counts and report reasoning bytes when available. [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+
+### Independent operator checks
+
+Run from the checkout that contains these scripts, using the intended application environment. The example loads the configuration files for the existing HPC development server in increasing precedence. Exported variables take precedence.
+
+```bash
+cd /home/danish/projects/OpenMAIC-llm-test
+node --env-file-if-exists=.env --env-file-if-exists=.env.development \
+  --env-file-if-exists=.env.local --env-file-if-exists=.env.development.local \
+  --import tsx scripts/smoke-manim-renderer.ts
+LOG_LEVEL=info MANIM_AGENT_STREAM=true \
+  node --env-file-if-exists=.env --env-file-if-exists=.env.development \
+  --env-file-if-exists=.env.local --env-file-if-exists=.env.development.local \
+  --import tsx scripts/diagnose-manim-model.ts
+```
+
+The smoke test uses the existing publisher token and requires `ffprobe` on `PATH` (the private provisioning path is `/opt/sahaya-manim/tools/bin`). It checks Bubblewrap readiness, submits one trusted square animation under a unique operator owner, and checks the preview's SHA-256, stream, frame count and cue metadata. The publisher expires the preview with its normal TTL. The model diagnostic uses the production authoring prompt with a synthetic topic. It checks returned source with the publisher's static Python validator and prints only timings, metrics and validation status. It requires `python3`, does not send a renderer job, and does not execute the generated source.
 
 Docker Compose retains the `manim` profile and persistent volume. Podman and Quadlet use the same publisher image and artifact mount. The existing HTTPS deployment works with approved gVisor. A Compose local deployment adds a publisher-only read-only bind of the socket directory plus the mapped socket group, and sets `MANIM_SANDBOX_SOCKET` to the in-container path. Verify group and UID mapping before using a local socket with rootless container engines.
 

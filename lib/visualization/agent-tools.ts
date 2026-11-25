@@ -53,6 +53,7 @@ export const manimTools = {
 
 export function supportsNativeManimTools(provider: string, model: string, baseUrl?: string) {
   return (
+    !process.env.MANIM_MODEL_PRIMARY_MODEL?.trim() &&
     process.env.LLM_ROUTER_ENABLED !== 'true' &&
     provider === 'openai' &&
     (!baseUrl || /^https:\/\/api\.openai\.com\/v1\/?$/.test(baseUrl)) &&

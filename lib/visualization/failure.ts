@@ -13,6 +13,8 @@ export const VISUALIZATION_FAILURES = {
     'The submitted Manim Python or cue metadata failed validation. Review the scene instructions and retry.',
   VISUALIZATION_MODEL_TIMEOUT:
     'The AI model exceeded its time limit while generating the Manim scene.',
+  VISUALIZATION_MODEL_OUTPUT_LIMIT:
+    'The AI model used its completion budget before returning a complete Manim scene.',
   VISUALIZATION_MODEL_UNAVAILABLE:
     'The configured AI model or provider could not complete the Manim request. Try again shortly.',
   VISUALIZATION_UNAVAILABLE:

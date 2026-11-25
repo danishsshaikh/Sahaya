@@ -97,6 +97,7 @@ interface SceneContentResult {
   jobId?: string;
   status?: SceneContentJobStatus;
   pollIntervalMs?: number;
+  pollTimeoutMs?: number;
   phase?: string;
   queuePosition?: number;
   jobTerminal?: boolean;
@@ -294,7 +295,11 @@ async function pollSceneContentJob(
     Math.min(initial.pollIntervalMs ?? DEFAULT_SCENE_CONTENT_JOB_POLL_INTERVAL_MS, 10000),
   );
 
-  while (Date.now() - startedAt < SCENE_CONTENT_JOB_TIMEOUT_MS) {
+  const pollTimeoutMs =
+    initial.pollTimeoutMs && Number.isFinite(initial.pollTimeoutMs)
+      ? Math.min(SCENE_CONTENT_JOB_TIMEOUT_MS + 15_000, initial.pollTimeoutMs)
+      : SCENE_CONTENT_JOB_TIMEOUT_MS;
+  while (Date.now() - startedAt < pollTimeoutMs) {
     await sleep(pollIntervalMs, signal);
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 

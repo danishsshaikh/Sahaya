@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { callLLM } from '@/lib/ai/llm';
+import { createManimAiCall } from '@/lib/visualization/model';
+import { manimAgentBudget, manimRenderWindows } from '@/lib/visualization/budget';
 import { generateVisualization, type VisualizationAiCall } from '@/lib/visualization/generate';
 import {
   discoverManimSkill,
@@ -51,6 +53,38 @@ const optionError = {
   issue: { code: 'api', message: 'Check the named Manim method.', line: 6, symbol: 'missing' },
 };
 
+function completion(
+  content: string | null,
+  finishReason = 'stop',
+  reasoning?: string,
+  reasoningTokens = 0,
+) {
+  return Response.json({
+    id: 'chat-gemma',
+    object: 'chat.completion',
+    created: 1,
+    model: 'gemma-local',
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason,
+        message: { role: 'assistant', content, reasoning_content: reasoning },
+      },
+    ],
+    usage: {
+      prompt_tokens: 440,
+      completion_tokens: reasoningTokens || 120,
+      completion_tokens_details: { reasoning_tokens: reasoningTokens },
+    },
+  });
+}
+
+function localManim() {
+  vi.stubEnv('MANIM_MODEL_PRIMARY_MODEL', 'openai:gemma-local');
+  vi.stubEnv('MANIM_MODEL_PRIMARY_BASE_URL', 'http://gemma.example/v1');
+  vi.stubEnv('MANIM_MODEL_PRIMARY_LOCAL', 'true');
+}
+
 function configure(
   port: number,
   reply: (url: string, opts?: RequestInit) => Response | Promise<Response>,
@@ -82,6 +116,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
+  delete (globalThis as { __sahayaManimLlmCircuits?: unknown }).__sahayaManimLlmCircuits;
 });
 
 describe('native Manim agent', () => {
@@ -274,6 +309,27 @@ describe('native Manim agent', () => {
     ]);
   });
 
+  it('cleans up a running preview at its own deadline and never submits a final', async () => {
+    const id = 'e'.repeat(64);
+    const fetch = configure(18895, (url, init) =>
+      url.endsWith('/ready')
+        ? Response.json(verified)
+        : init?.method === 'DELETE'
+          ? Response.json({ status: 'cancelled' })
+          : Response.json({ status: 'rendering', id }),
+    );
+    vi.stubEnv('MANIM_AGENT_PREVIEW_SECONDS', '1');
+    await expect(generate(() => Promise.resolve(submission(source)))).rejects.toMatchObject({
+      code: 'VISUALIZATION_RENDER_TIMEOUT',
+      detail: 'preview-render_deadline',
+    });
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(fetch.mock.calls.at(-1)).toEqual([
+      expect.stringContaining(id),
+      expect.objectContaining({ method: 'DELETE' }),
+    ]);
+  });
+
   it('accepts verified Bubblewrap readiness and keeps the native agent workflow', async () => {
     configure(18886, (url) =>
       Response.json(url.endsWith('/ready') ? { ...verified, backend: 'bubblewrap' } : output),
@@ -328,57 +384,39 @@ describe('native Manim agent', () => {
       expect(body).not.toHaveProperty('response_format');
       expect(new Headers(init?.headers).has('authorization')).toBe(false);
       gemmaCalls++;
-      return Response.json({
-        id: 'chat-gemma',
-        object: 'chat.completion',
-        created: 1,
-        model: 'gemma-local',
-        choices: [
-          {
-            index: 0,
-            finish_reason: 'stop',
-            message: {
-              role: 'assistant',
-              content: submission(
-                gemmaCalls === 1 ? source.replace('Circle()', 'missing()') : source,
-              ),
-            },
-          },
-        ],
-        usage: { prompt_tokens: 100, completion_tokens: 120, total_tokens: 220 },
-      });
+      const response = () =>
+        completion(submission(gemmaCalls === 1 ? source.replace('Circle()', 'missing()') : source));
+      // The real deployment cancelled Gemma at this point. Exercise a usable
+      // completion after the same elapsed time, without a real provider.
+      return gemmaCalls === 1
+        ? new Promise((resolve) => setTimeout(() => resolve(response()), 168_000))
+        : response();
     });
     const env = {
-      LLM_ROUTER_ENABLED: 'true',
-      LLM_ROUTER_PRIMARY_MODEL: 'openai:nvidia/nemotron-3-ultra-550b-a55b',
-      LLM_ROUTER_PRIMARY_BASE_URL: 'https://ultra.example/v1',
-      LLM_ROUTER_PRIMARY_API_KEY: 'private-ultra-test-key',
-      LLM_ROUTER_PRIMARY_TIMEOUT_MS: '90000',
-      LLM_ROUTER_SECONDARY_MODEL: 'openai:nvidia/nemotron-3-super-120b-a12b',
-      LLM_ROUTER_SECONDARY_BASE_URL: 'https://super.example/v1',
-      LLM_ROUTER_SECONDARY_API_KEY: 'private-super-test-key',
-      LLM_ROUTER_SECONDARY_TIMEOUT_MS: '60000',
-      LLM_ROUTER_FALLBACK_MODEL: 'openai:gemma-local',
-      LLM_ROUTER_FALLBACK_BASE_URL: 'http://gemma.example/v1',
-      LLM_ROUTER_FALLBACK_API_KEY: '',
-      LLM_ROUTER_FALLBACK_LOCAL: 'true',
-      LLM_ROUTER_TOTAL_TIMEOUT_MS: '180000',
-      MANIM_AGENT_DEADLINE_SECONDS: '260',
+      LLM_ROUTER_ENABLED: 'false',
+      MANIM_MODEL_PRIMARY_MODEL: 'openai:nvidia/nemotron-3-ultra-550b-a55b',
+      MANIM_MODEL_PRIMARY_BASE_URL: 'https://ultra.example/v1',
+      MANIM_MODEL_PRIMARY_API_KEY: 'private-ultra-test-key',
+      MANIM_MODEL_PRIMARY_TIMEOUT_SECONDS: '90',
+      MANIM_MODEL_SECONDARY_MODEL: 'openai:nvidia/nemotron-3-super-120b-a12b',
+      MANIM_MODEL_SECONDARY_BASE_URL: 'https://super.example/v1',
+      MANIM_MODEL_SECONDARY_API_KEY: 'private-super-test-key',
+      MANIM_MODEL_FALLBACK_MODEL: 'openai:gemma-local',
+      MANIM_MODEL_FALLBACK_BASE_URL: 'http://gemma.example/v1',
+      MANIM_MODEL_FALLBACK_LOCAL: 'true',
+      MANIM_AGENT_REMOTE_INFERENCE_SECONDS: '90',
+      MANIM_AGENT_DEADLINE_SECONDS: '900',
     };
     for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
 
-    const ai: VisualizationAiCall = (system, prompt, abortSignal, tools, routing) =>
-      callLLM(
-        { model: 'gpt-4o', system, prompt, abortSignal, tools, maxRetries: 0 },
-        'manim-production-test',
-        undefined,
-        undefined,
-        routing,
-      );
+    const ai = createManimAiCall({ model: 'unrelated-classroom-model' });
     const checked = expect(generate(ai)).resolves.toHaveProperty('artifact');
     await primaryStarted.promise;
     await vi.advanceTimersByTimeAsync(89_999);
     expect(models).toEqual(['nvidia/nemotron-3-ultra-550b-a55b']);
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/jobs'))).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(167_999);
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/jobs'))).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     await checked;
@@ -410,12 +448,175 @@ describe('native Manim agent', () => {
         providerRole: 'fallback',
         fallbackReason: 'http_410',
         remainingModelCalls: 2,
-        remainingExecutionMs: 170000,
+        remainingExecutionMs: 642000,
+        renderReserveMs: 250000,
+        requestedCompletionTokens: 3072,
         call: 1,
       }),
     );
     expect(JSON.stringify(logs.info.mock.calls)).not.toMatch(
       /provider-private-body|private-(ultra|super)-test-key/,
+    );
+  });
+
+  it('uses a local primary exclusively for Manim while ordinary calls keep their route', async () => {
+    configure(18891, (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/ready')) return Response.json(verified);
+      if (url.endsWith('/jobs')) return Response.json(output);
+      const body = JSON.parse(String(init?.body));
+      if (url.startsWith('http://gemma.example/')) {
+        expect(body).toMatchObject({ model: 'gemma-local', reasoning_effort: 'none' });
+        expect(body.max_completion_tokens ?? body.max_tokens).toBe(3072);
+        return completion(submission(source));
+      }
+      expect(body).toMatchObject({ model: 'normal-primary' });
+      expect(body).not.toHaveProperty('reasoning_effort');
+      return completion('ordinary');
+    });
+    localManim();
+    vi.stubEnv('MANIM_MODEL_PRIMARY_DISABLE_REASONING', 'true');
+    vi.stubEnv('LLM_ROUTER_ENABLED', 'true');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_MODEL', 'openai:normal-primary');
+    vi.stubEnv('LLM_ROUTER_PRIMARY_BASE_URL', 'https://ordinary.example/v1');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_MODEL', 'openai:normal-fallback');
+    vi.stubEnv('LLM_ROUTER_FALLBACK_BASE_URL', 'https://ordinary-fallback.example/v1');
+    await expect(generate(createManimAiCall({ model: 'normal-primary' }))).resolves.toHaveProperty(
+      'artifact',
+    );
+    expect((await callLLM({ model: 'normal-primary', prompt: 'test' }, 'ordinary')).text).toBe(
+      'ordinary',
+    );
+  });
+
+  it('classifies reasoning-only completion exhaustion and logs counts without logging reasoning', async () => {
+    const requests = configure(18892, (input) =>
+      String(input).endsWith('/ready')
+        ? Response.json(verified)
+        : completion(null, 'length', 'private reasoning fragment', 64),
+    );
+    localManim();
+    vi.stubEnv('MANIM_AGENT_COMPLETION_TOKENS', '64');
+    vi.stubEnv('MANIM_AGENT_MODEL_CALLS', '1');
+    await expect(generate(createManimAiCall({ model: 'unrelated' }))).rejects.toMatchObject({
+      code: 'VISUALIZATION_MODEL_OUTPUT_LIMIT',
+    });
+    expect(requests.mock.calls.filter(([input]) => String(input).endsWith('/jobs'))).toHaveLength(
+      0,
+    );
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim model turn',
+      expect.objectContaining({
+        requestedCompletionTokens: 64,
+        inputTokens: 440,
+        outputTokens: 64,
+        reasoningTokens: 64,
+        finishReason: 'length',
+      }),
+    );
+    expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private reasoning fragment');
+  });
+
+  it('uses bounded streaming to report first-token and completion metrics', async () => {
+    configure(18893, (input) => {
+      const url = String(input);
+      if (url.endsWith('/ready')) return Response.json(verified);
+      if (url.endsWith('/jobs')) return Response.json(output);
+      const base = {
+        id: 'gemma-stream',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'gemma-local',
+      };
+      const events = [
+        {
+          ...base,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'private streaming reasoning' },
+              finish_reason: null,
+            },
+          ],
+        },
+        {
+          ...base,
+          choices: [{ index: 0, delta: { content: submission(source) }, finish_reason: null }],
+        },
+        {
+          ...base,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 440,
+            completion_tokens: 130,
+            completion_tokens_details: { reasoning_tokens: 12 },
+          },
+        },
+      ];
+      return new Response(
+        events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n',
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    });
+    localManim();
+    vi.stubEnv('MANIM_AGENT_STREAM', 'true');
+    await expect(generate(createManimAiCall({ model: 'unrelated' }))).resolves.toHaveProperty(
+      'artifact',
+    );
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim first token',
+      expect.objectContaining({ ms: expect.any(Number) }),
+    );
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim model turn',
+      expect.objectContaining({
+        firstTokenMs: expect.any(Number),
+        reasoningTokens: 12,
+        finishReason: 'stop',
+      }),
+    );
+    expect(JSON.stringify(logs.info.mock.calls)).not.toContain('private streaming reasoning');
+  });
+
+  it('allocates separate authoring and correction time and keeps preview and final time reserved', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.stubEnv('MANIM_AGENT_DEADLINE_SECONDS', '900');
+    vi.stubEnv('MANIM_AGENT_AUTHORING_SECONDS', '480');
+    vi.stubEnv('MANIM_AGENT_CORRECTION_SECONDS', '220');
+    const started = Date.now();
+    let firstPreview = true;
+    configure(18894, (url) => {
+      if (url.endsWith('/ready')) return Response.json(verified);
+      if (firstPreview) {
+        firstPreview = false;
+        vi.setSystemTime(started + 530_000);
+        return Response.json(optionError, { status: 422 });
+      }
+      return Response.json(output);
+    });
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockImplementationOnce(async (_system, _prompt, _signal, _tools, routing) => {
+        expect(routing?.manimBudget?.deadlineMs).toBe(started + 480_000);
+        vi.setSystemTime(started + 470_000);
+        return submission(source);
+      })
+      .mockImplementationOnce(async (_system, _prompt, _signal, _tools, routing) => {
+        expect(routing?.manimBudget?.deadlineMs).toBe(started + 650_000);
+        vi.setSystemTime(started + 648_000);
+        return submission(source + '# corrected');
+      });
+    await expect(generate(ai)).resolves.toHaveProperty('artifact');
+    expect(manimRenderWindows(manimAgentBudget(), false)).toEqual({
+      previewMs: 90_000,
+      finalMs: 160_000,
+    });
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim render submitted',
+      expect.objectContaining({
+        phase: 'final-render',
+        renderBudgetMs: 160_000,
+      }),
     );
   });
 

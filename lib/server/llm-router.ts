@@ -2,12 +2,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { LanguageModel } from 'ai';
 import { getModel, parseModelString } from '@/lib/ai/providers';
+import { wrapJsonResponseWithReasoning } from '@/lib/ai/reasoning-sse';
 import { createLogger } from '@/lib/logger';
 
 type Model = Extract<LanguageModel, { specificationVersion: 'v3' }>;
 type CallOptions = Parameters<Model['doGenerate']>[0];
 type StreamResult = Awaited<ReturnType<Model['doStream']>>;
 type Part = StreamResult['stream'] extends ReadableStream<infer T> ? T : never;
+type Completion = Pick<Awaited<ReturnType<Model['doGenerate']>>, 'usage' | 'finishReason'>;
 type Role = 'primary' | 'secondary' | 'fallback';
 type BreakerRole = Exclude<Role, 'fallback'>;
 type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
@@ -26,6 +28,16 @@ export interface LLMRouteTelemetry {
   latencyMs: number;
   attempt: number;
   timeToFirstPartMs?: number;
+  promptBytes?: number;
+  requestedCompletionTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  finishReason?: string;
+  timeToFirstTokenMs?: number;
+  remainingInferenceMs?: number;
+  inferenceDeadlineMs?: number;
+  cancellationSource?: string;
 }
 
 export interface LLMRoutingPolicy {
@@ -34,6 +46,8 @@ export interface LLMRoutingPolicy {
   onRouteEvent?: (event: LLMRouteTelemetry) => void;
   /** Subsequent turns in the same task can continue on their last successful tier. */
   continueFrom?: Pick<LLMRouteTelemetry, 'selectedRole' | 'fallbackReason'>;
+  /** Absolute authoring window and per-provider caps for the visualization agent. */
+  manimBudget?: { deadlineMs: number; inferenceMs: number; remoteInferenceMs: number };
   /** Server-owned budget shared by simulation HTML generation and its language repair. */
   simulationBudget?: {
     startedAtMs: number;
@@ -49,12 +63,13 @@ interface Endpoint {
   baseUrl: string;
   apiKey: string;
   local: boolean;
+  disableReasoning?: boolean;
 }
 
 interface Config {
   primary: Endpoint;
   secondary?: Endpoint;
-  fallback: Endpoint;
+  fallback?: Endpoint;
   initialMs: number;
   primaryMs: number;
   secondaryMs: number;
@@ -141,8 +156,7 @@ function positiveInt(name: string, fallback: number): number {
   return value;
 }
 
-function endpoint(role: 'PRIMARY' | 'SECONDARY' | 'FALLBACK', inherited?: Endpoint): Endpoint {
-  const prefix = `LLM_ROUTER_${role}`;
+function endpoint(prefix: string, inherited?: Endpoint): Endpoint {
   const model = process.env[`${prefix}_MODEL`]?.trim();
   const baseUrl = process.env[`${prefix}_BASE_URL`]?.trim() || inherited?.baseUrl;
   if (!model || !baseUrl) throw new Error(`${prefix}_MODEL and ${prefix}_BASE_URL are required.`);
@@ -171,20 +185,62 @@ function endpoint(role: 'PRIMARY' | 'SECONDARY' | 'FALLBACK', inherited?: Endpoi
     baseUrl,
     apiKey: process.env[`${prefix}_API_KEY`] ?? inherited?.apiKey ?? '',
     local: process.env[`${prefix}_LOCAL`] === 'true',
+    ...(prefix.startsWith('MANIM_MODEL_') && process.env[`${prefix}_DISABLE_REASONING`] === 'true'
+      ? { disableReasoning: true }
+      : {}),
   };
 }
 
-function loadConfig(): Config | undefined {
+function loadConfig(manim?: LLMRoutingPolicy['manimBudget']): Config | undefined {
+  if (manim && process.env.MANIM_MODEL_PRIMARY_MODEL?.trim()) {
+    const primary = endpoint('MANIM_MODEL_PRIMARY');
+    const secondary = process.env.MANIM_MODEL_SECONDARY_MODEL?.trim()
+      ? endpoint('MANIM_MODEL_SECONDARY')
+      : undefined;
+    const fallback = process.env.MANIM_MODEL_FALLBACK_MODEL?.trim()
+      ? endpoint('MANIM_MODEL_FALLBACK')
+      : undefined;
+    const configured = [primary, secondary, fallback].filter((value): value is Endpoint => !!value);
+    if (
+      new Set(
+        configured.map((value) =>
+          JSON.stringify([value.modelId, value.baseUrl.replace(/\/$/, '')]),
+        ),
+      ).size !== configured.length
+    )
+      throw new Error('Manim tiers must use distinct model endpoints.');
+    const timeout = (role: string, target?: Endpoint) =>
+      target
+        ? 1000 *
+          positiveInt(
+            `MANIM_MODEL_${role}_TIMEOUT_SECONDS`,
+            (target.local ? manim.inferenceMs : manim.remoteInferenceMs) / 1000,
+          )
+        : 0;
+    return {
+      primary,
+      secondary,
+      fallback,
+      initialMs: manim.remoteInferenceMs,
+      primaryMs: timeout('PRIMARY', primary),
+      secondaryMs: timeout('SECONDARY', secondary),
+      fallbackMs: timeout('FALLBACK', fallback),
+      streamInitialMs: 45_000,
+      totalMs: manim.inferenceMs,
+      threshold: 3,
+      cooldownMs: 30_000,
+    };
+  }
   if (process.env.LLM_ROUTER_ENABLED !== 'true') return undefined;
   const initialMs = positiveInt('LLM_ROUTER_INITIAL_TIMEOUT_MS', 60_000);
-  const primary = endpoint('PRIMARY');
+  const primary = endpoint('LLM_ROUTER_PRIMARY');
   const secondary = process.env.LLM_ROUTER_SECONDARY_MODEL?.trim()
-    ? endpoint('SECONDARY', primary)
+    ? endpoint('LLM_ROUTER_SECONDARY', primary)
     : undefined;
   return {
     primary,
     secondary,
-    fallback: endpoint('FALLBACK'),
+    fallback: endpoint('LLM_ROUTER_FALLBACK'),
     initialMs,
     primaryMs: positiveInt('LLM_ROUTER_PRIMARY_TIMEOUT_MS', initialMs),
     secondaryMs: secondary ? positiveInt('LLM_ROUTER_SECONDARY_TIMEOUT_MS', initialMs) : initialMs,
@@ -204,13 +260,16 @@ interface Breaker {
 }
 const processState = globalThis as typeof globalThis & {
   __sahayaLlmCircuits?: Partial<Record<BreakerRole, { key: string; breaker: Breaker }>>;
+  __sahayaManimLlmCircuits?: Partial<Record<BreakerRole, { key: string; breaker: Breaker }>>;
 };
 
-function circuit(config: Config, role: BreakerRole): Breaker {
+function circuit(config: Config, role: BreakerRole, manim: boolean): Breaker {
   const key = createHash('sha256')
     .update(JSON.stringify([config[role], config.threshold, config.cooldownMs]))
     .digest('hex');
-  const circuits = (processState.__sahayaLlmCircuits ??= {});
+  const circuits = manim
+    ? (processState.__sahayaManimLlmCircuits ??= {})
+    : (processState.__sahayaLlmCircuits ??= {});
   if (circuits[role]?.key !== key) {
     circuits[role] = { key, breaker: { failures: 0, probe: false, epoch: 0 } };
   }
@@ -300,10 +359,14 @@ function adaptCompatibleRequestBody(
   endpoint: Endpoint,
   init?: RequestInit,
 ): RequestInit | undefined {
-  if (!init?.body || typeof init.body !== 'string' || !isNemotronEndpoint(endpoint)) return init;
+  const nemotron = isNemotronEndpoint(endpoint);
+  if (!init?.body || typeof init.body !== 'string' || (!nemotron && !endpoint.disableReasoning))
+    return init;
   try {
     const body = JSON.parse(init.body) as Record<string, unknown>;
     if (hasToolRequest(body)) return init;
+    if (endpoint.disableReasoning) body.reasoning_effort = 'none';
+    if (!nemotron) return { ...init, body: JSON.stringify(body) };
     const current =
       body.chat_template_kwargs &&
       typeof body.chat_template_kwargs === 'object' &&
@@ -330,7 +393,7 @@ function adaptCompatibleRequestBody(
   }
 }
 
-function buildModel(e: Endpoint): Model {
+function buildModel(e: Endpoint, manim: boolean): Model {
   // A private compatible-provider ID forces Chat Completions and avoids inheriting
   // native OpenAI/other catalog thinking defaults. Existing reasoning extraction stays active.
   const { model } = getModel({
@@ -339,11 +402,16 @@ function buildModel(e: Endpoint): Model {
     modelId: e.modelId,
     baseUrl: e.baseUrl,
     apiKey: e.apiKey || 'unused',
-    fetchImpl: (input, init) => {
+    fetchImpl: async (input, init) => {
       const headers = new Headers(init?.headers);
       if (!e.apiKey) headers.delete('authorization');
       const adapted = adaptCompatibleRequestBody(e, init);
-      return globalThis.fetch(input, { ...adapted, headers, redirect: 'error' });
+      const response = await globalThis.fetch(input, { ...adapted, headers, redirect: 'error' });
+      return manim &&
+        response.ok &&
+        !response.headers.get('content-type')?.includes('text/event-stream')
+        ? wrapJsonResponseWithReasoning(response)
+        : response;
     },
   });
   if (typeof model !== 'object' || model.specificationVersion !== 'v3') {
@@ -360,7 +428,8 @@ export function createLLMRouter(
   policy: LLMRoutingPolicy = {},
   callerSignal?: AbortSignal,
 ) {
-  const config = loadConfig();
+  const manim = policy.manimBudget;
+  const config = loadConfig(manim);
   if (!config) {
     if (policy.externalAllowed === false)
       throw new Error('Local-only routing requires LLM_ROUTER_ENABLED.');
@@ -373,8 +442,9 @@ export function createLLMRouter(
         policy.simulationBudget.deadlineMs,
       )
     : undefined;
+  const initialDeadline = manim?.deadlineMs ?? simulationDeadline;
   const totalTimeoutMs =
-    simulationDeadline === undefined ? config.totalMs : Math.floor(simulationDeadline - Date.now());
+    initialDeadline === undefined ? config.totalMs : Math.floor(initialDeadline - Date.now());
   if (!Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
     throw new RouterError({ reason: 'timeout', retryable: true });
   }
@@ -383,12 +453,12 @@ export function createLLMRouter(
   // at most one third. The final tier can use all remaining time, not the
   // lightweight role cap. No request or repair can extend the scene deadline.
   const fallbackReserveMs = Math.ceil((totalTimeoutMs * 2) / 3);
-  const roles: Role[] = config.secondary
-    ? ['primary', 'secondary', 'fallback']
-    : ['primary', 'fallback'];
+  const roles: Role[] = ['primary'];
+  if (config.secondary) roles.push('secondary');
+  if (config.fallback) roles.push('fallback');
   const breakers = {
-    primary: circuit(config, 'primary'),
-    secondary: config.secondary ? circuit(config, 'secondary') : undefined,
+    primary: circuit(config, 'primary', !!manim),
+    secondary: config.secondary ? circuit(config, 'secondary', !!manim) : undefined,
   };
   const endpointFor = (role: Role): Endpoint => {
     const target = config[role];
@@ -399,7 +469,7 @@ export function createLLMRouter(
   const requestId = policy.requestId ?? randomUUID();
   let selected: Role | undefined;
   let committed = false;
-  let deadline: number | undefined = simulationDeadline;
+  let deadline: number | undefined = initialDeadline;
   let firstFailure: Failure | undefined;
   let fallbackReason = policy.continueFrom?.fallbackReason;
   let epoch = b.epoch;
@@ -415,7 +485,13 @@ export function createLLMRouter(
       modelString: `${e.providerId}:${e.modelId}`,
     };
   };
-  const report = (status: string, start: number, timeoutBudgetMs: number, firstPartMs?: number) => {
+  const report = (
+    status: string,
+    start: number,
+    timeoutBudgetMs: number,
+    firstPartMs?: number,
+    metrics?: Partial<LLMRouteTelemetry>,
+  ) => {
     const e = endpointFor(selected ?? 'primary');
     const event: LLMRouteTelemetry = {
       requestId,
@@ -429,6 +505,7 @@ export function createLLMRouter(
       timeoutBudgetMs,
       latencyMs: Date.now() - start,
       attempt,
+      ...metrics,
       ...(fallbackReason === undefined ? {} : { fallbackReason }),
       ...(firstPartMs === undefined ? {} : { timeToFirstPartMs: firstPartMs }),
     };
@@ -444,8 +521,8 @@ export function createLLMRouter(
             secondaryModel: config.secondary.modelId,
           }
         : {}),
-      fallbackProvider: config.fallback.providerId,
-      fallbackModel: config.fallback.modelId,
+      fallbackProvider: config.fallback?.providerId,
+      fallbackModel: config.fallback?.modelId,
     });
   };
   const choose = (after?: Role): Role | undefined => {
@@ -500,11 +577,43 @@ export function createLLMRouter(
     b.probe = false;
     probing = false;
   };
+  const manimAttemptMs = (role: Role, start: number) => {
+    const cap = roleTimeoutMs(config, role);
+    if (!manim) return cap;
+    const local = endpointFor(role).local;
+    const hasBackup = roles
+      .slice(roles.indexOf(role) + 1)
+      .some((next) => policy.externalAllowed !== false || endpointFor(next).local);
+    const remaining = manim.deadlineMs - start;
+    // Keep part of the inference phase available for the next tier. A local
+    // primary with no backup can use its entire configured inference cap.
+    const reserve = hasBackup ? Math.min(120_000, Math.floor(remaining / 2)) : 0;
+    return Math.min(cap, local ? manim.inferenceMs : manim.remoteInferenceMs, remaining - reserve);
+  };
+  const inferenceMetrics = (
+    options: CallOptions,
+    completion?: Completion,
+    firstTokenMs?: number,
+  ) =>
+    manim
+      ? {
+          promptBytes: Buffer.byteLength(JSON.stringify(options.prompt)),
+          requestedCompletionTokens: options.maxOutputTokens,
+          inputTokens: completion?.usage.inputTokens.total,
+          outputTokens: completion?.usage.outputTokens.total,
+          reasoningTokens: completion?.usage.outputTokens.reasoning,
+          finishReason: completion?.finishReason.unified,
+          timeToFirstTokenMs: firstTokenMs,
+          remainingInferenceMs: Math.max(0, manim.deadlineMs - Date.now()),
+          inferenceDeadlineMs: manim.deadlineMs,
+        }
+      : undefined;
   const handleFailure = (
     error: unknown,
     options: CallOptions,
     start: number,
     timeoutBudgetMs: number,
+    firstTokenMs?: number,
   ): boolean => {
     // The SDK composes its own total deadline with the caller signal. Only an
     // actual caller cancellation is exempt from provider health accounting.
@@ -523,7 +632,19 @@ export function createLLMRouter(
         ? { ...classified, retryable: true }
         : classified;
     failed(failure);
-    report(failure.reason, start, timeoutBudgetMs);
+    const metrics = inferenceMetrics(options, undefined, firstTokenMs);
+    if (metrics) {
+      report(failure.reason, start, timeoutBudgetMs, undefined, {
+        ...metrics,
+        cancellationSource: cancelled
+          ? 'caller_signal'
+          : sdkTimeout
+            ? 'sdk_inference_deadline'
+            : failure.reason === 'timeout'
+              ? 'provider_attempt_deadline'
+              : undefined,
+      });
+    } else report(failure.reason, start, timeoutBudgetMs);
     if (cancelled) throw callerSignal?.aborted ? callerSignal.reason : options.abortSignal?.reason;
     if (failure.reason === 'abort') throw error;
     if (
@@ -581,17 +702,17 @@ export function createLLMRouter(
                     roleTimeoutMs(config, selected),
                     Math.floor(Math.max(0, remainingMs - fallbackReserveMs) / pendingUpstream),
                   )
-            : roleTimeoutMs(config, selected);
+            : manimAttemptMs(selected, start);
         const timeoutMs = attemptBudgetMs(deadline, start, roleBudgetMs);
         const scope = budget(options.abortSignal, start + timeoutMs);
         try {
-          const target = (models[selected] ??= buildModel(endpointFor(selected)));
+          const target = (models[selected] ??= buildModel(endpointFor(selected), !!manim));
           const result = await scope.wait(() =>
             target.doGenerate({ ...options, abortSignal: scope.signal }),
           );
           committed = true;
           healthy();
-          report('success', start, timeoutMs);
+          report('success', start, timeoutMs, undefined, inferenceMetrics(options, result));
           return result;
         } catch (error) {
           if (!handleFailure(error, options, start, timeoutMs)) throw error;
@@ -608,12 +729,8 @@ export function createLLMRouter(
       for (;;) {
         attempt += 1;
         const start = Date.now();
-        const timeoutMs = attemptBudgetMs(
-          deadline,
-          start,
-          roleTimeoutMs(config, selected),
-          config.streamInitialMs,
-        );
+        const attemptMs = attemptBudgetMs(deadline, start, manimAttemptMs(selected, start));
+        const timeoutMs = attemptBudgetMs(deadline, start, attemptMs, config.streamInitialMs);
         const scope = budget(options.abortSignal, start + timeoutMs);
         let reader: ReadableStreamDefaultReader<Part> | undefined;
         const cancel = () => {
@@ -621,7 +738,7 @@ export function createLLMRouter(
           void reader?.cancel().catch(() => {});
         };
         try {
-          const target = (models[selected] ??= buildModel(endpointFor(selected)));
+          const target = (models[selected] ??= buildModel(endpointFor(selected), !!manim));
           const result = await scope.wait(async () => {
             const value = await target.doStream({ ...options, abortSignal: scope.signal });
             if (scope.signal.aborted) void value.stream.cancel().catch(() => {});
@@ -644,10 +761,21 @@ export function createLLMRouter(
             break;
           }
           committed = true;
-          scope.arm(deadline);
+          scope.arm(manim ? start + attemptMs : deadline);
           report('stream_committed', start, timeoutMs, Date.now() - start);
           const initial = header ? [header, first] : [first];
-          let finished = first.type === 'finish';
+          let completion: Completion | undefined = first.type === 'finish' ? first : undefined;
+          let firstTokenMs: number | undefined;
+          const observe = (part: Part) => {
+            if (
+              firstTokenMs === undefined &&
+              (part.type === 'text-delta' || part.type === 'reasoning-delta') &&
+              part.delta
+            )
+              firstTokenMs = Date.now() - start;
+            if (part.type === 'finish') completion = part;
+          };
+          observe(first);
           return {
             ...result,
             stream: new ReadableStream<Part>(
@@ -660,9 +788,15 @@ export function createLLMRouter(
                       controller.enqueue(buffered);
                       return;
                     }
-                    if (finished) {
+                    if (completion) {
                       healthy();
-                      report('success', start, timeoutMs);
+                      report(
+                        'success',
+                        start,
+                        manim ? attemptMs : timeoutMs,
+                        undefined,
+                        inferenceMetrics(options, completion, firstTokenMs),
+                      );
                       cancel();
                       controller.close();
                       return;
@@ -670,12 +804,18 @@ export function createLLMRouter(
                     const next = await scope.wait(() => reader!.read());
                     if (next.done) throw new Error('Provider stream ended without finish.');
                     if (next.value.type === 'error') throw next.value.error;
-                    finished = next.value.type === 'finish';
+                    observe(next.value);
                     controller.enqueue(next.value);
                   } catch (error) {
                     cancel();
                     try {
-                      handleFailure(error, options, start, timeoutMs);
+                      handleFailure(
+                        error,
+                        options,
+                        start,
+                        manim ? attemptMs : timeoutMs,
+                        firstTokenMs,
+                      );
                     } catch (normalized) {
                       if (options.abortSignal?.aborted) controller.error(normalized);
                       else {

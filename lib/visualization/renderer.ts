@@ -8,7 +8,10 @@ export interface RenderJob {
   id?: string;
   status: 'queued' | 'rendering' | 'processing' | 'completed' | 'failed' | 'cancelled';
   queuePosition?: number;
-  artifact?: VisualizationContent['artifact'];
+  artifact?: VisualizationContent['artifact'] & {
+    sandboxImage?: string;
+    verification?: { media?: string };
+  };
   errorCode?: string;
   issue?: RenderIssue;
   diagnosticId?: string;

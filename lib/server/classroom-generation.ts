@@ -1,9 +1,9 @@
 import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
 import {
   generateVisualization,
-  manimTurnRouting,
   VISUALIZATION_OUTLINE_INSTRUCTION,
 } from '@/lib/visualization/generate';
+import { createManimAiCall, dedicatedManimModel } from '@/lib/visualization/model';
 import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { nanoid } from 'nanoid';
 import { callLLM } from '@/lib/ai/llm';
@@ -355,7 +355,11 @@ export async function generateClassroom(
     timingCollector?: ReturnType<typeof createGenerationTimingCollector>,
   ) => {
     const stage = (outlineType ? `scene-content:${outlineType}` : 'scene-content') as LlmStage;
-    const { model, outputWindow, thinking, nativeTools } = await resolveStageModel(stage);
+    const dedicated =
+      outlineType === 'visualization' && input.ownerUserId ? dedicatedManimModel() : undefined;
+    const { model, outputWindow, thinking, nativeTools } = dedicated
+      ? { model: dedicated, outputWindow: undefined, thinking: undefined, nativeTools: false }
+      : await resolveStageModel(stage);
     const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
       const result = await callGenerationLLM(
         {
@@ -373,28 +377,12 @@ export async function generateClassroom(
       );
       return result.text;
     };
-    const visualizationAiCall: import('@/lib/visualization/generate').VisualizationAiCall = (
-      system,
-      prompt,
-      abortSignal,
-      tools,
-      turn,
-    ) =>
-      callLLM(
-        {
-          model,
-          system,
-          prompt,
-          abortSignal,
-          maxOutputTokens: Math.min(outputWindow ?? 10000, 10000),
-          maxRetries: 0,
-          ...(tools && { tools, toolChoice: 'required' }),
-        },
-        'generate-classroom-scene',
-        undefined,
-        thinking,
-        manimTurnRouting(timingCollector?.routingPolicy ?? {}, turn),
-      );
+    const visualizationAiCall = createManimAiCall({
+      model,
+      outputWindow,
+      thinking,
+      timing: timingCollector?.routingPolicy,
+    });
     return { aiCall, visualizationAiCall, model, thinking, nativeTools };
   };
 

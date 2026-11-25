@@ -41,3 +41,8 @@
 - The router advances past a retired upstream endpoint. Corrections continue from the working tier within the same deadline. Routed Gemma receives ordinary chat text and Sahaya validates its JSON response locally.
 - Fast Refresh review found read-only skill files, an in-memory job store, and renderer writes under the publisher's separate artifact volume. Usage accounting appends to gitignored `data/usage/*.jsonl` in the app checkout. The first production attempt recorded model tokens and neither attempt posted a renderer job. Exact HMR invalidation requires HPC timestamps or watcher events. Fast Refresh configuration remains intact.
 - Verified 314 AI, visualization, and scene-job tests. Three classroom PBL tests also fail at the deployed commit. The TypeScript comparison found no new diagnostics.
+
+## Phase deadlines and operator diagnostics
+
+- The last live turn reached Gemma but exhausted the 260-second agent deadline during inference. The scene API also had a separate 280-second timer. A dedicated Manim route can now select local Gemma first, and the self-hosted agent owns one deadline with separate authoring, correction, documentation, preview and final windows.
+- Added bounded prompts and completion sizes for the reported 8,192-token context, reasoning and first-token metrics, and separate operator diagnostics for authoring and the authenticated publisher. Live HPC measurements and the actual Bubblewrap smoke render remain to be run by the operator.

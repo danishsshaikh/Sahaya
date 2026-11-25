@@ -8,11 +8,9 @@ import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
  */
 
 import { after, NextRequest } from 'next/server';
-import {
-  generateVisualization,
-  manimTurnRouting,
-  type VisualizationRevision,
-} from '@/lib/visualization/generate';
+import { generateVisualization, type VisualizationRevision } from '@/lib/visualization/generate';
+import { createManimAiCall, dedicatedManimModel } from '@/lib/visualization/model';
+import { manimAgentBudget } from '@/lib/visualization/budget';
 import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { callLLM } from '@/lib/ai/llm';
 import {
@@ -193,6 +191,7 @@ export async function POST(req: NextRequest) {
     // Route per scene-content type (e.g. `scene-content:quiz`); getStageModel
     // falls back to the base `scene-content` route when the type is unrouted.
     const stage = outline.type ? (`scene-content:${outline.type}` as const) : 'scene-content';
+    const manimModel = visualization ? dedicatedManimModel() : undefined;
     const {
       model: languageModel,
       modelInfo,
@@ -200,14 +199,19 @@ export async function POST(req: NextRequest) {
       providerId,
       baseUrl,
       thinkingConfig,
-    } = await resolveModelFromRequest(req, body, stage);
+    } = manimModel
+      ? {
+          model: manimModel,
+          modelString: manimModel,
+          providerId: manimModel.split(':')[0],
+          modelInfo: undefined,
+          baseUrl: undefined,
+          thinkingConfig: undefined,
+        }
+      : await resolveModelFromRequest(req, body, stage);
     const timingCollector = createGenerationTimingCollector();
-    let visualizationSignal: AbortSignal | undefined;
     let simulationBudget: LLMRoutingPolicy['simulationBudget'];
-    const invokeSceneContentLLM = (
-      params: Parameters<typeof callLLM>[0],
-      turn?: Parameters<typeof manimTurnRouting>[1],
-    ) => {
+    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
       if (isSimulationOutline(effectiveOutline)) {
         const simulationTotalBudgetMs = positiveEnvInt(
           'SCENE_CONTENT_SIMULATION_TOTAL_BUDGET_MS',
@@ -231,13 +235,7 @@ export async function POST(req: NextRequest) {
         ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
         ...(simulationBudget ? { simulationBudget } : {}),
       };
-      return callLLM(
-        params,
-        'scene-content',
-        undefined,
-        thinkingConfig,
-        manimTurnRouting(routingPolicy, turn),
-      );
+      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
     };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
@@ -450,9 +448,6 @@ export async function POST(req: NextRequest) {
     const userLocale = req.headers?.get('x-user-locale') ?? '';
 
     const generateResolvedContent = async (signal?: AbortSignal, jobId?: string) => {
-      visualizationSignal = visualization
-        ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(280_000)])
-        : signal;
       const phaseStartedAt = Date.now();
       const routeEventStart = timingCollector.events.length;
       log.info(
@@ -487,22 +482,16 @@ export async function POST(req: NextRequest) {
               attemptId: attemptIdentity.attemptId,
               requestId: timingCollector.requestId,
               model: modelString,
+              provider: providerId,
             },
             nativeTools: supportsNativeManimTools(providerId, modelString, baseUrl),
-            aiCall: (system, prompt, abortSignal, tools, turn) =>
-              invokeSceneContentLLM(
-                {
-                  model: languageModel,
-                  system,
-                  prompt,
-                  abortSignal,
-                  maxRetries: 0,
-                  maxOutputTokens: Math.min(modelInfo?.outputWindow ?? 10000, 10000),
-                  ...(tools && { tools, toolChoice: 'required' }),
-                },
-                turn,
-              ),
-            signal: visualizationSignal,
+            aiCall: createManimAiCall({
+              model: languageModel,
+              outputWindow: modelInfo?.outputWindow,
+              thinking: thinkingConfig,
+              timing: timingCollector.routingPolicy,
+            }),
+            signal,
             revision: visualizationRevision,
             onProgress: jobId
               ? (phase, position) => updateSceneContentJobPhase(jobId, phase, position)
@@ -689,6 +678,7 @@ export async function POST(req: NextRequest) {
           generationVersion: job.generationVersion,
           pollUrl: `${buildRequestOrigin(req)}/api/generate/scene-content/status?jobId=${job.id}`,
           pollIntervalMs: SIMULATION_CONTENT_JOB_POLL_INTERVAL_MS,
+          ...(visualization && { pollTimeoutMs: manimAgentBudget().overallMs + 15_000 }),
           done: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled',
           ...(job.status === 'completed' && job.result
             ? {
