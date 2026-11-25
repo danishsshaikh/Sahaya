@@ -28,3 +28,9 @@
 - Retired the JSON planner, validator, patcher and compositor. Native Manim now uses a request-scoped skill, optional Context7 retrieval, a bounded correction loop, and the existing classroom attempts.
 - Added owner-scoped native source, cue metadata, isolated preview/final jobs, and measured Teaching Voice retiming. The publisher independently verifies encoded media before publication.
 - Added broker capability preflight and the standalone stop/build/restart sequence. Probe results and media checks are tested with local fixtures. Actual university gVisor verification and live generation remain pending.
+
+
+## Local Bubblewrap execution
+
+- Added an authenticated Unix-socket executor that gates Python on a patched approved runtime, cgroup v1 enrollment and verified isolation. Existing HTTPS gVisor deployments remain optional.
+- Added the standalone verification suite and fixed publisher healthcheck permissions. Local tests use mocks and trusted media fixtures. Linux verification and university approval remain prerequisites for live execution.

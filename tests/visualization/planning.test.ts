@@ -182,6 +182,15 @@ describe('native Manim agent', () => {
     ]);
   });
 
+  it('accepts verified Bubblewrap readiness and keeps the native agent workflow', async () => {
+    configure(18886, (url) =>
+      Response.json(url.endsWith('/ready') ? { ...verified, backend: 'bubblewrap' } : output),
+    );
+    const ai = vi.fn<VisualizationAiCall>().mockResolvedValue(submission(source));
+    await expect(generate(ai)).resolves.toHaveProperty('artifact');
+    expect(ai).toHaveBeenCalledTimes(1);
+  });
+
   it('enforces the configured agent deadline during a provider call', async () => {
     configure(18885, () => Response.json(verified));
     vi.stubEnv('MANIM_AGENT_DEADLINE_SECONDS', '1');

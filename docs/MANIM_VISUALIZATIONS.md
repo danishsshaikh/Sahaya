@@ -10,8 +10,8 @@ flowchart LR
   Skill["Task-scoped skill and references"] --> Agent
   Context7["Optional pinned Context7"] --> Agent
   Agent --> Publisher["Private publisher and job queue"]
-  Publisher --> Broker["University-approved HTTPS broker"]
-  Broker --> Worker["Disposable gVisor Cairo worker"]
+  Publisher --> Broker["Local executor via private Unix socket"]
+  Broker --> Worker["Disposable Bubblewrap Cairo worker"]
   Worker --> Publisher
   Publisher --> Agent
   Publisher --> Store["Owner-scoped MP4, poster, source, cues"]
@@ -29,21 +29,70 @@ Context7 offers MCP, a CLI, and REST. Sahaya uses the REST context operation wit
 
 ## Execution and university prerequisites
 
-The trusted publisher has the artifact volume and communicates only with the configured HTTPS broker. The reference broker runs under university administrator control on a dedicated Linux execution host. It checks a registered `runsc` runtime, cgroup limits, its pinned worker image, per-container isolation settings, and an active benign probe. Trusted Docker CLI operations run only on the broker host. Sahaya’s app and publisher have no daemon socket. A failed, stale, incompatible, or absent broker capability disables generation before a model call. Publisher `/health` reports liveness. Authenticated `/ready` reports protocol 4 and the isolation status. The app capability also applies the feature flag. The broker protocol is 1. [gVisor Docker runtime documentation](https://gvisor.dev/docs/user_guide/quick_start/docker/)
+The HPC publisher retains the existing artifact volume and connects to an unprivileged executor on the same host through an authenticated Unix socket. The publisher container mounts the private socket directory read-only. Neither the app nor the executor requires the Docker socket. Bubblewrap constructs a fresh mount namespace from a reviewed, read-only Manim runtime filesystem exported from the pinned worker image. Generated Python does not receive either service's socket, the repository, home directories, credentials or the artifact volume. Sources and bounded MP4 output move through pipes. The publisher independently decodes and validates the media before committing it.
 
-University administrators provision an up-to-date gVisor `runsc` registered on a dedicated Docker daemon, working CPU quota, memory and swap accounting, PID limits, and an approved private TLS reverse proxy. The proxy should permit the publisher and HPC operator IPs, cap request bodies at 128 KiB, and allow at least 135 seconds for an execution request. Use a CA trusted by the publisher image. Set the broker token through a protected service environment file. The broker binds loopback port 8790 by default. The backend requires a current security review on the actual placement and runtime.
+### Runtime security requirements
 
-The administrator builds the worker from a trusted checkout on the execution host. Deploy the checked-out broker source as a managed service with the same revision.
+The supplied Ubuntu 20.04 build `0.4.0-1ubuntu4.1` is ineligible. Upstream fixed CVE-2026-87766 in 0.12.0. Ubuntu's USN-8779-2 reverted its initial fix, including the Focal ESM update. The successful `env -i` tests on 0.4.0 establish basic namespace functionality. The executor requires an administrator-reviewed, non-set-ID Bubblewrap 0.12.0 or newer with an exact approved binary digest. It launches with an empty host environment and also uses the supported `--clearenv` flag. Build and verify patched binaries in a user-local staging directory against Focal's ABI. An administrator then copies the reviewed build into a protected path. This path needs no changes to the system package or Docker daemon. [Upstream advisory](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx) · [Ubuntu regression notice](https://ubuntu.com/security/notices/USN-8779-2) · [Bubblewrap security model](https://github.com/containers/bubblewrap/blob/main/SECURITY.md)
+
+The dedicated account needs Linux Python 3.10+ with pidfd support, an approved libseccomp 2.6.2 or newer, and FFmpeg/ffprobe for the trusted startup fixture. These tools can be provisioned alongside the executor in an administrator-reviewed directory. Manim, Cairo, TeX and fonts come from the extracted image. User namespaces must be available to the service account on the actual kernel. Bubblewrap shares the host kernel. The university must review that exposure, the seccomp policy, and the account's cgroup and filesystem access. [libseccomp security releases](https://github.com/seccomp/libseccomp/releases) · [Bubblewrap isolation options](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)
+
+The executor supports **one** active local worker. It starts a trusted launcher behind a pipe gate, verifies its migration into dedicated CPU, memory and PID cgroup v1 leaves, then releases it to Bubblewrap. The administrator provisions those leaves and delegates only writes to their `cgroup.procs` files to the executor account. The administrator owns the leaves and limit files. Use canonical paths on the real kernel controller mounts and keep the leaves empty of other services or descendants. Example caps are `cpu.cfs_period_us=100000`, `cpu.cfs_quota_us=200000`, `memory.limit_in_bytes=2147483648`, `memory.memsw.limit_in_bytes=2147483648`, and `pids.max=128`. The memory+swap controller must be present and enforced. When the host lacks delegation or a required controller, generation stays disabled. [Linux CPU bandwidth](https://docs.kernel.org/scheduler/sched-bwc.html) · [Linux cgroup v1 memory controller](https://docs.kernel.org/admin-guide/cgroup-v1/memory.html) · [Linux PID controller](https://docs.kernel.org/admin-guide/cgroup-v1/pids.html)
+
+The worker gets isolated user, PID, IPC, UTS, mount, network and cgroup namespaces. It has a 512 MiB private tmpfs, a read-only runtime and proc mount, and four standard character devices for null, zero and randomness. It runs as namespace UID/GID 1000 with no effective capabilities. Bubblewrap disallows nested user namespaces, and a seccomp filter blocks namespace syscalls, new-namespace clone flags, sockets and sensitive kernel interfaces. Python and TeX run inside this environment, with TeX shell escape disabled. Deadlines, cancellation and pipe limits terminate work and drain the job's dedicated cgroups using pidfds. Failed cleanup blocks further launches.
+
+### Provision and verify on the university host
+
+Build and export a trusted Manim runtime using the approved branch source. The image is a staging artifact and does not run generated Python under ordinary Docker.
 
 ```bash
 docker build -f services/manim-renderer/Dockerfile.sandbox -t sahaya-manim-worker:0.22.1 services/manim-renderer
-export MANIM_SANDBOX_IMAGE="$(docker image inspect --format '{{.Id}}' sahaya-manim-worker:0.22.1)"
-export MANIM_SANDBOX_APPROVED=true
-# MANIM_SANDBOX_TOKEN comes from the protected environment.
-python3 services/manim-renderer/sandbox_broker.py
+docker image inspect --format '{{.Id}}' sahaya-manim-worker:0.22.1
+worker=$(docker create sahaya-manim-worker:0.22.1)
+docker export "$worker" > sahaya-manim-worker-rootfs.tar
+docker rm "$worker"
+sha256sum sahaya-manim-worker-rootfs.tar
 ```
 
-Each worker uses `--runtime=runsc`, no network, UID 1000, a read-only image, no added capabilities or devices, separate IPC, and no privilege escalation. Limits are two CPU cores, 2 GiB memory including swap allocation, 128 processes, and a 512 MiB private scratch filesystem. Python and TeX run only inside the disposable worker. TeX shell escape is disabled. Inputs and outputs travel through bounded pipes. The worker receives the source, cue IDs and numeric durations. It receives neither narration media nor service secrets. The trusted publisher verifies the silent H.264 stream, decoded frame counts, timing, file size, contrast samples, and a JPEG poster before atomic publication. The media check is automated and does not grade composition or scientific accuracy.
+The administrator extracts this verified archive into a new protected root-owned directory such as `/opt/sahaya-manim/rootfs-0.22.1`. Normalize ownership recursively without following symlinks, remove group/other write and set-ID bits from files and directories, and keep `dev`, `proc`, and `tmp` present and empty. The runtime tree permits regular files, directories, and internal symlink paths resolved by the sandbox. It must contain no mounted subtrees, special files, app configuration or host credentials. Publish and treat the tree as immutable.
+
+Separately provision `/run/sahaya-manim` mode 0750, owned by the executor account with a dedicated non-root group. Use that group as the executor's primary group or set the directory's setgid bit (mode 2750). The directory contains only the socket and its lock file. Give the deployment operator access through the dedicated group. The update script maps that group into the publisher, whose UID stays 1000. Keep the directory in place across executor restarts so the publisher sees the replacement socket.
+
+The administrator maintains a protected policy at `/etc/sahaya-manim/bubblewrap.json`. Populate it with the observed image ID, SHA-256 of the final Bubblewrap executable, and actual canonical controller paths.
+
+```json
+{
+  "approved": false,
+  "binary": "/opt/sahaya-manim/bin/bwrap",
+  "binary_sha256": "<64 hex digits>",
+  "libseccomp": "/opt/sahaya-manim/lib/libseccomp.so.2.6.2",
+  "rootfs": "/opt/sahaya-manim/rootfs-0.22.1",
+  "image": "sha256:<worker image ID>",
+  "cgroups": {
+    "cpu": "/sys/fs/cgroup/cpu,cpuacct/sahaya-manim",
+    "memory": "/sys/fs/cgroup/memory/sahaya-manim",
+    "pids": "/sys/fs/cgroup/pids/sahaya-manim"
+  }
+}
+```
+
+Run verification as the executor account on the host with the executor stopped and the reviewed release files available:
+
+```bash
+/usr/bin/bwrap --version
+dpkg-query -W bubblewrap
+bash scripts/verify-manim-bubblewrap.sh /etc/sahaya-manim/bubblewrap.json /run/sahaya-manim
+```
+
+The standalone verification uses synthetic canaries and a fixed Manim scene. It checks namespace and host process visibility, policy limits and group membership, socket and environment isolation, syscall restrictions, scratch capacity, timeouts, cancellation, descendant cleanup, and frame-derived output. These checks verify the configured controls within their scope. They do not constitute an administrator security review or a load test.
+
+After accepting the residual kernel risk and the verification evidence, the administrator sets `approved` to `true` and starts the executor with its protected `MANIM_SANDBOX_TOKEN` environment variable as the designated account:
+
+```bash
+python3 services/manim-renderer/bubblewrap_broker.py serve /etc/sahaya-manim/bubblewrap.json /run/sahaya-manim
+```
+
+Use the reviewed release's service code and trusted service environment. The executor repeats technical verification before serving. The publisher's authenticated `/ready` reports protocol 4 with backend `bubblewrap` and `isolation: verified`. Its `/health` remains liveness only. A local socket failure cannot switch the publisher to an HTTPS transport. The previous gVisor broker remains optional on deployments explicitly configured for HTTPS. [gVisor Docker runtime documentation](https://gvisor.dev/docs/user_guide/quick_start/docker/)
 
 Artifact storage keeps Python source, timing, render metadata and media distinct. Cache keys include the canonical request, immutable worker image, publisher revision and limits, under an owner directory. Temporary editor previews expire after two hours. Unpublished checks and failed attempts are cleaned up. Durable course media is preserved. The storage quota blocks further publication until an administrator can review stored usage and course references.
 
@@ -57,11 +106,11 @@ New native results are labeled illustrative. Skill guidance calls for formula, u
 
 ## Configuration and rollout
 
-The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three model requests, two documentation lookups, three previews, two final attempts, and 260 seconds per agent execution. See [environment examples](../.env.example). The publisher uses `MANIM_SANDBOX_URL` and `MANIM_SANDBOX_TOKEN` to reach the broker. The publisher queue defaults to one rendering worker and eight active jobs. The broker defaults to one execution slot, a 45-second preview, and a 105-second final attempt. It supports `MANIM_SANDBOX_CONCURRENCY`, `MANIM_SANDBOX_PREVIEW_SECONDS`, and `MANIM_SANDBOX_FINAL_SECONDS`, bounded by the deployment contract. Set publisher concurrency to match the approved broker capacity.
+The app uses `OPENMAIC_ENABLE_MANIM`, `MANIM_RENDERER_URL`, `MANIM_RENDERER_TOKEN`, and optionally `CONTEXT7_API_KEY`. Defaults are four active agents per app process, three model requests, two documentation lookups, three previews, two final attempts, and 260 seconds per agent execution. See [environment examples](../.env.example). The HPC publisher uses `MANIM_SANDBOX_SOCKET` and `MANIM_SANDBOX_TOKEN`. Its queue defaults to one worker and eight active jobs. The executor defaults to a 45-second preview and 105-second final attempt, configurable with `MANIM_SANDBOX_PREVIEW_SECONDS` and `MANIM_SANDBOX_FINAL_SECONDS`. The optional gVisor backend uses `MANIM_SANDBOX_URL`.
 
-Docker Compose retains the `manim` profile and persistent volume. Use the existing deployment service build and profile commands to update it. Podman and Quadlet use the same publisher image, original artifact mount, and a separate publisher egress network; the approved gVisor broker remains external to all three launch paths. The deployment preflight checks configuration, and publisher readiness separately checks actual broker availability.
+Docker Compose retains the `manim` profile and persistent volume. Podman and Quadlet use the same publisher image and artifact mount. The existing HTTPS deployment works with approved gVisor. A Compose local deployment adds a publisher-only read-only bind of the socket directory plus the mapped socket group, and sets `MANIM_SANDBOX_SOCKET` to the in-container path. Verify group and UID mapping before using a local socket with rootless container engines.
 
-On the university HPC server, the standalone update script stages the new publisher image before stopping the Next.js pane. It checks the private broker before changing services, stops Next.js before rebuilding the workspace, verifies actual HTTP readiness, and preserves the previous renderer container for rollback. The original renderer token, port, resource limits, and `sahaya-manim-hpc:/artifacts` persist. Gemma and Teaching Voice services remain on their existing allocations. If Next.js cannot restart after an upgrade, rollback restores the old renderer and attempts to restart the prior app revision from a separate worktree. That app recovery uses the local pnpm store and the original environment. [Standalone update script](../scripts/update-manim-hpc.sh)
+On the university HPC server, the standalone update script stages the new publisher image before stopping the Next.js pane. It verifies the local socket before changing services, stops Next.js before rebuilding the workspace, verifies actual HTTP readiness, and preserves the previous renderer container for rollback. The original renderer token, port, resource limits, and `sahaya-manim-hpc:/artifacts` persist. Gemma and Teaching Voice services remain on their existing allocations. If Next.js cannot restart after an upgrade, rollback restores the old renderer and attempts to restart the prior app revision from a separate worktree. That app recovery uses the local pnpm store and the original environment. [Standalone update script](../scripts/update-manim-hpc.sh)
 
 ```bash
 (
@@ -72,7 +121,7 @@ On the university HPC server, the standalone update script stages the new publis
 )
 ```
 
-The upgrade expects exported `MANIM_SANDBOX_URL` and `MANIM_SANDBOX_TOKEN` on the first native rollout. The first broker build and publisher rebuild are required. Subsequent upgrades can recover broker settings already attached to the publisher. Leave the current deployment running while the university provisions the broker.
+Export the protected `MANIM_SANDBOX_TOKEN` for the first Bubblewrap rollout. `MANIM_BWRAP_SOCKET_DIR` defaults to `/run/sahaya-manim`. The rollout rebuilds the publisher and verifies that UID 1000 can execute its healthcheck. Leave the current deployment running while the university provisions the executor.
 
 ## Live verification and troubleshooting
 

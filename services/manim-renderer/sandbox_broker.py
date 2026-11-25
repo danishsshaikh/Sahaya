@@ -96,7 +96,12 @@ def pump(process, payload, done, deadline, maximum):
                     key.fileobj.close()
                 except BlockingIOError:
                     continue
-    if process.wait(timeout=max(0.1, deadline - time.monotonic())) != 0:
+    while process.poll() is None:
+        if done.wait(0.05):
+            raise Rejected("cancelled", "Sandbox execution was cancelled.")
+        if time.monotonic() >= deadline:
+            raise Rejected("timeout", "Sandbox execution exceeded its deadline.")
+    if process.returncode != 0:
         raise Rejected("resources", "The sandbox process exited. Reduce scene complexity or check worker health.")
     return result
 
@@ -195,6 +200,18 @@ def monitor():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def secret(self):
+        return SECRET
+
+    def backend_capability(self):
+        return capability()
+
+    def execute_job(self, payload, done, budget):
+        return execute(payload, done, budget)
+
+    def slots(self):
+        return SLOTS
+
     def setup(self):
         self.request.settimeout(10)
         super().setup()
@@ -213,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def authorized(self):
-        if not compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {SECRET}".encode()):
+        if not compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {self.secret()}".encode()):
             self.reply(401, {"error": "Sandbox authentication required"})
             return False
         return True
@@ -224,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.authorized():
-            self.reply(200, capability()) if self.path == "/ready" else self.reply(404, {})
+            self.reply(200, self.backend_capability()) if self.path == "/ready" else self.reply(404, {})
 
     def do_POST(self):
         if not self.authorized():
@@ -233,10 +250,10 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             self.reply(404, {})
             return
-        if capability()["isolation"] != "verified":
+        if self.backend_capability()["isolation"] != "verified":
             self.reply(503, {"error": "Verified sandbox unavailable"})
             return
-        if not SLOTS.acquire(blocking=False):
+        if not self.slots().acquire(blocking=False):
             self.reply(429, {"error": "Sandbox queue is busy"})
             return
         done = threading.Event()
@@ -253,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.rfile.read(size)
             request = check_request(json.loads(payload))
             budget = PREVIEW_SECONDS if request["quality"] == "preview" else FINAL_SECONDS
-            result = execute(payload, done, budget)
+            result = self.execute_job(payload, done, budget)
             self.reply(200, result)
         except Rejected as error:
             self.reply(422, {"issue": error.issue})
@@ -265,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if RUNNING.get(job) is done:
                     RUNNING.pop(job, None)
-            SLOTS.release()
+            self.slots().release()
 
     def do_DELETE(self):
         if not self.authorized():

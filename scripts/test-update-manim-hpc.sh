@@ -34,7 +34,10 @@ cat >"$fixture/bin/python3" <<'MOCK'
 if [[ "$1" == '-' ]]; then
   if [[ "$2" == */previous.json ]]; then
     echo 'broker preflight' >> "$TRACE"
-    [[ "$CASE" != unavailable ]] || exit 1
+    printf '2000' > "$5"
+    printf 'MANIM_SANDBOX_SOCKET=/run/sahaya-manim/broker.sock\n' > "$3"
+    [[ "$CASE" != unavailable ]]
+    exit
   fi
   printf 'MANIM_RENDERER_TOKEN=synthetic-renderer-token-123456\n' > "${@: -1}"
 elif [[ "$*" == *Sahaya\ HTTP* ]]; then
@@ -75,6 +78,7 @@ stop=$(grep -nF 'exec sleep 86400' "$TRACE" | head -1 | cut -d: -f1)
 build=$(grep -nF 'pnpm rebuild:workspace' "$TRACE" | cut -d: -f1)
 test "$stop" -lt "$build"
 grep -q 'docker update --restart=no' "$TRACE"
+grep -q 'docker exec --user' "$TRACE"
 grep -q 'is ready in openmaic-llm-test' "$fixture/success.output"
 
 if run app-failure; then

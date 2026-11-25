@@ -27,6 +27,7 @@ pane=
 rollback=
 renderer_env="$work/renderer.env"
 client_env="$work/app.env"
+socket_dir=${MANIM_BWRAP_SOCKET_DIR:-/run/sahaya-manim}
 
 docker volume inspect "$renderer" >/dev/null
 test "$(docker inspect -f '{{.State.Running}}' "$renderer")" = true
@@ -106,53 +107,78 @@ cleanup() {
 trap cleanup EXIT
 
 docker inspect --format '{{json .}}' "$renderer" >"$work/previous.json"
-python3 - "$work/previous.json" "$renderer_env" <<'PY'
-import json, os, re, sys
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+python3 - "$work/previous.json" "$renderer_env" "$socket_dir" "$work/socket-gid" <<'PYCODE'
+import json, os, re, socket, stat, sys
+from http.client import HTTPConnection
+from pathlib import Path
 
-previous, target = sys.argv[1:]
+previous, target, directory, group_file = sys.argv[1:]
 with open(previous) as handle:
     current = json.load(handle)
     values = dict(entry.split("=", 1) for entry in current["Config"]["Env"])
 assert any(m.get("Type")=="volume" and m.get("Name")=="sahaya-manim-hpc" and m.get("Destination")=="/artifacts"
            for m in current["Mounts"]), "Unexpected publisher artifact mount"
 assert current["HostConfig"]["PortBindings"].get("8780/tcp") == [{"HostIp":"127.0.0.1", "HostPort":"8780"}], "Unexpected publisher port binding"
-for name in ("MANIM_SANDBOX_URL", "MANIM_SANDBOX_TOKEN", "MANIM_CAPTURE_REJECTED_PLANS"):
+for name in ("MANIM_SANDBOX_TOKEN", "MANIM_CAPTURE_REJECTED_PLANS"):
     if name in os.environ:
         values[name] = os.environ[name]
 assert re.fullmatch(r"[A-Za-z0-9_-]{24,128}", values.get("MANIM_RENDERER_TOKEN", "")), "Missing publisher token"
 assert values.get("MANIM_ARTIFACT_DIR", "/artifacts") == "/artifacts"
-endpoint = values.get("MANIM_SANDBOX_URL", "").rstrip("/")
+values.pop("MANIM_SANDBOX_URL", None)
+values["MANIM_SANDBOX_SOCKET"] = "/run/sahaya-manim/broker.sock"
 token = values.get("MANIM_SANDBOX_TOKEN", "")
-url = urlsplit(endpoint)
-assert url.scheme == "https" and url.hostname and not any((url.username, url.password, url.query, url.fragment)), "Set the approved HTTPS MANIM_SANDBOX_URL."
 assert re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token), "Set the approved MANIM_SANDBOX_TOKEN."
-from urllib.request import build_opener, HTTPRedirectHandler
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *args):
-        return None
+folder = Path(directory)
+broker = folder / "broker.sock"
 try:
-    with build_opener(NoRedirect).open(Request(endpoint + "/ready", headers={"Authorization": "Bearer " + token}), timeout=5) as response:
-        ready = json.loads(response.read(4096))
-    assert (ready["isolation"], ready["backend"], ready["protocol"], ready["manimVersion"]) == ("verified", "gvisor", 1, "0.22.1")
+    assert re.fullmatch(r"/[A-Za-z0-9/_.-]+", directory) and folder == folder.resolve(strict=True)
+    assert stat.S_IMODE(folder.stat().st_mode) & 0o777 == 0o750
+    assert set(item.name for item in folder.iterdir()) <= {"broker.sock", "broker.lock"}
+    info = broker.lstat()
+    assert stat.S_ISSOCK(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o660
+    assert info.st_gid == folder.stat().st_gid and info.st_uid == folder.stat().st_uid
+    assert info.st_gid != 0
+except (AssertionError, OSError):
+    raise SystemExit("The approved private Bubblewrap socket directory is unavailable or invalid.") from None
+
+class UnixHTTP(HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(broker))
+
+try:
+    connection = UnixHTTP("localhost", timeout=5)
+    try:
+        connection.request("GET", "/ready", headers={"Authorization": "Bearer " + token})
+        with connection.getresponse() as response:
+            assert response.status == 200
+            ready = json.loads(response.read(4096))
+    finally:
+        connection.close()
+    assert (ready["isolation"], ready["backend"], ready["protocol"], ready["manimVersion"]) == (
+        "verified", "bubblewrap", 1, "0.22.1")
     assert re.fullmatch(r"sha256:[a-f0-9]{64}", ready["image"])
 except Exception:
-    raise SystemExit("The approved gVisor broker did not pass native Manim readiness.") from None
+    raise SystemExit("The approved local Bubblewrap executor did not pass readiness.") from None
+Path(group_file).write_text(str(info.st_gid))
 with open(target, "w") as output:
     for name, value in values.items():
         if name.startswith("MANIM_"):
             assert "\n" not in value and "\r" not in value
             print(f"{name}={value}", file=output)
     print("HOME=/tmp\nXDG_CACHE_HOME=/tmp", file=output)
-print("Administrator-approved gVisor broker verified.")
-PY
+print("Approved local Bubblewrap executor verified.")
+PYCODE
+socket_gid=$(cat "$work/socket-gid")
+[[ "$socket_gid" =~ ^[1-9][0-9]*$ ]]
 
 mkdir "$work/image"
 git archive "$target" services/manim-renderer | tar -x -C "$work/image"
 docker build -t "$image" "$work/image/services/manim-renderer"
 docker create --name "$staged" --restart "$restart" --init \
   --publish 127.0.0.1:8780:8780 --volume "$renderer:/artifacts" \
+  --mount "type=bind,src=$socket_dir,dst=/run/sahaya-manim,readonly" --group-add "$socket_gid" \
   --env-file "$renderer_env" --read-only --tmpfs /tmp:size=512m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
   --cpus 2 --memory 2g --pids-limit 128 \
@@ -187,7 +213,7 @@ for candidate in reversed(pids):
     break
 else:
     values = {}
-excluded = {"_", "PWD", "OLDPWD", "SHLVL", "TMUX", "TMUX_PANE", "BASH_ENV", "ENV", "MANIM_SANDBOX_URL", "MANIM_SANDBOX_TOKEN"}
+excluded = {"_", "PWD", "OLDPWD", "SHLVL", "TMUX", "TMUX_PANE", "BASH_ENV", "ENV", "MANIM_SANDBOX_URL", "MANIM_SANDBOX_TOKEN", "MANIM_SANDBOX_SOCKET"}
 with open(publisher) as source:
     publisher_values = dict(line.rstrip("\n").split("=", 1) for line in source)
 values.update({"OPENMAIC_ENABLE_MANIM":"true", "MANIM_RENDERER_URL":"http://127.0.0.1:8780",
@@ -236,8 +262,8 @@ request = Request("http://127.0.0.1:8780/ready", headers={
 })
 with urlopen(request, timeout=3) as response:
     ready=json.load(response)
-    assert ready["protocol"]==4 and ready["secureExecution"] and ready["isolation"]=="verified"
-    print("Publisher ready: "+ready["version"]+" (verified gVisor)")
+    assert ready["protocol"]==4 and ready["secureExecution"] and ready["isolation"]=="verified" and ready["backend"]=="bubblewrap"
+    print("Publisher ready: "+ready["version"]+" (verified Bubblewrap)")
 ' 2>/dev/null; then
     publisher_ready=true
     break
@@ -245,6 +271,7 @@ with urlopen(request, timeout=3) as response:
   sleep 1
 done
 test "$publisher_ready" = true
+docker exec --user 1000:1000 "$renderer" python /opt/sahaya-manim/healthcheck.py
 launch_app "$repo"
 ready
 docker update --restart=no "$backup" >/dev/null

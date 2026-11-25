@@ -60,6 +60,7 @@ services:
       - MANIM_RENDERER_URL=http://manim-renderer:8780
       - MANIM_SANDBOX_TOKEN=
       - MANIM_SANDBOX_URL=
+      - MANIM_SANDBOX_SOCKET=
       # Keep every server-owned recording/artifact beneath the durable volume.
       - OPENMAIC_AUTH_DATA_DIR=/app/data/auth
       - VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
@@ -352,6 +353,7 @@ services:
       MANIM_RENDERER_TOKEN: ${MANIM_RENDERER_TOKEN:-}
       MANIM_CAPTURE_REJECTED_PLANS: ${MANIM_CAPTURE_REJECTED_PLANS:-false}
       MANIM_SANDBOX_URL: ${MANIM_SANDBOX_URL:-}
+      MANIM_SANDBOX_SOCKET: ${MANIM_SANDBOX_SOCKET:-}
       MANIM_SANDBOX_TOKEN: ${MANIM_SANDBOX_TOKEN:-}
       MANIM_MAX_DURATION: ${MANIM_MAX_DURATION:-90}
       MANIM_MAX_ARTIFACT_BYTES: ${MANIM_MAX_ARTIFACT_BYTES:-50331648}

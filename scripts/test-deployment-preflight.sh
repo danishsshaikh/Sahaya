@@ -83,14 +83,14 @@ if grep -q 'renderer-test-token-123456789' "$TEST_DIR/manim.log"; then
   printf 'The Manim token must not appear in preflight output.\n' >&2
   exit 1
 fi
-grep -q 'administrator-approved HTTPS sandbox broker' "$TEST_DIR/manim.log"
+grep -q 'administrator-approved sandbox executor' "$TEST_DIR/manim.log"
 cat >>"$TEST_DIR/manim.env" <<'EOF'
 MANIM_SANDBOX_URL=https://manim-sandbox.example.invalid
 MANIM_SANDBOX_TOKEN=synthetic-sandbox-private-test-123456789
 EOF
 PATH="$TEST_DIR/bin:$PATH" "$ROOT_DIR/scripts/deployment-preflight.sh" \
   --runtime podman --mode basic --env-file "$TEST_DIR/manim.env" >"$TEST_DIR/manim-configured.log"
-grep -q 'Manim broker settings present' "$TEST_DIR/manim-configured.log"
+grep -q 'Manim executor settings present' "$TEST_DIR/manim-configured.log"
 if grep -q 'synthetic-sandbox-private-test' "$TEST_DIR/manim-configured.log"; then
   printf 'The sandbox token must not appear in preflight output.\n' >&2
   exit 1

@@ -267,11 +267,11 @@ if [[ $(env_value OPENMAIC_ENABLE_MANIM false) == true ]]; then
   [[ "$value" =~ ^([1-9][0-9]*|0)([.][0-9]+)?$ && "$value" != 0 ]] || fail 'MANIM_CPU_LIMIT must be a positive CPU count.'
   value=$(env_value MANIM_FINAL_QUALITY standard)
   [[ "$value" == standard || "$value" == high ]] || fail 'MANIM_FINAL_QUALITY must be standard or high.'
-  if [[ $(env_value MANIM_SANDBOX_URL) != https://* ||
+  if [[ ( $(env_value MANIM_SANDBOX_SOCKET) != /* && $(env_value MANIM_SANDBOX_URL) != https://* ) ||
         ! $(env_value MANIM_SANDBOX_TOKEN) =~ ^[a-zA-Z0-9_-]{32,128}$ ]]; then
-    warn 'Secure Manim generation requires an administrator-approved HTTPS sandbox broker and private token.'
+    warn 'Secure Manim generation requires an administrator-approved sandbox executor and private token.'
   else
-    ok 'Manim broker settings present. The publisher verifies isolation independently through /ready.'
+    ok 'Manim executor settings present. The publisher verifies isolation independently through /ready.'
   fi
   if [[ "$RUNTIME" == podman ]]; then
     manim_data=$(resolve_path "$(env_value SAHAYA_DATA_DIR "${XDG_DATA_HOME:-$HOME/.local/share}/sahaya")")

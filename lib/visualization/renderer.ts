@@ -91,7 +91,7 @@ export function getVisualizationCapability(): Promise<Capability> {
       const secureExecution =
         ready.secureExecution === true &&
         ready.isolation === 'verified' &&
-        ready.backend === 'gvisor' &&
+        (ready.backend === 'gvisor' || ready.backend === 'bubblewrap') &&
         /^sha256:[a-f0-9]{64}$/.test(ready.sandboxImage);
       return {
         available: secureExecution,
@@ -101,7 +101,8 @@ export function getVisualizationCapability(): Promise<Capability> {
         maxDuration: ready.maxDuration,
         isolation: typeof ready.isolation === 'string' ? ready.isolation : 'unavailable',
         ...(!secureExecution && {
-          reason: 'Visualization generation requires a verified university-approved gVisor broker.',
+          reason:
+            'Visualization generation requires a verified university-approved sandbox executor.',
         }),
       };
     } catch {

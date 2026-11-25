@@ -6,6 +6,7 @@ RUN apt-get update \
     && mkdir -p /opt/sahaya-native
 WORKDIR /tmp
 COPY native_contract.py sandbox_worker.py sahaya_timing.py /opt/sahaya-native/
+RUN chmod 0644 /opt/sahaya-native/*.py
 ENV HOME=/tmp XDG_CACHE_HOME=/tmp MPLCONFIGDIR=/tmp/matplotlib PYTHONDONTWRITEBYTECODE=1 \
     OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 shell_escape=f openin_any=p openout_any=p
 USER 1000:1000

@@ -121,6 +121,7 @@ EOF
     umask 077
     printf '%s\n' "MANIM_RENDERER_TOKEN=$(env_value MANIM_RENDERER_TOKEN)" \
       "MANIM_SANDBOX_URL=$(env_value MANIM_SANDBOX_URL)" \
+      "MANIM_SANDBOX_SOCKET=$(env_value MANIM_SANDBOX_SOCKET)" \
       "MANIM_SANDBOX_TOKEN=$(env_value MANIM_SANDBOX_TOKEN)" >"$UNIT_DIR/sahaya-manim.env"
   )
   chmod 600 "$UNIT_DIR/sahaya-manim.env"
@@ -181,6 +182,7 @@ ContainerName=sahaya-app
 Image=$APP_IMAGE
 EnvironmentFile="$ENV_FILE"
 Environment=MANIM_SANDBOX_URL=
+Environment=MANIM_SANDBOX_SOCKET=
 Environment=MANIM_SANDBOX_TOKEN=
 Environment=OPENMAIC_AUTH_DATA_DIR=/app/data/auth
 Environment=VOICE_CLONING_STORAGE_DIR=/app/data/voice-cloning
