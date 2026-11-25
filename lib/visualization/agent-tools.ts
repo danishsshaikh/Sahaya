@@ -26,15 +26,28 @@ export const sourceSubmission = z
       segments.some((cue) => cue.narration),
   );
 
-export const manimTools = {
-  read_reference: tool({
-    description: 'Read one approved, generic Manim reference topic.',
-    inputSchema: z.object({ topic: topics }).strict(),
-  }),
+export const submitSceneTools = {
   submit_scene: tool({
     description:
       'Submit the complete Python module and its ordered narration/caption metadata for checks and a preview.',
     inputSchema: sourceSubmission,
+  }),
+};
+
+const topicBatch = z.object({ topics: z.array(topics).min(1).max(3) }).strict();
+const referenceRequest = z.union([topicBatch, z.object({ topic: topics }).strict()]);
+
+export function requestedReferenceTopics(input: unknown) {
+  const result = referenceRequest.safeParse(input);
+  if (!result.success) return undefined;
+  return 'topics' in result.data ? result.data.topics : [result.data.topic];
+}
+
+export const manimTools = {
+  ...submitSceneTools,
+  read_reference: tool({
+    description: 'Request up to three missing Manim references together for the next turn.',
+    inputSchema: topicBatch,
   }),
 };
 

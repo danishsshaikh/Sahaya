@@ -14,4 +14,4 @@ Use high contrast, consistent colors, a readable font hierarchy, and safe margin
 
 Use Manim Community APIs, Cairo-compatible constructs, and local mathematical functions. The workspace has no network, assets, audio, or external packages beyond the image. Sahaya handles narration separately and supplies measured cue durations on retiming. Do not install packages, invoke external programs, import system modules, modify renderer configuration, or use arbitrary files.
 
-Read a specialized reference only when it applies: [layout and animations](references/layout.md), [mathematics and plots](references/plotting.md), [camera and 3D](references/camera.md), [timing](references/timing.md), or [render errors and equations](references/rendering.md).
+Use the bundled references before writing Python. When the controller offers reference retrieval, request only missing topics that are essential to the scene, together in one request. Once the controller requests code, submit the complete Python module and cue metadata.

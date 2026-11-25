@@ -1,6 +1,7 @@
 import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
 import {
   generateVisualization,
+  manimTurnRouting,
   VISUALIZATION_OUTLINE_INSTRUCTION,
 } from '@/lib/visualization/generate';
 import { getVisualizationCapability } from '@/lib/visualization/renderer';
@@ -377,8 +378,9 @@ export async function generateClassroom(
       prompt,
       abortSignal,
       tools,
+      turn,
     ) =>
-      callGenerationLLM(
+      callLLM(
         {
           model,
           system,
@@ -389,8 +391,9 @@ export async function generateClassroom(
           ...(tools && { tools, toolChoice: 'required' }),
         },
         'generate-classroom-scene',
+        undefined,
         thinking,
-        timingCollector,
+        manimTurnRouting(timingCollector?.routingPolicy ?? {}, turn),
       );
     return { aiCall, visualizationAiCall, model, thinking, nativeTools };
   };

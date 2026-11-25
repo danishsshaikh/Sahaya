@@ -42,10 +42,11 @@ export async function discoverManimSkill() {
 }
 
 export function relevantReferences(context: string): ReferenceTopic[] {
-  const selected: ReferenceTopic[] = ['layout'];
+  const selected: ReferenceTopic[] = ['layout', 'timing'];
   if (/plot|equation|math|physic|diffraction|gradient|trajectory|function|curve/i.test(context))
     selected.push('plotting');
   if (/\b3d\b|spatial|surface|camera/i.test(context)) selected.push('camera');
+  if (/equation|formula|latex|mathtex/i.test(context)) selected.push('rendering');
   return selected;
 }
 

@@ -8,7 +8,11 @@ import { supportsNativeManimTools } from '@/lib/visualization/agent-tools';
  */
 
 import { after, NextRequest } from 'next/server';
-import { generateVisualization, type VisualizationRevision } from '@/lib/visualization/generate';
+import {
+  generateVisualization,
+  manimTurnRouting,
+  type VisualizationRevision,
+} from '@/lib/visualization/generate';
 import { getVisualizationCapability } from '@/lib/visualization/renderer';
 import { callLLM } from '@/lib/ai/llm';
 import {
@@ -200,7 +204,10 @@ export async function POST(req: NextRequest) {
     const timingCollector = createGenerationTimingCollector();
     let visualizationSignal: AbortSignal | undefined;
     let simulationBudget: LLMRoutingPolicy['simulationBudget'];
-    const invokeSceneContentLLM = (params: Parameters<typeof callLLM>[0]) => {
+    const invokeSceneContentLLM = (
+      params: Parameters<typeof callLLM>[0],
+      turn?: Parameters<typeof manimTurnRouting>[1],
+    ) => {
       if (isSimulationOutline(effectiveOutline)) {
         const simulationTotalBudgetMs = positiveEnvInt(
           'SCENE_CONTENT_SIMULATION_TOTAL_BUDGET_MS',
@@ -224,7 +231,13 @@ export async function POST(req: NextRequest) {
         ...(shouldCollectLLMRouteTiming() ? timingCollector.routingPolicy : {}),
         ...(simulationBudget ? { simulationBudget } : {}),
       };
-      return callLLM(params, 'scene-content', undefined, thinkingConfig, routingPolicy);
+      return callLLM(
+        params,
+        'scene-content',
+        undefined,
+        thinkingConfig,
+        manimTurnRouting(routingPolicy, turn),
+      );
     };
     outlineTitle = rawOutline?.title;
     resolvedModelString = modelString;
@@ -476,16 +489,19 @@ export async function POST(req: NextRequest) {
               model: modelString,
             },
             nativeTools: supportsNativeManimTools(providerId, modelString, baseUrl),
-            aiCall: (system, prompt, abortSignal, tools) =>
-              invokeSceneContentLLM({
-                model: languageModel,
-                system,
-                prompt,
-                abortSignal,
-                maxRetries: 0,
-                maxOutputTokens: Math.min(modelInfo?.outputWindow ?? 10000, 10000),
-                ...(tools && { tools, toolChoice: 'required' }),
-              }),
+            aiCall: (system, prompt, abortSignal, tools, turn) =>
+              invokeSceneContentLLM(
+                {
+                  model: languageModel,
+                  system,
+                  prompt,
+                  abortSignal,
+                  maxRetries: 0,
+                  maxOutputTokens: Math.min(modelInfo?.outputWindow ?? 10000, 10000),
+                  ...(tools && { tools, toolChoice: 'required' }),
+                },
+                turn,
+              ),
             signal: visualizationSignal,
             revision: visualizationRevision,
             onProgress: jobId

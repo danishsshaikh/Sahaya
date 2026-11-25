@@ -34,3 +34,10 @@
 
 - Added an authenticated Unix-socket executor that gates Python on a patched approved runtime, cgroup v1 enrollment and verified isolation. Existing HTTPS gVisor deployments remain optional.
 - Added the standalone verification suite and fixed publisher healthcheck permissions. Local tests use mocks and trusted media fixtures. Linux verification and university approval remain prerequisites for live execution.
+
+## Authoring budget and provider failover
+
+- Reproduced the three-reference loop and the 90-second Nemotron Ultra timeout followed by Super HTTP 410. Reference retrieval now batches missing topics and offers one optional discovery turn when two Python submission turns can follow. A reference-only reply after closure ends the loop without another model call.
+- The router advances past a retired upstream endpoint. Corrections continue from the working tier within the same deadline. Routed Gemma receives ordinary chat text and Sahaya validates its JSON response locally.
+- Fast Refresh review found read-only skill files, an in-memory job store, and renderer writes under the publisher's separate artifact volume. Usage accounting appends to gitignored `data/usage/*.jsonl` in the app checkout. The first production attempt recorded model tokens and neither attempt posted a renderer job. Exact HMR invalidation requires HPC timestamps or watcher events. Fast Refresh configuration remains intact.
+- Verified 314 AI, visualization, and scene-job tests. Three classroom PBL tests also fail at the deployed commit. The TypeScript comparison found no new diagnostics.

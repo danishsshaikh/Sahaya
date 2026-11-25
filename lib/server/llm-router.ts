@@ -32,6 +32,8 @@ export interface LLMRoutingPolicy {
   externalAllowed?: boolean;
   requestId?: string;
   onRouteEvent?: (event: LLMRouteTelemetry) => void;
+  /** Subsequent turns in the same task can continue on their last successful tier. */
+  continueFrom?: Pick<LLMRouteTelemetry, 'selectedRole' | 'fallbackReason'>;
   /** Server-owned budget shared by simulation HTML generation and its language repair. */
   simulationBudget?: {
     startedAtMs: number;
@@ -79,12 +81,15 @@ class RouterTimeout extends Error {
 /** Deliberately retain only classified causes, never SDK request/response bodies. */
 class RouterError extends Error {
   readonly statusCode?: number;
-  constructor(selected: Failure, primary?: Failure) {
-    super(`LLM provider failed (${selected.reason}).`, {
-      cause: { ...(primary ? { primary } : {}), selected },
+  constructor(
+    readonly failure: Failure,
+    primary?: Failure,
+  ) {
+    super(`LLM provider failed (${failure.reason}).`, {
+      cause: { ...(primary ? { primary } : {}), selected: failure },
     });
     this.name = 'LLMRouterError';
-    this.statusCode = selected.statusCode ?? (selected.retryable ? 503 : undefined);
+    this.statusCode = failure.statusCode ?? (failure.retryable ? 503 : undefined);
   }
 }
 
@@ -96,6 +101,7 @@ export function classifyRouterError(error: unknown, signal?: AbortSignal): Failu
       return { reason: 'unknown', retryable: false };
     }
     seen.add(value);
+    if (value instanceof RouterError) return value.failure;
     if (value instanceof RouterTimeout) return { reason: 'timeout', retryable: true };
     const e = value as Record<string, unknown>;
     if (e.name === 'AbortError') return { reason: 'abort', retryable: false };
@@ -395,7 +401,7 @@ export function createLLMRouter(
   let committed = false;
   let deadline: number | undefined = simulationDeadline;
   let firstFailure: Failure | undefined;
-  let fallbackReason: string | undefined;
+  let fallbackReason = policy.continueFrom?.fallbackReason;
   let epoch = b.epoch;
   let probing = false;
   let attempt = 0;
@@ -443,7 +449,10 @@ export function createLLMRouter(
     });
   };
   const choose = (after?: Role): Role | undefined => {
-    for (const role of roles.slice(after ? roles.indexOf(after) + 1 : 0)) {
+    const start = after
+      ? roles.indexOf(after) + 1
+      : Math.max(0, roles.indexOf(policy.continueFrom?.selectedRole ?? 'primary'));
+    for (const role of roles.slice(start)) {
       if (policy.externalAllowed === false && !endpointFor(role).local) {
         fallbackReason = 'local_only';
         continue;
@@ -506,10 +515,11 @@ export function createLLMRouter(
       options.abortSignal?.aborted ? sdkReason : error,
       cancelled ? (callerSignal?.aborted ? callerSignal : options.abortSignal) : undefined,
     );
-    // A missing upstream model/endpoint can be bypassed by another LLM tier.
-    // Keep generic HTTP classification and final-fallback 404s terminal.
+    // Missing or retired routes can be bypassed by another LLM tier.
+    // Keep generic HTTP classification and final-tier responses terminal.
     const failure =
-      (selected === 'primary' || selected === 'secondary') && classified.reason === 'http_404'
+      (selected === 'primary' || selected === 'secondary') &&
+      (classified.statusCode === 404 || classified.statusCode === 410)
         ? { ...classified, retryable: true }
         : classified;
     failed(failure);

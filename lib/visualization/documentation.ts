@@ -26,6 +26,7 @@ async function readBounded(response: Response) {
 
 /** The query is selected from a fixed vocabulary. Faculty content never leaves Sahaya. */
 export async function findManimDocumentation(topic: ReferenceTopic, signal: AbortSignal) {
+  signal.throwIfAborted();
   if (!Object.hasOwn(REFERENCE_TOPICS, topic)) return undefined;
   const hit = cache.get(topic);
   if (hit && hit.until > Date.now()) return { text: hit.text, cached: true };
@@ -44,7 +45,10 @@ export async function findManimDocumentation(topic: ReferenceTopic, signal: Abor
       redirect: 'error',
       cache: 'no-store',
     });
-    if (response.status !== 200) return undefined;
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {});
+      return undefined;
+    }
     const result = JSON.parse(await readBounded(response)) as {
       version?: { status?: string; served?: string };
       infoSnippets?: { pageId?: string; content?: string }[];
