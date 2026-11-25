@@ -34,6 +34,7 @@ class GeneratedScene(CueScene):
 const segments = [{ id: 'intro', narration: 'Here is the central maximum.' }];
 const submission = (code: string) =>
   JSON.stringify({ tool: 'submit_scene', source: code, segments });
+const annotated = (code: string) => `# sahaya-cues: ${JSON.stringify(segments)}\n${code}`;
 const verified = {
   version: '0.22.1/native-1',
   protocol: 4,
@@ -104,7 +105,10 @@ function streamCompletion(content: string, reasoning?: string, reasoningTokens?:
           },
         ]
       : []),
-    { ...base, choices: [{ index: 0, delta: { content }, finish_reason: null }] },
+    ...(content.match(/[\s\S]{1,37}/g) ?? []).map((part) => ({
+      ...base,
+      choices: [{ index: 0, delta: { content: part }, finish_reason: null }],
+    })),
     { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
     {
       ...base,
@@ -222,6 +226,90 @@ describe('native Manim agent', () => {
     expect(ai).toHaveBeenCalledTimes(3);
     expect(phases).toContain('code-repair');
   });
+
+  it('reserves repair turns after malformed envelopes and keeps the publisher syntax feedback', async () => {
+    const jobs: { source: string; segments: typeof segments; quality: string }[] = [];
+    const broken = source.replace('Create(Circle())', 'Create(Circle()');
+    configure(18898, (url, init) => {
+      if (url.endsWith('/ready')) return Response.json(verified);
+      const candidate = JSON.parse(String(init?.body));
+      jobs.push(candidate);
+      return candidate.source === broken
+        ? Response.json(
+            { issue: { code: 'syntax', line: 7, message: 'private-raw-error' } },
+            { status: 422 },
+          )
+        : Response.json(output);
+    });
+    const ai = vi
+      .fn<VisualizationAiCall>()
+      .mockResolvedValueOnce('{"tool":"submit_scene",')
+      .mockResolvedValueOnce(submission(broken))
+      .mockResolvedValueOnce('\x60\x60\x60python\n' + source)
+      .mockResolvedValueOnce(annotated(source));
+    await expect(generate(ai)).resolves.toHaveProperty('artifact');
+    expect(ai).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(ai.mock.calls[1][1]).formatFeedback.code).toBe('malformed_json');
+    const repair = JSON.parse(ai.mock.calls[3][1]);
+    expect(repair.priorSourceAndCues).toEqual({ source: broken, segments });
+    expect(repair.executionFeedback).toMatchObject({
+      code: 'syntax',
+      line: 7,
+      message: expect.stringContaining('indentation'),
+    });
+    expect(repair.formatFeedback.code).toBe('invalid_envelope');
+    expect(ai.mock.calls[3][0]).toContain('# sahaya-cues:');
+    expect(ai.mock.calls[3][1]).not.toContain('private-raw-error');
+    expect(jobs.map((job) => [job.source, job.segments, job.quality])).toEqual([
+      [broken, segments, 'preview'],
+      [annotated(source), segments, 'preview'],
+      [annotated(source), segments, 'standard'],
+    ]);
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim render evaluated',
+      expect.objectContaining({
+        failureCode: 'VISUALIZATION_PYTHON_VALIDATION',
+        issueCode: 'syntax',
+        issueLine: 7,
+      }),
+    );
+    expect(logs.info).toHaveBeenCalledWith(
+      'Manim tool request',
+      expect.objectContaining({
+        responseFormat: 'python',
+        extractionOutcome: 'submitted',
+        sourceBytes: Buffer.byteLength(annotated(source)),
+      }),
+    );
+    expect(JSON.stringify(logs.info.mock.calls)).not.toContain(broken);
+  });
+
+  it.each([false, true])(
+    'assembles source and cue metadata identically in buffered and streamed responses (stream=%s)',
+    async (stream) => {
+      const code = annotated(
+        source.replace('Circle()', String.raw`MathTex(r"\frac{a}{b}", r"\"label\"")`),
+      );
+      const response = 'Here is the module.\n\x60\x60\x60python\n' + code + '\x60\x60\x60\n';
+      const jobs: unknown[] = [];
+      configure(18899, (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/ready')) return Response.json(verified);
+        if (url.endsWith('/jobs')) {
+          jobs.push(JSON.parse(String(init?.body)));
+          return Response.json(output);
+        }
+        return stream ? streamCompletion(response) : completion(response);
+      });
+      localManim();
+      vi.stubEnv('MANIM_AGENT_STREAM', String(stream));
+      await expect(generate(createManimAiCall({ model: 'unrelated' }))).resolves.toHaveProperty(
+        'artifact',
+      );
+      expect(jobs).toHaveLength(2);
+      for (const job of jobs) expect(job).toMatchObject({ source: code, segments });
+    },
+  );
 
   it('stops the production three-reference sequence at the first reply after documentation closes', async () => {
     const fetch = configure(18887, (url) =>
@@ -732,10 +820,7 @@ describe('native Manim agent', () => {
 
   it.each([
     ['VISUALIZATION_PYTHON_MISSING', () => Promise.resolve('No source.')],
-    [
-      'VISUALIZATION_PYTHON_VALIDATION',
-      () => Promise.resolve('{"tool":"submit_scene","source":""}'),
-    ],
+    ['VISUALIZATION_RESPONSE_FORMAT', () => Promise.resolve('{"tool":"submit_scene","source":""}')],
     [
       'VISUALIZATION_MODEL_UNAVAILABLE',
       () => Promise.reject({ statusCode: 410, message: 'private provider error' }),

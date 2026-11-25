@@ -50,3 +50,8 @@
 ## Gemma reasoning exhaustion
 
 - The live Manim diagnostic spent three 3,072-token completions without submitting Python. The operator verified that the llama.cpp chat-template switch returned Python in a direct request. Manim now forwards that switch on marked tiers, retries exhaustion once with a smaller prompt, and reports missing reasoning counts separately from known zero. The Node diagnostic command includes the workspace import condition.
+
+## Python extraction and correction
+
+- Reproduced the deployed extractor rejecting valid raw and fenced Python, and forwarding literal escaped line separators from a double-escaped JSON source to Python's syntax check. Valid JSON envelopes round-tripped code with indentation, quotes and LaTeX intact. The original production replies were unavailable, so the exact cause of that source's syntax error remains unconfirmed.
+- Text authoring now puts cue metadata in a Python comment and preserves source bytes. Format and Python validation feedback remain separate during bounded corrections. The standalone synthetic diagnostic supports publisher-interpreter static checks, private capture and an optional verified preview.

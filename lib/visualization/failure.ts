@@ -1,3 +1,46 @@
+import type { RenderIssue } from './renderer';
+
+const repairMessages = {
+  syntax:
+    'Python syntax or indentation is invalid. Check indentation, quotes and bracket pairs around the reported line.',
+  source: 'Submit a complete Python module within the source limit.',
+  import: 'Use Manim, the Sahaya timing adapter, or supported numerical modules.',
+  operation:
+    'Use native Manim APIs and remove unsupported file, dynamic execution, or configuration operations.',
+  entryPoint:
+    'Define one GeneratedScene class with a construct method using a Sahaya cue base class.',
+  api: 'Check the named Manim method, class, or missing import.',
+  arguments: 'Check the Manim method arguments and types.',
+  latex: 'Check MathTex syntax, matching braces, and supported LaTeX commands.',
+  math: 'Check the function domain and numerical operation.',
+  cues: 'Use the same ordered named cues in the code and metadata, and render frames inside each cue.',
+  timing: 'Match the ordered cue IDs and measured narration durations.',
+  request: 'Check the Python module and cue metadata.',
+  runtime: 'Inspect the reported line and check Manim API usage.',
+  resources: 'Reduce scene geometry and memory use.',
+  encode: 'Simplify the scene so the publisher can encode the video.',
+  output: 'Check that the scene produces a valid video with frames in each cue.',
+  visual: 'Ensure the scene visibly changes and has sufficient contrast.',
+} as const;
+
+export function renderRepairFeedback(issue?: RenderIssue): RenderIssue {
+  const code =
+    issue?.code && Object.hasOwn(repairMessages, issue.code)
+      ? (issue.code as keyof typeof repairMessages)
+      : 'output';
+  const line = issue?.line;
+  const symbol = issue?.symbol;
+  return {
+    code,
+    message: repairMessages[code],
+    ...(typeof line === 'number' &&
+      Number.isSafeInteger(line) &&
+      line >= 1 &&
+      line <= 10000 && { line }),
+    ...(typeof symbol === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(symbol) && { symbol }),
+  };
+}
+
 export const VISUALIZATION_FAILURES = {
   VISUALIZATION_PLANNING:
     'The AI could not create a complete Manim scene. Retry this scene or simplify its animation instructions.',
@@ -9,6 +52,8 @@ export const VISUALIZATION_FAILURES = {
     'The AI kept requesting Manim references after reference retrieval closed and never submitted Python.',
   VISUALIZATION_PYTHON_MISSING:
     'The AI did not submit a complete Manim Python scene. Retry or simplify the animation instructions.',
+  VISUALIZATION_RESPONSE_FORMAT:
+    'The AI response could not be extracted as one Manim Python module with its cue metadata.',
   VISUALIZATION_PYTHON_VALIDATION:
     'The submitted Manim Python or cue metadata failed validation. Review the scene instructions and retry.',
   VISUALIZATION_MODEL_TIMEOUT:
